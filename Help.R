@@ -141,7 +141,7 @@ data_aggregate_APSE = function(data){
           group_by(abi, ndg) %>%
           summarize_at(col_single_sum, sum, na.rm = T) %>%
           ungroup() %>%
-          setNames(c('abi', 'ndg', paste0('SUM_', col_sum, '_', ft))),
+          setNames(c('abi', 'ndg', paste0('SUM_', col_single_sum, '_', ft))),
         by = c("abi", "ndg")
       )
     
@@ -229,7 +229,7 @@ data_aggregate_MURA = function(data){
       )
   }
   data_compact = data_compact %>% mutate_all(~replace(., is.na(.), 0))
-  if (sum(data %>% select(all_of(col_sum)), na.rm=T) != sum(data_compact[,-c(1:4)], na.rm=T)){cat('\n mismatch in total sum')}
+  if (abs(sum(data %>% select(all_of(col_sum)), na.rm=T) - sum(data_compact[,-c(1:4)], na.rm=T)) > 1e-5){cat('\n mismatch in total sum\n')}
   
   return(data_compact)
 }
@@ -384,4 +384,70 @@ create_aggregated_data = function(df_final_reference, file_type, save_report = F
       saveRDS(report_out, paste0('./Checkpoints/report_data/report_', file_type, '.rds'))
     }
   }
+}
+
+# Statistical analysis: numerical, data and character columns
+basicStatistics = function(data){
+
+  data=as.data.frame(data)
+  
+  # Get numerical columns
+  nums <- names(which(sapply(data, is.numeric)))
+  if (length(nums)>0){
+    StatNum = basicStats(data[, nums])
+    uni=as.numeric(summarise_all(data.frame(data[,nums]), n_distinct))
+    StatNum = rbind(UNIQUE_VALS=uni,StatNum)
+    rn=rownames(StatNum)
+    StatNum = data.frame(cbind(t(StatNum[-2,])));colnames(StatNum)=rn[-2] # remove num of observ
+    rownames(StatNum)=nums
+    StatNum$NAs=paste0(StatNum$NAs,' (',signif(StatNum$NAs/nrow(data)*100,digits=2),'%)')
+    StatNum$UNIQUE_VALS=as.character(StatNum$UNIQUE_VALS)
+    
+  } else {StatNum=data.frame()}
+  
+  # Get dates columns
+  dates <- names(which(sapply(data, is.Date)))
+  StatDat = c()
+  for (i in dates){
+    dat=data[,i];dat=dat[!is.na(dat)]
+    if (length(dat)>0){
+      # quantile for dates
+      dd = sort(dat)
+      leg=data.frame(val=unique(dd));leg$id=c(1:nrow(leg))
+      ind=match(dd,leg$val);aa=data.frame(val=dd,id=leg$id[ind])
+      qq=round(quantile(aa$id))
+      qq=aa[match(qq,aa$id),1]
+    } else {qq=rep('NA',5)}
+    StatDat=rbind(StatDat,c(paste0(nrow(data)-length(dat),' (',signif((nrow(data)-length(dat))/nrow(data)*100,digits=2),'%)'),
+                            as.character(qq), uniqueN(dat)))
+    
+  }
+  StatDat = as.data.frame(StatDat, stringsAsFactors = F)
+  if (length(StatDat)>0){StatDat=StatDat %>% setNames(c('NAs','MIN','25%','50%','75%','MAX', 'UNIQUE_VALS'));rownames(StatDat)=dates}
+  
+  # Get characters columns
+  chars <- names(which(sapply(data, is.character)))
+  StatChar = c()
+  for (i in chars){
+    cc=data[,i];cc=cc[!is.na(cc)]
+    if (length(unique(cc)) <= 50){line = paste(unique(cc), collapse = "|")
+    } else {line = paste("> 50 unique values",paste(unique(cc)[1:20], collapse = "|"))}
+    StatChar = rbind(StatChar,c(paste0(nrow(data)-length(cc),' (',signif((nrow(data)-length(cc))/nrow(data)*100,digits=2),'%)'),
+                                paste0(sum(cc == ''),' (',signif(sum(cc == '')/nrow(data)*100,digits=2),'%)'),
+                                length(unique(cc)),line))
+  }
+  if (length(StatChar)>0){StatChar = data.frame(StatChar, stringsAsFactors = F) %>% setNames(c('NAs', 'BLANKs', 'UNIQUE_VALS','VALUES'));rownames(StatChar)=chars}
+  Stat=bind_rows(StatNum,StatDat,StatChar)
+  Stat=cbind(VARIABLE=c(rownames(StatNum),rownames(StatDat),rownames(StatChar)),
+             TYPE=c(rep('NUMERIC',length(nums)),rep('DATE',length(dates)),rep('CHARACTER',length(chars))),
+             NUM_OSS=nrow(data),Stat) %>%
+    select(VARIABLE, TYPE, NUM_OSS, UNIQUE_VALS, NAs, BLANKs, everything())
+  
+  final=data.frame(VARIABLE=colnames(data))
+  final = final %>% left_join(Stat, by = "VARIABLE")
+  final = as.matrix(final)
+  final[is.na(final)]=''
+  final = as.data.frame(final)
+  
+  return(final)
 }
