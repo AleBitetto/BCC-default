@@ -125,7 +125,9 @@ data_aggregate_APSE = function(data){
                   MACRO = c(rep('EXPORT', 3), rep('IMPORT', 3)), stringsAsFactors = F)
   
   data = data %>%
-    mutate(COD_FT_RAPPORTO = gsub('\'', '', COD_FT_RAPPORTO))
+    mutate(COD_FT_RAPPORTO = gsub('\'', '', COD_FT_RAPPORTO)) %>%
+    rename(APSE1854 = APSE_1854,
+           APSENUMRAP = APSE_NUMRAP)
   
   data_sum = data %>%
     select(abi, ndg) %>%
@@ -243,11 +245,29 @@ data_aggregate_RISCHIO = function(data){
     mutate_at(col_char, ~replace(.,. == '\'N', 0)) %>%
     mutate_at(col_char, ~replace(.,. == '\'S', 1)) %>%
     mutate_at(col_num, ~replace(., is.na(.), 0)) %>%
+    mutate_at(col_char, as.numeric) %>%
     select('abi', 'ndg', all_of(c(col_num, col_char))) %>%
     setNames(c('abi', 'ndg', paste0('RAW_', c(col_num, col_char)))) 
   
   return(data_compact)
 }
+
+data_aggregate_CR = function(data){
+  
+  data_compact = data %>%
+    select(-COD_FT_RAPPORTO, -DATA_RIFERIMENTO) %>%
+    mutate(COD_DATO = gsub('\'', '', COD_DATO),
+           COD_PRODOTTO = gsub(' ', '', COD_PRODOTTO),
+           COD_DATO = paste0('RAW_CR', COD_DATO)) %>%
+    filter(COD_PRODOTTO == '\'CR') %>%
+    select(-COD_PRODOTTO) %>%
+    # bind_rows(data.frame(abi='8542', ndg = '0000000000000030', COD_DATO = 'RAW_CR9513', VALORE = -11, stringsAsFactors = )) %>%
+    setDT() %>%
+    dcast(abi + ndg ~ COD_DATO, value.var='VALORE')
+
+  return(data_compact)
+}
+
 
 # create aggregated data and report for CSD
 create_aggregated_data = function(df_final_reference, file_type, save_report = F){
@@ -256,7 +276,7 @@ create_aggregated_data = function(df_final_reference, file_type, save_report = F
   summary_file_rows = readRDS('./Checkpoints/summary_file_rows.rds')
   forme_tecniche = read.csv2('./Coding_tables/Forme_tecniche.csv', stringsAsFactors=FALSE) %>%
     mutate(COD_FT_RAPPORTO = paste0('\'', COD_FT_RAPPORTO))
-  
+
   file_to_load = summary_file_rows %>%
     filter(unique_file_name == paste0(file_type, '.CSV')) %>%
     filter(matched_folder == 'YES') %>%
@@ -281,6 +301,8 @@ create_aggregated_data = function(df_final_reference, file_type, save_report = F
     aggregation_function = data_aggregate_CRFI
   } else if (file_type == 'RISCHIO'){
     aggregation_function = data_aggregate_RISCHIO
+  } else if (file_type == 'CR'){
+    aggregation_function = data_aggregate_CR
   }
   
   report_out = c()
@@ -289,7 +311,6 @@ create_aggregated_data = function(df_final_reference, file_type, save_report = F
   report_row_count = 0
   list_ind = 0
   compact_row_count = 0
-  
   start_time = Sys.time()
   tot_i = nrow(file_to_load)
   for (i in 1:tot_i){
@@ -298,24 +319,24 @@ create_aggregated_data = function(df_final_reference, file_type, save_report = F
     path = file_to_load$path[i]
     bank_abi = file_to_load$Abi[i]
     file = file_to_load$file[i]
-    
+
     # read and format data
     data = df_final_reference %>%
       select(abi, ndg) %>%
       filter(abi == bank_abi) %>%
       left_join(
         read.csv2(path, stringsAsFactors=FALSE) %>%
-          mutate(COD_UO = '.') %>%    # used only for RISCHIO.CSV
+          mutate(COD_UO = '.') %>%    # used only for RISCHIO.CSV and CR.CSV
           select(-COD_ABI, -COD_UO) %>%
           mutate(COD_NAG = gsub('\'', '', COD_NAG),
                  abi = bank_abi) %>%
           rename(ndg = COD_NAG), by = c("abi", "ndg")) %>%
       filter(!is.na(DATA_RIFERIMENTO)) %>%
       mutate(DATA_RIFERIMENTO = as.Date(gsub('\'', '', DATA_RIFERIMENTO), format = '%Y%m%d'))
-    if (file_type != 'RISCHIO'){
+    if (!file_type %in% c('RISCHIO', 'CR')){
       data = data %>% left_join(forme_tecniche, by = "COD_FT_RAPPORTO")
     } else {
-      data$COD_FT_RAPPORTO = forme_tecniche$COD_FT_RAPPORTO[1]   # random one
+      data$COD_FT_RAPPORTO = forme_tecniche$COD_FT_RAPPORTO[1]   # random one - used to run report anyway
       data$FT_RAPPORTO = 'cc'   # random one
     }
     
@@ -354,21 +375,19 @@ create_aggregated_data = function(df_final_reference, file_type, save_report = F
     data_compact_list[[list_ind]] = data_compact
     
     if (i %% 100 == 0 | i == tot_i){
-      data_compact_out = rbindlist(c(list(data_compact_out), data_compact_list)) %>% as.data.frame()
+      data_compact_out = rbindlist(c(list(data_compact_out), data_compact_list), fill=TRUE) %>% as.data.frame()
       data_compact_list = list()
       list_ind = 0
     }
     
   } # i
-  tot_diff=seconds_to_period(difftime(Sys.time(), start_time, units='secs'))
-  cat('\n Total elapsed time:', paste0(lubridate::hour(tot_diff), 'h:', lubridate::minute(tot_diff), 'm:', round(lubridate::second(tot_diff))))
   
   # save aggregated data
   if (data_compact_out %>% select(abi, ndg, year, month) %>% uniqueN() != nrow(data_compact_out)){
     cat('\n\n ###### error in unique records in data_compact_out')
   }
   saveRDS(data_compact_out, paste0('./Checkpoints/compact_data/compact_', file_type, '.rds'))
-  
+
   # save report data
   if (save_report){
     report_out = report_out %>%
@@ -384,70 +403,100 @@ create_aggregated_data = function(df_final_reference, file_type, save_report = F
       saveRDS(report_out, paste0('./Checkpoints/report_data/report_', file_type, '.rds'))
     }
   }
+  
+  tot_diff=seconds_to_period(difftime(Sys.time(), start_time, units='secs'))
+  cat('\n Total elapsed time:', paste0(lubridate::hour(tot_diff), 'h:', lubridate::minute(tot_diff), 'm:', round(lubridate::second(tot_diff))))
 }
 
 # Statistical analysis: numerical, data and character columns
 basicStatistics = function(data){
 
-  data=as.data.frame(data)
-  
+  data=as.data.frame(data, stringsAsFactors = F)
+
   # Get numerical columns
   nums <- names(which(sapply(data, is.numeric)))
   if (length(nums)>0){
-    StatNum = basicStats(data[, nums])
-    uni=as.numeric(summarise_all(data.frame(data[,nums]), n_distinct))
-    StatNum = rbind(UNIQUE_VALS=uni,StatNum)
-    rn=rownames(StatNum)
-    StatNum = data.frame(cbind(t(StatNum[-2,])));colnames(StatNum)=rn[-2] # remove num of observ
-    rownames(StatNum)=nums
-    StatNum$NAs=paste0(StatNum$NAs,' (',signif(StatNum$NAs/nrow(data)*100,digits=2),'%)')
-    StatNum$UNIQUE_VALS=as.character(StatNum$UNIQUE_VALS)
-    
+    StatNum = c()
+    for (col in nums){
+      dd = data[, col]
+      perc = quantile(dd, c(0.01, 0.05, 0.95, 0.99), na.rm = T)
+      StatNum = StatNum %>% bind_rows(
+        data.frame(UNIQUE_VALS = uniqueN(dd),
+                   NAs = sum(is.na(dd)),
+                   Min = min(dd, na.rm = T),
+                   Max = max(dd, na.rm = T),
+                   Mean = mean(dd, na.rm = T),
+                   StDev = sd(dd, na.rm = T),
+                   Median = median(dd, na.rm = T),
+                   Perc_1 = perc[1],
+                   Perc_5 = perc[2],
+                   Perc_95 = perc[3],
+                   Perc_99 = perc[4],
+                   Sum = sum(dd, na.rm = T), stringsAsFactors = F)
+      )
+    }
+    StatNum = StatNum %>%
+      mutate(NAs = paste0(NAs,' (',signif(NAs/nrow(data)*100,digits=2),'%)')) %>%
+      mutate_all(as.character) %>%
+      `rownames<-`(nums)
   } else {StatNum=data.frame()}
   
   # Get dates columns
   dates <- names(which(sapply(data, is.Date)))
-  StatDat = c()
-  for (i in dates){
-    dat=data[,i];dat=dat[!is.na(dat)]
-    if (length(dat)>0){
-      # quantile for dates
-      dd = sort(dat)
-      leg=data.frame(val=unique(dd));leg$id=c(1:nrow(leg))
-      ind=match(dd,leg$val);aa=data.frame(val=dd,id=leg$id[ind])
-      qq=round(quantile(aa$id))
-      qq=aa[match(qq,aa$id),1]
-    } else {qq=rep('NA',5)}
-    StatDat=rbind(StatDat,c(paste0(nrow(data)-length(dat),' (',signif((nrow(data)-length(dat))/nrow(data)*100,digits=2),'%)'),
-                            as.character(qq), uniqueN(dat)))
-    
-  }
-  StatDat = as.data.frame(StatDat, stringsAsFactors = F)
-  if (length(StatDat)>0){StatDat=StatDat %>% setNames(c('NAs','MIN','25%','50%','75%','MAX', 'UNIQUE_VALS'));rownames(StatDat)=dates}
+  if (length(dates)>0){
+    StatDat = c()
+    for (col in dates){
+      dd = data[, col]
+      StatDat = StatDat %>% bind_rows(
+        data.frame(UNIQUE_VALS = uniqueN(dd),
+                   NAs = sum(is.na(dd)),
+                   Min = min(dd, na.rm = T),
+                   Max = max(dd, na.rm = T),
+                   Median = median(dd, na.rm = T), stringsAsFactors = F) %>%
+          bind_cols(
+            data.frame(val = sort(dd), stringsAsFactors = F) %>%
+              filter(!is.na(val)) %>%
+              mutate(POS = 1:n()) %>%
+              filter(POS %in% round(n() * c(0.01, 0.05, 0.95, 0.99))) %>%
+              mutate(POS = paste0('Perc_', c(1, 5, 95, 99))) %>%
+              mutate(group = 1) %>%
+              spread(POS, val) %>%
+              select(-group)
+          )
+      )
+    }
+    StatDat = StatDat %>%
+      mutate(NAs = paste0(NAs,' (',signif(NAs/nrow(data)*100,digits=2),'%)')) %>%
+      mutate_all(as.character)
+    rownames(StatDat) = dates
+  } else {StatDat=data.frame()}
   
   # Get characters columns
   chars <- names(which(sapply(data, is.character)))
-  StatChar = c()
-  for (i in chars){
-    cc=data[,i];cc=cc[!is.na(cc)]
-    if (length(unique(cc)) <= 50){line = paste(unique(cc), collapse = "|")
-    } else {line = paste("> 50 unique values",paste(unique(cc)[1:20], collapse = "|"))}
-    StatChar = rbind(StatChar,c(paste0(nrow(data)-length(cc),' (',signif((nrow(data)-length(cc))/nrow(data)*100,digits=2),'%)'),
-                                paste0(sum(cc == ''),' (',signif(sum(cc == '')/nrow(data)*100,digits=2),'%)'),
-                                length(unique(cc)),line))
-  }
-  if (length(StatChar)>0){StatChar = data.frame(StatChar, stringsAsFactors = F) %>% setNames(c('NAs', 'BLANKs', 'UNIQUE_VALS','VALUES'));rownames(StatChar)=chars}
+  if (length(chars)>0){
+    StatChar = c()
+    for (i in chars){
+      cc=data[,i];cc=cc[!is.na(cc)]
+      if (length(unique(cc)) <= 50){line = paste(unique(cc), collapse = "|")
+      } else {line = paste("> 50 unique values",paste(unique(cc)[1:20], collapse = "|"))}
+      StatChar = rbind(StatChar,c(paste0(nrow(data)-length(cc),' (',signif((nrow(data)-length(cc))/nrow(data)*100,digits=2),'%)'),
+                                  paste0(sum(cc == ''),' (',signif(sum(cc == '')/nrow(data)*100,digits=2),'%)'),
+                                  length(unique(cc)),line))
+    }
+    if (length(StatChar)>0){StatChar = data.frame(StatChar, stringsAsFactors = F) %>% setNames(c('NAs', 'BLANKs', 'UNIQUE_VALS','VALUES'));rownames(StatChar)=chars}
+  } else {StatChar=data.frame()}
+  
   Stat=bind_rows(StatNum,StatDat,StatChar)
   Stat=cbind(VARIABLE=c(rownames(StatNum),rownames(StatDat),rownames(StatChar)),
              TYPE=c(rep('NUMERIC',length(nums)),rep('DATE',length(dates)),rep('CHARACTER',length(chars))),
              NUM_OSS=nrow(data),Stat) %>%
     select(VARIABLE, TYPE, NUM_OSS, UNIQUE_VALS, NAs, BLANKs, everything())
   
-  final=data.frame(VARIABLE=colnames(data))
+  final=data.frame(VARIABLE=colnames(data), stringsAsFactors = F)
   final = final %>% left_join(Stat, by = "VARIABLE")
   final = as.matrix(final)
   final[is.na(final)]=''
-  final = as.data.frame(final)
+  final = as.data.frame(final, stringsAsFactors = F)
   
   return(final)
 }
