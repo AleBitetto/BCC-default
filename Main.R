@@ -3,6 +3,7 @@ memory.limit(size=1000000000000000000)
 library(readxl)
 library(haven)
 library(lubridate)
+library(stringr)
 library(data.table)
 library(dplyr)
 library(tidyverse)
@@ -1525,6 +1526,20 @@ reload_final_dataset = T  # reload df_final
       # if (sum(is.na(df_CR)) > 0){cat('\n\n ###### NA in df_CR')}
       cat('Done')
       
+      # evaluate perimeter for abi, ndg, year (to be used to assess bilanci and anagrafica missing)
+      # df_reference_available_years = c()
+      # for (df_t in c('AI_CC', 'AI_PCSBF', 'AI_ANFA', 'AI_POFI', 'AI_MURA', 'AI_APSE', 'AI_CRFI', 'RISCHIO', 'CR')){
+      #   eval(parse(text = paste0('df = df_', df_t)))
+      #   df_reference_available_years = df_reference_available_years %>%
+      #     bind_rows(df %>%
+      #                 select(abi, ndg, year) %>%
+      #                 unique())
+      #   rm(df)
+      # }
+      # df_reference_available_years = df_reference_available_years %>% unique()
+      # saveRDS(df_reference_available_years, './Checkpoints/df_reference_available_years.rds')
+      df_reference_available_years = readRDS('./Checkpoints/df_reference_available_years.rds')
+      
       # anagrafica CRIF
       {
         cat('\nReloading ANAGRAFICA CRIF...')
@@ -1537,8 +1552,8 @@ reload_final_dataset = T  # reload df_final
           rename(ANAG_socio_NUM = ANAG_socio) %>%
           left_join(coding_COD_TIPO_CLIENTE, by = 'ANAG_cod_tipo_cliente') %>%
           left_join(coding_SOCIO, by = 'ANAG_socio_NUM') %>%
-          select(-data_rif, -ANAG_data_cliente, -starts_with('ANAG_flag'), -chiave_comune, -ANAG_cod_tipo_cliente, -ANAG_socio_NUM,
-                 -starts_with('segmento_'), -ANAG_segmento, -ANAG_tipo_ndg, -ANAG_cod_tipo_ndg, -FLAG_Multibank) %>%
+          select(-data_rif, -ANAG_data_cliente, -ANAG_flag_def_calib, -ANAG_flag_def_calib_notec, -chiave_comune, -ANAG_cod_tipo_cliente,
+                 -ANAG_socio_NUM, -starts_with('segmento_'), -ANAG_segmento, -ANAG_tipo_ndg, -ANAG_cod_tipo_ndg, -FLAG_Multibank) %>%
           rename(ANAG_tipo_ndg = ANAG_tipo_ndg_RECOVER) %>%
           select(abi, ndg, year, everything())
         if (df_CRIF_anag %>% select(abi, ndg, year) %>% uniqueN() != nrow(df_CRIF_anag)){
@@ -1711,30 +1726,41 @@ reload_final_dataset = T  # reload df_final
           select(-BILA_strutbil_NUM, -BILA_natura_NUM, -BILA_schemaril_NUM)
         rm(coding_strutbil, coding_natura, coding_schemaril, common_column)
         
+        # check availability of bilanci
         # list_abi_ndg_year_CRIF_bila = df_CRIF_bila %>%
-        #   left_join(df_final_reference %>% select(abi, ndg, segmento_CSD, segmento_CRIF), by = c("abi", "ndg"))
+        #   select(abi, ndg, year) %>%
+        #   left_join(df_final_reference %>% select(abi, ndg, segmento_CSD, segmento_CRIF), by = c("abi", "ndg")) %>%
+        #   left_join(df_reference_available_years %>%
+        #               group_by(abi, ndg) %>%
+        #               summarize(Expected_available_years = n(),
+        #                         Expected_available_years_val = paste0(sort(year), collapse = '|'), .groups = 'drop'), by = c("abi", "ndg")) %>%
+        #   filter(!is.na(Expected_available_years))  # abi+ndg in df_final_reference and df_CRIF_bila but with no other values in al df_AI_*, etc (~100)
         # list_abi_ndg_year_CRIF_bila = list_abi_ndg_year_CRIF_bila %>%
-        #   select(segmento_CSD, abi, ndg, year) %>%
         #   rename(Segmento = segmento_CSD) %>%
         #   group_by(Segmento, abi, ndg) %>%
-        #   summarise(YEAR = uniqueN(year),
-        #             MISSING = paste0(setdiff(c(2012:2014), year), collapse = '|'), .groups = 'drop') %>%
+        #   summarise(Bilanci_available_years = uniqueN(year),
+        #             Expected_available_years = unique(Expected_available_years),
+        #             MISSING = paste0(setdiff(strsplit(Expected_available_years_val, '\\|')[[1]], year), collapse = '|'),.groups = 'drop') %>%
         #   mutate(Fonte = 'CSD') %>%
         #   bind_rows(list_abi_ndg_year_CRIF_bila %>%
-        #               select(segmento_CRIF, abi, ndg, year) %>%
         #               rename(Segmento = segmento_CRIF) %>%
         #               group_by(Segmento, abi, ndg) %>%
-        #               summarise(YEAR = uniqueN(year),
-        #                         MISSING = paste0(setdiff(c(2012:2014), year), collapse = '|'), .groups = 'drop') %>%
-        #               mutate(Fonte = 'CRIF'))
+        #               summarise(Bilanci_available_years = uniqueN(year),
+        #                         Expected_available_years = unique(Expected_available_years),
+        #                         MISSING = paste0(setdiff(strsplit(Expected_available_years_val, '\\|')[[1]], year), collapse = '|'),.groups = 'drop') %>%
+        #               mutate(Fonte = 'CRIF')) %>%
+        #   mutate(match = Expected_available_years == Bilanci_available_years) %>%
+        #   mutate(Bilanci_available_years = ifelse(match, 'Matched', Bilanci_available_years),
+        #          Expected_available_years = ifelse(match, 'Matched', Expected_available_years))
         # saveRDS(list_abi_ndg_year_CRIF_bila, './Checkpoints/list_abi_ndg_year_CRIF_bila.rds')
         list_abi_ndg_year_CRIF_bila = readRDS('./Checkpoints/list_abi_ndg_year_CRIF_bila.rds')
         summary_list_abi_ndg_year_CRIF_bila = c()
-        for (fonte in c('CSD', 'CRIF')){
+        for (fonte in c('CRIF', 'CSD')){
           summary_list_abi_ndg_year_CRIF_bila = summary_list_abi_ndg_year_CRIF_bila %>% bind_rows(
             list_abi_ndg_year_CRIF_bila %>%
               filter(Fonte == fonte) %>%
-              group_by(Fonte, Segmento, YEAR) %>%
+              group_by(Fonte, Segmento, Expected_available_years, Bilanci_available_years) %>%
+              mutate(Expected_available_years = gsub('Matched', '0Matched', Expected_available_years)) %>%
               summarise(Tot_ABI_NDG = n(),
                         Missing_2012 = sum(MISSING == '2012'),
                         Missing_2013 = sum(MISSING == '2013'),
@@ -1742,18 +1768,19 @@ reload_final_dataset = T  # reload df_final
                         Missing_2012_13 = sum(MISSING == '2012|2013'),
                         Missing_2012_14 = sum(MISSING == '2012|2014'),
                         Missing_2013_14 = sum(MISSING == '2013|2014'), .groups = 'drop') %>%
+              mutate(Expected_available_years = gsub('0Matched', 'Matched', Expected_available_years)) %>%
               group_by(Fonte, Segmento) %>%
-              mutate(Segmento_Missing_Perc = sum(Tot_ABI_NDG[YEAR != 3])) %>%
+              mutate(Segmento_Missing_Perc = sum(Tot_ABI_NDG[Expected_available_years != Bilanci_available_years])) %>%
               ungroup() %>%
               mutate('Tot_ABI_NDG_Perc' = paste0(round(Tot_ABI_NDG / sum(Tot_ABI_NDG) * 100), '%'),
                      'Segmento_Missing_Perc' = paste0(round(Segmento_Missing_Perc / sum(Tot_ABI_NDG) * 100), '%')) %>%
-              rename(Available_years = YEAR) %>%
               mutate_if(is.numeric, ~format(., big.mark=",")) %>%
-              mutate(N = 1:n(),
-                     Segmento = ifelse(N %% 3 != 1, '', Segmento),
-                     Segmento_Missing_Perc = ifelse(N %% 3 != 1, '', Segmento_Missing_Perc))
+              group_by(Fonte, Segmento) %>%
+              mutate(N = 1:n()) %>%
+              mutate(Segmento = ifelse(N != 1, '', Segmento),
+                     Segmento_Missing_Perc = ifelse(N != 1, '', Segmento_Missing_Perc))
           ) %>%
-            select(Fonte, Segmento, Segmento_Missing_Perc, Available_years, Tot_ABI_NDG, Tot_ABI_NDG_Perc, everything(), -N)
+            select(Fonte, Segmento, Segmento_Missing_Perc, Expected_available_years, Bilanci_available_years, Tot_ABI_NDG, Tot_ABI_NDG_Perc, everything(), -N)
         }
         write.table(summary_list_abi_ndg_year_CRIF_bila, './Checks/03_CRIF_bilanci_YEAR.csv', sep = ';', row.names = F, append = F)
         rm(list_abi_ndg_year_CRIF_bila, summary_list_abi_ndg_year_CRIF_bila)
@@ -1763,7 +1790,237 @@ reload_final_dataset = T  # reload df_final
           write.table(basicStatistics(df_CRIF_bila), './Stats/08_df_CRIF_bila_preJoin_stats.csv', sep = ';', row.names = F, append = F)
         }
         cat('Done')
-      } 
+      }
+      
+      # Tot_Attivo and Tot_Valore_Produzione from additional bilanci CRIF
+      {
+        # abi+ndg+year with both variable available only
+        # Value available for 1 year only  are repeated for all year
+        # value available for >=2 year are both averaged or linearly extrapolated
+        # 2 version of "filled" variables are provided -> interpolation creates negative values, discarded
+        
+        cat('\nTot_Attivo and Tot_Valore_Produzione from BILANCI CRIF...')
+        
+        # take varT012 and varT051 from cebi_indicatori_2008_2014.dta and keep only abi+ndg with both available.
+        df_bilanci_CEBI = read_dta("./Distance_to_Default/Data/cebi_indicatori_2008_2014.dta") %>%
+          as.data.frame(stringsAsFactors = F) %>%
+          mutate_all(function(x) { attributes(x) <- NULL; x }) %>%
+          mutate(abi = as.character(as.numeric(cod_abi)),
+                 cod_nag = str_pad(cod_nag, 16, pad = "0"),
+                 anno = as.numeric(anno)) %>%
+          rename(ndg = cod_nag,
+                 year = anno,
+                 Tot_Valore_Produzione = varT051,
+                 Tot_Attivo = varT012) %>%
+          mutate(Tot_Attivo = Tot_Attivo * 1000,
+                 Tot_Valore_Produzione = Tot_Valore_Produzione * 1000) %>%
+          select(abi, ndg, year, Tot_Attivo, Tot_Valore_Produzione, tipo_bil, data_chiusura) %>%
+          group_by(abi, ndg, year) %>%
+          mutate(dup = n()) %>%
+          ungroup()
+        
+        tot_abi_ndg = df_bilanci_CEBI %>% select(abi, ndg) %>% uniqueN()
+        # for multiple tipo_bil, take '00', for single tipo_bil take last available data_chiusura
+        duplicated_year = df_bilanci_CEBI %>%
+          filter(dup > 1) %>%
+          group_by(abi, ndg, year) %>%
+          mutate(dup = uniqueN(tipo_bil))
+        solved_duplicates = duplicated_year %>%
+          filter(dup == 2) %>%
+          filter(tipo_bil == '00') %>%
+          ungroup() %>% bind_rows(
+            duplicated_year %>%
+              filter(dup == 1) %>%
+              group_by(abi, ndg, year) %>%
+              arrange(desc(data_chiusura)) %>%
+              filter(row_number() == 1) %>%
+              ungroup()
+          )
+        
+        df_bilanci_CEBI = df_bilanci_CEBI %>%
+          filter(dup == 1) %>%
+          bind_rows(
+            solved_duplicates
+          ) %>%
+          select(-tipo_bil, -data_chiusura, -dup)
+        
+        if (df_bilanci_CEBI %>% select(abi, ndg) %>% uniqueN() != tot_abi_ndg){cat('\n\n ###### something wrong in duplicates of df_bilanci_CEBI')}
+        df_bilanci_CEBI = df_bilanci_CEBI %>%
+          group_by(abi, ndg) %>%
+          mutate(avail_Tot_Attivo = sum(!is.na(Tot_Attivo)),
+                 avail_Tot_Valore_Produzione = sum(!is.na(Tot_Valore_Produzione))) %>%
+          filter(avail_Tot_Attivo != 0) %>%
+          filter(avail_Tot_Valore_Produzione != 0) %>%
+          select(-avail_Tot_Attivo, -avail_Tot_Valore_Produzione)
+        if (df_bilanci_CEBI %>% select(abi, ndg, year) %>% uniqueN() != nrow(df_bilanci_CEBI)){cat('\n\n ###### duplicates in df_bilanci_CEBI')}
+        
+        # take values for NON-CEBI from bildati_noncebi.dta
+        df_bilanci_NONCEBI_ref = read_dta("./Data/CRIF/bildati_noncebi.dta") %>%
+          as.data.frame(stringsAsFactors = F) %>%
+          mutate_all(function(x) { attributes(x) <- NULL; x }) %>%
+          mutate(abi = as.character(as.numeric(cod_abi)),
+                 cod_nag = str_pad(cod_nag, 16, pad = "0"),
+                 anno = as.numeric(anno)) %>%
+          rename(ndg = cod_nag,
+                 year = anno) %>%
+          filter(cod_de %in% c('CIBA', 'TANA', 'TSEM', 'TSEA', 'TSES')) %>%
+          select(abi, ndg, year, attributo, cod_de, k007, k283, d205, d044, s200, s012, d206, d019) %>%
+          mutate(tot_na = apply(., 1, function(x) sum(is.na(x)))) %>%
+          filter(tot_na < 8) %>%
+          group_by(abi, ndg, year) %>%
+          mutate(dup = n()) %>%
+          ungroup()
+        if (df_bilanci_NONCEBI_ref %>% select(abi, ndg, year) %>% uniqueN() != nrow(df_bilanci_NONCEBI_ref)){
+          cat('\n\n ###### duplicates in df_bilanci_NONCEBI_ref')}
+        
+        variable_mapping = read.csv('./Coding_tables/bilanci_NonCEBI.csv', sep=';', stringsAsFactors = F)
+        df_bilanci_NONCEBI = c()
+        Tot_Attivo_check = Tot_Prod_check = 0
+        for (ind in 1:nrow(variable_mapping)){
+          var_attivo = variable_mapping$Tot_Attivo[ind]
+          var_prod = variable_mapping$Tot_Valore_Produzione[ind]
+          df_bilanci_NONCEBI = df_bilanci_NONCEBI %>% bind_rows(
+            df_bilanci_NONCEBI_ref %>%
+              filter(cod_de == variable_mapping$cod_de[ind]) %>%
+              group_by(abi, ndg, year, cod_de) %>%
+              summarize(Tot_Attivo = ifelse(length((!!sym(var_attivo))[!is.na(!!sym(var_attivo))]) > 0, (!!sym(var_attivo))[!is.na(!!sym(var_attivo))], NA),
+                        Tot_Valore_Produzione = ifelse(length((!!sym(var_prod))[!is.na(!!sym(var_prod))]) > 0, (!!sym(var_prod))[!is.na(!!sym(var_prod))], NA), .groups = 'drop')
+          )
+          Tot_Attivo_check = Tot_Attivo_check + df_bilanci_NONCEBI_ref %>% filter(cod_de == variable_mapping$cod_de[ind]) %>% select(all_of(var_attivo)) %>% sum(na.rm = T)
+          Tot_Prod_check = Tot_Prod_check + df_bilanci_NONCEBI_ref %>% filter(cod_de == variable_mapping$cod_de[ind]) %>% select(all_of(var_prod)) %>% sum(na.rm = T)
+        }
+        if (df_bilanci_NONCEBI %>% select(abi, ndg, year) %>% uniqueN() != df_bilanci_NONCEBI_ref %>% select(abi, ndg, year) %>% uniqueN()){
+          cat('\n\n ###### mismatch in df_bilanci_NONCEBI')}
+        if (Tot_Attivo_check != sum(df_bilanci_NONCEBI$Tot_Attivo, na.rm=T)){cat('\n\n ###### Tot_Attivo mismatch in df_bilanci_NONCEBI')}
+        if (Tot_Prod_check != sum(df_bilanci_NONCEBI$Tot_Valore_Produzione, na.rm=T)){cat('\n\n ###### Tot_Valore_Produzione mismatch in df_bilanci_NONCEBI')}
+        df_bilanci_NONCEBI = df_bilanci_NONCEBI %>%
+          group_by(abi, ndg) %>%
+          mutate(avail_Tot_Attivo = sum(!is.na(Tot_Attivo)),
+                 avail_Tot_Valore_Produzione = sum(!is.na(Tot_Valore_Produzione))) %>%
+          filter(avail_Tot_Attivo != 0) %>%
+          filter(avail_Tot_Valore_Produzione != 0) %>%
+          select(-avail_Tot_Attivo, -avail_Tot_Valore_Produzione, -cod_de)
+        
+        # merge CEBI and NONCEBI
+        df_bilanci_merge = df_bilanci_CEBI %>%
+          bind_rows(df_bilanci_NONCEBI) %>%
+          filter(year <= 2014)
+        
+        # keep 1,000 <= Tot_Attivo, Tot_Valore_Produzione <= 500,000,000
+        abi_ndg_to_remove = df_bilanci_merge %>%
+          filter(Tot_Attivo < 1000 | Tot_Attivo > 5e8 | Tot_Valore_Produzione < 1000 | Tot_Valore_Produzione > 5e8) %>%
+          select(abi, ndg) %>%
+          unique() %>%
+          mutate(mm = paste0(abi, ndg)) %>%
+          pull(mm)
+        df_bilanci_merge = df_bilanci_merge %>%
+          mutate(mm = paste0(abi, ndg)) %>%
+          left_join(data.frame(mm = abi_ndg_to_remove, remove = 'YES', stringsAsFactors = F), by = "mm") %>%
+          filter(is.na(remove)) %>%
+          select(-mm, -remove)
+        
+        # evaluate average or linear interpolation
+        interp_data = df_bilanci_merge %>%
+          group_by(abi, ndg) %>%
+          summarize(min_year = min(c(2012, year)),
+                    max_year = max(c(year, 2014)),.groups = 'drop') %>%
+          nest(year = c(min_year, max_year)) %>%
+          mutate(year = map(year, ~seq(unique(.x$min_year), unique(.x$max_year), 1))) %>%
+          unnest(year) %>%
+          left_join(df_bilanci_merge, by = c("abi", "ndg", "year")) %>%
+          group_by(abi, ndg) %>%
+          mutate(avail_Tot_Attivo = sum(!is.na(Tot_Attivo)),
+                 avail_Tot_Valore_Produzione = sum(!is.na(Tot_Valore_Produzione))) %>%
+          group_by(abi, ndg) %>%
+          mutate(Tot_Attivo_2 = case_when(
+            avail_Tot_Attivo == 1 ~ max(Tot_Attivo, na.rm = T),
+            TRUE ~ Tot_Attivo
+          )) %>%
+          group_by(abi, ndg) %>%
+          mutate(Tot_Valore_Produzione_2 = case_when(
+            avail_Tot_Valore_Produzione == 1 ~ max(Tot_Valore_Produzione, na.rm = T),
+            TRUE ~ Tot_Valore_Produzione
+          )) %>%
+          
+          group_by(abi, ndg) %>%
+          mutate(Tot_Attivo_avg = mean(Tot_Attivo, na.rm = T),
+                 Tot_Valore_Produzione_avg = mean(Tot_Valore_Produzione, na.rm = T)) %>%
+          ungroup() %>%
+          mutate(Tot_Attivo_avg = ifelse(is.na(Tot_Attivo), Tot_Attivo_avg, Tot_Attivo),
+                 Tot_Valore_Produzione_avg = ifelse(is.na(Tot_Valore_Produzione), Tot_Valore_Produzione_avg, Tot_Valore_Produzione)) %>%
+          
+          group_by(abi, ndg) %>%
+          arrange(year) %>%
+          mutate(Tot_Attivo_interp = Hmisc::approxExtrap(x=year[!is.na(Tot_Attivo_2)],
+                                                         y=Tot_Attivo_2[!is.na(Tot_Attivo_2)], xout=year)$y) %>%
+          group_by(abi, ndg) %>%
+          arrange(year) %>%
+          mutate(Tot_Valore_Produzione_interp = Hmisc::approxExtrap(x=year[!is.na(Tot_Valore_Produzione_2)],
+                                                                    y=Tot_Valore_Produzione_2[!is.na(Tot_Valore_Produzione_2)], xout=year)$y) %>%
+          ungroup()
+        
+        df_CRIF_bilanci_Attivo_Produzione = interp_data %>%
+          filter(year >= 2012) %>%
+          select(abi, ndg, year, Tot_Attivo_avg, Tot_Valore_Produzione_avg, Tot_Attivo_interp, Tot_Valore_Produzione_interp)
+        
+        # check differences between average and interpolation approach
+        plot_tot_diff = df_CRIF_bilanci_Attivo_Produzione %>%
+          mutate(perc_diff = (Tot_Attivo_interp - Tot_Attivo_avg) / abs(Tot_Attivo_avg),
+                 Variable = 'Tot_Attivo') %>%
+          select(year, Variable, perc_diff) %>%
+          bind_rows(
+            df_CRIF_bilanci_Attivo_Produzione %>%
+              mutate(perc_diff = (Tot_Valore_Produzione_interp - Tot_Valore_Produzione_avg) / abs(Tot_Valore_Produzione_avg),
+                     Variable = 'Tot_Valore_Produzione') %>%
+              select(year, Variable, perc_diff)
+          ) %>%
+          filter(perc_diff != 0)
+        png(paste0('./Checks/Distribution_percentage_diff_Average_vs_Interp.png'), width = 10, height = 7, units = 'in', res=300)
+        plot(ggplot(plot_tot_diff, aes(x=perc_diff, fill=year)) +
+               geom_density(alpha=.3) +
+               facet_grid(Variable ~ ., scales = 'free') +
+               theme(legend.position="bottom") +
+               ggtitle('Distribution of (Interpolation - Average) / Average for Tot_Attivo and Tot_Valore_Produzione'))
+        dev.off()
+        
+        error_flag = FALSE
+        if (sum(is.na(df_CRIF_bilanci_Attivo_Produzione)) > 0){cat('\n\n ###### df_CRIF_bilanci_Attivo_Produzione has NA');error_flag = TRUE}
+        if (df_CRIF_bilanci_Attivo_Produzione %>% select(abi, ndg, year) %>% uniqueN() != nrow(df_CRIF_bilanci_Attivo_Produzione)){
+          cat('\n\n ###### df_CRIF_bilanci_Attivo_Produzione has duplicated rows for same year');error_flag = TRUE
+        }
+        
+        # keep only average
+        df_CRIF_bilanci_Attivo_Produzione = df_CRIF_bilanci_Attivo_Produzione %>%
+          select(-ends_with('_interp')) %>%
+          setNames(gsub('_avg', '', names(.))) %>%
+          mutate(Tot_Attivo = round(Tot_Attivo),
+                 Tot_Valore_Produzione = round(Tot_Valore_Produzione))
+        
+        # add log10(Tot_Attivo) and Dimensione_Impresa
+        df_CRIF_bilanci_Attivo_Produzione = df_CRIF_bilanci_Attivo_Produzione %>%
+          mutate(Tot_Attivo_log10 = log10(Tot_Attivo)) %>%
+          left_join(
+            df_CRIF_bilanci_Attivo_Produzione %>%
+              group_by(abi, ndg) %>%
+              summarize(Tot_Attivo = max(Tot_Attivo),
+                        Tot_Valore_Produzione = max(Tot_Valore_Produzione), .groups = 'drop') %>%
+              mutate(Dimensione_Impresa = ifelse(Tot_Attivo < 2e6 | Tot_Valore_Produzione < 2e6, 'MICRO', '')) %>%
+              mutate(Dimensione_Impresa = ifelse((Tot_Attivo >= 2e6 & Tot_Attivo < 10e6) | (Tot_Valore_Produzione >= 2e6 & Tot_Valore_Produzione < 10e6),
+                                                 'SMALL', Dimensione_Impresa)) %>%
+              mutate(Dimensione_Impresa = ifelse((Tot_Attivo >= 10e6 & Tot_Attivo < 50e6) | (Tot_Valore_Produzione >= 10e6 & Tot_Valore_Produzione < 43e6),
+                                                 'MEDIUM', Dimensione_Impresa)) %>%
+              mutate(Dimensione_Impresa = ifelse(Tot_Attivo > 50e6 | Tot_Valore_Produzione > 43e6, 'LARGE', Dimensione_Impresa)) %>%
+              select(-Tot_Attivo, -Tot_Valore_Produzione),
+            by = c("abi", "ndg"))
+        
+        if (error_flag == FALSE){
+          saveRDS(df_CRIF_bilanci_Attivo_Produzione, './Checkpoints/compact_data/compact_CRIF_bilanci_Attivo_Produzione.rds')
+        }
+        
+        rm(variable_mapping, df_bilanci_CEBI, df_bilanci_NONCEBI, df_bilanci_NONCEBI_ref, df_bilanci_merge, df_reference_available_years,
+           solved_duplicates, duplicated_year, interp_data, abi_ndg_to_remove, plot_tot_diff, df_CRIF_bilanci_Attivo_Produzione)
+        cat('Done')
+      }
       
       # check impact of chiave_comune_to_remove_MURA
       {
@@ -1869,14 +2126,14 @@ reload_final_dataset = T  # reload df_final
   
   # define new perimeter with available bilanci of segmento_CRIF in Imprese, POE and Small Business and only with all 3 years
   {
-    df_bil = readRDS('./Checkpoints/compact_data/compact_CRIF_bila.rds')
-    df_reference_new_perimeter = df_bil %>%
-      left_join(df_final_reference %>% select(abi, ndg, chiave_comune, segmento_CRIF, FLAG_Multibank), by = c("abi", "ndg")) %>%
-      filter(segmento_CRIF %in% c('Small Business', 'Imprese', 'POE')) %>%
-      group_by(segmento_CRIF, chiave_comune, abi, ndg, FLAG_Multibank) %>%
-      summarise(COUNT = n(), .groups = 'drop') %>%
-      filter(COUNT == 3) %>%
-      select(-COUNT)
+    list_abi_ndg_year_CRIF_bila = readRDS('./Checkpoints/list_abi_ndg_year_CRIF_bila.rds')
+    df_reference_new_perimeter = list_abi_ndg_year_CRIF_bila %>%
+      filter(Fonte == 'CRIF') %>%
+      unique() %>%
+      filter(Segmento %in% c('Small Business', 'Imprese', 'POE')) %>%
+      filter(match) %>%
+      select(-Fonte, -match, -Segmento, -Expected_available_years, -Bilanci_available_years, -MISSING) %>%
+      left_join(df_final_reference %>% select(abi, ndg, chiave_comune, segmento_CRIF, FLAG_Multibank), by = c("abi", "ndg"))
     
     # update FLAG_Multibank
     new_count = df_reference_new_perimeter %>%
@@ -1894,8 +2151,8 @@ reload_final_dataset = T  # reload df_final
       summarise(COUNT = n(), .groups = 'drop')
     if (new_count %>% filter(FLAG_Multibank == 0) %>% pull(COUNT) %>% unique() != 1){cat('\n\n ###### wrong FLAG_Multibank == 0 in df_reference_new_perimeter final')}
     if (new_count %>% filter(FLAG_Multibank == 1) %>% pull(COUNT) %>% unique() %>% min() == 0){cat('\n\n ###### wrong FLAG_Multibank == 1 in df_reference_new_perimeter final')}
+    rm(new_count, list_abi_ndg_year_CRIF_bila)
     saveRDS(df_reference_new_perimeter, './Checkpoints/df_reference_new_perimeter.rds')
-    rm(new_count, df_bil)
   }
   df_reference_new_perimeter = readRDS('./Checkpoints/df_reference_new_perimeter.rds')
   cat('\n\n New perimeter')
@@ -1904,90 +2161,95 @@ reload_final_dataset = T  # reload df_final
   
   # create final dataset
   {
-    chiave_comune_to_remove_MURA = readRDS('./Checkpoints/compact_data/chiave_comune_to_remove_MURA.rds')
-    df_to_add = c(paste0('df_', c('AI_CC', 'AI_PCSBF', 'AI_ANFA', 'AI_POFI', 'AI_APSE',
-                                  'AI_MURA_edit', 'AI_CRFI_edit',
-                                  'RISCHIO', 'CR',
-                                  'CRIF_anag', 'CRIF_bila')))
-    summary_remove = data.frame(Perimeter = 'New Perimeter', Tot_chiave_comune = format(uniqueN(df_reference_new_perimeter$chiave_comune), big.mark=","),
-                                Tot_ABI_NDG=format(nrow(df_reference_new_perimeter), big.mark=","), stringsAsFactors = F)
+    var_descr = read.csv2('./Coding_tables/Variable_Description.csv', stringsAsFactors=FALSE)
+    forme_tecniche = read.csv2('./Coding_tables/Forme_tecniche.csv', stringsAsFactors=FALSE)
     
-    # prepare reference with combination of year and month
-    if (reload_final_combination == FALSE){
-      # loop all dataset to create a final reference (with all year combination)
-      df_final_reference_combination = df_reference_new_perimeter %>%
-        crossing(data.frame(year = c(2012, 2013, 2014))) %>%
-        crossing(data.frame(month = c(1:12))) %>%
-        select(abi, ndg, chiave_comune, year, month, everything())
-      full_combination_row = nrow(df_final_reference_combination)
-      if (nrow(df_reference_new_perimeter) * 36 != full_combination_row){cat('\n\n ###### wrong number of rows in df_final_reference_combination')}
-      cat('\n\nCreating final reference with month/year combination:')
-      for (df_lab in df_to_add){
-        
-        cat('\n', df_lab, nrow(df), '...')
-        start_time = Sys.time()
-        df = readRDS(paste0('./Checkpoints/compact_data/compact_', gsub('df_', '', df_lab), '.rds'))
-        
-        if ('month' %in% colnames(df)){
-          if (!'JOIN' %in% colnames(df_final_reference_combination)){
-            df_final_reference_combination = df_final_reference_combination %>%
-              left_join(df %>%
-                          select(abi, ndg, year, month) %>%
-                          mutate(JOIN = 'YES'), by = c("abi", "ndg", "year", "month"))
-          } else {
-            df_final_reference_combination = df_final_reference_combination %>%
-              left_join(df %>%
-                          select(abi, ndg, year, month) %>%
-                          mutate(JOIN_NEW = 'YES'), by = c("abi", "ndg", "year", "month")) %>%
-              mutate(JOIN = ifelse(is.na(JOIN), JOIN_NEW, JOIN)) %>%
-              select(-JOIN_NEW)
-          }
-          tot_diff=seconds_to_period(difftime(Sys.time(), start_time, units='secs'))
-          cat('Done in:', paste0(lubridate::hour(tot_diff), 'h:', lubridate::minute(tot_diff), 'm:', round(lubridate::second(tot_diff))))
-        } else {cat('Skipped')}
-        rm(df)
+    # prepare abi+ndg+year+month reference
+    {
+      chiave_comune_to_remove_MURA = readRDS('./Checkpoints/compact_data/chiave_comune_to_remove_MURA.rds')
+      df_to_add = c(paste0('df_', c('AI_CC', 'AI_PCSBF', 'AI_ANFA', 'AI_POFI', 'AI_APSE',
+                                    'AI_MURA_edit', 'AI_CRFI_edit',
+                                    'RISCHIO', 'CR',
+                                    'CRIF_anag', 'CRIF_bila')))
+      summary_remove = data.frame(Perimeter = 'New Perimeter', Tot_chiave_comune = format(uniqueN(df_reference_new_perimeter$chiave_comune), big.mark=","),
+                                  Tot_ABI_NDG=format(nrow(df_reference_new_perimeter), big.mark=","), stringsAsFactors = F)
+      
+      # prepare reference with combination of year and month
+      if (reload_final_combination == FALSE){
+        # loop all dataset to create a final reference (with all year combination)
+        df_final_reference_combination = df_reference_new_perimeter %>%
+          crossing(data.frame(year = c(2012, 2013, 2014))) %>%
+          crossing(data.frame(month = c(1:12))) %>%
+          select(abi, ndg, chiave_comune, year, month, everything())
+        full_combination_row = nrow(df_final_reference_combination)
+        if (nrow(df_reference_new_perimeter) * 36 != full_combination_row){cat('\n\n ###### wrong number of rows in df_final_reference_combination')}
+        cat('\n\nCreating final reference with month/year combination:')
+        for (df_lab in df_to_add){
+          
+          cat('\n', df_lab, nrow(df), '...')
+          start_time = Sys.time()
+          df = readRDS(paste0('./Checkpoints/compact_data/compact_', gsub('df_', '', df_lab), '.rds'))
+          
+          if ('month' %in% colnames(df)){
+            if (!'JOIN' %in% colnames(df_final_reference_combination)){
+              df_final_reference_combination = df_final_reference_combination %>%
+                left_join(df %>%
+                            select(abi, ndg, year, month) %>%
+                            mutate(JOIN = 'YES'), by = c("abi", "ndg", "year", "month"))
+            } else {
+              df_final_reference_combination = df_final_reference_combination %>%
+                left_join(df %>%
+                            select(abi, ndg, year, month) %>%
+                            mutate(JOIN_NEW = 'YES'), by = c("abi", "ndg", "year", "month")) %>%
+                mutate(JOIN = ifelse(is.na(JOIN), JOIN_NEW, JOIN)) %>%
+                select(-JOIN_NEW)
+            }
+            tot_diff=seconds_to_period(difftime(Sys.time(), start_time, units='secs'))
+            cat('Done in:', paste0(lubridate::hour(tot_diff), 'h:', lubridate::minute(tot_diff), 'm:', round(lubridate::second(tot_diff))))
+          } else {cat('Skipped')}
+          rm(df)
+        }
+        df_final_reference_combination = df_final_reference_combination %>%
+          filter(JOIN == 'YES') %>%
+          select(-JOIN)
+        final_rows = nrow(df_final_reference_combination)
+        cat('\nTotal rows:', format(final_rows, big.mark=","), ' - ', format(full_combination_row - final_rows, big.mark=","), 'removed')
+        saveRDS(df_final_reference_combination, './Checkpoints/df_final_reference_combination.rds')
       }
-      df_final_reference_combination = df_final_reference_combination %>%
-        filter(JOIN == 'YES') %>%
-        select(-JOIN)
+      df_final_reference_combination = readRDS('./Checkpoints/df_final_reference_combination.rds')
+      initial_ndg = nrow(df_reference_new_perimeter)
+      initial_chiave_comune = uniqueN(df_reference_new_perimeter$chiave_comune)
+      new_ndg = df_final_reference_combination %>% select(abi, ndg) %>% unique() %>% nrow()
+      new_chiave_comune = uniqueN(df_final_reference_combination$chiave_comune)
+      cat('\n\nEvaluating matching perimeter with datasets')
+      cat('\n -- Total NDG:', format(new_ndg, big.mark=","), ' - ', format(initial_ndg - new_ndg, big.mark=","), 'removed')
+      cat('\n -- Total chiave_comune:', format(new_chiave_comune, big.mark=","), ' - ', format(initial_chiave_comune - new_chiave_comune, big.mark=","), 'removed')
+      summary_remove = summary_remove %>% bind_rows(data.frame('Matching with datasets', format(new_chiave_comune, big.mark=","),
+                                                               format(new_ndg, big.mark=","), stringsAsFactors = F) %>% setNames(colnames(summary_remove)))
+      
+      # remove full chiave_comune from MURA
       final_rows = nrow(df_final_reference_combination)
-      cat('\nTotal rows:', format(final_rows, big.mark=","), ' - ', format(full_combination_row - final_rows, big.mark=","), 'removed')
-      saveRDS(df_final_reference_combination, './Checkpoints/df_final_reference_combination.rds')
+      df_final_reference_combination = df_final_reference_combination %>% 
+        # left_join(chiave_comune_to_remove_MURA %>% select(abi, ndg) %>% mutate(REMOVE = 'YES'), by = c("abi", "ndg")) %>%
+        left_join(chiave_comune_to_remove_MURA %>% select(chiave_comune) %>% mutate(REMOVE = 'YES'), by = "chiave_comune") %>%
+        filter(is.na(REMOVE)) %>%
+        select(-REMOVE)
+      new_final_rows = nrow(df_final_reference_combination)
+      cat('\n\nRemoving chiave_comune from MURA')
+      cat('\nTotal rows after removing chiave_comune from MURA:', format(new_final_rows, big.mark=","), ' - ', format(final_rows - new_final_rows, big.mark=","), 'removed')
+      new_ndg_MURA = df_final_reference_combination %>% select(abi, ndg) %>% unique() %>% nrow()
+      new_chiave_comune_MURA = uniqueN(df_final_reference_combination$chiave_comune)
+      cat('\n -- Total NDG:', format(new_ndg_MURA, big.mark=","), ' - ', format(new_ndg - new_ndg_MURA, big.mark=","), 'removed')
+      cat('\n -- Total chiave_comune:', format(new_chiave_comune_MURA, big.mark=","), ' - ', format(new_chiave_comune - new_chiave_comune_MURA, big.mark=","), 'removed')
+      rm(chiave_comune_to_remove_MURA)
+      summary_remove = summary_remove %>% bind_rows(data.frame('Removing chiave_comune from MURA', format(new_chiave_comune_MURA, big.mark=","),
+                                                               format(new_ndg_MURA, big.mark=","), stringsAsFactors = F) %>% setNames(colnames(summary_remove)))
     }
-    df_final_reference_combination = readRDS('./Checkpoints/df_final_reference_combination.rds')
-    initial_ndg = nrow(df_reference_new_perimeter)
-    initial_chiave_comune = uniqueN(df_reference_new_perimeter$chiave_comune)
-    new_ndg = df_final_reference_combination %>% select(abi, ndg) %>% unique() %>% nrow()
-    new_chiave_comune = uniqueN(df_final_reference_combination$chiave_comune)
-    cat('\n\n Evaluating matching perimeter with datasets')
-    cat('\n -- Total NDG:', format(new_ndg, big.mark=","), ' - ', format(initial_ndg - new_ndg, big.mark=","), 'removed')
-    cat('\n -- Total chiave_comune:', format(new_chiave_comune, big.mark=","), ' - ', format(initial_chiave_comune - new_chiave_comune, big.mark=","), 'removed')
-    summary_remove = summary_remove %>% bind_rows(data.frame('Matching with datasets', format(new_chiave_comune, big.mark=","),
-                                                             format(new_ndg, big.mark=","), stringsAsFactors = F) %>% setNames(colnames(summary_remove)))
-    
-    # remove full chiave_comune from MURA
-    final_rows = nrow(df_final_reference_combination)
-    df_final_reference_combination = df_final_reference_combination %>% 
-      # left_join(chiave_comune_to_remove_MURA %>% select(abi, ndg) %>% mutate(REMOVE = 'YES'), by = c("abi", "ndg")) %>%
-      left_join(chiave_comune_to_remove_MURA %>% select(chiave_comune) %>% mutate(REMOVE = 'YES'), by = "chiave_comune") %>%
-      filter(is.na(REMOVE)) %>%
-      select(-REMOVE)
-    new_final_rows = nrow(df_final_reference_combination)
-    cat('\n\n Removing chiave_comune from MURA')
-    cat('\nTotal rows after removing chiave_comune from MURA:', format(new_final_rows, big.mark=","), ' - ', format(final_rows - new_final_rows, big.mark=","), 'removed')
-    new_ndg_MURA = df_final_reference_combination %>% select(abi, ndg) %>% unique() %>% nrow()
-    new_chiave_comune_MURA = uniqueN(df_final_reference_combination$chiave_comune)
-    cat('\n -- Total NDG:', format(new_ndg_MURA, big.mark=","), ' - ', format(new_ndg - new_ndg_MURA, big.mark=","), 'removed')
-    cat('\n -- Total chiave_comune:', format(new_chiave_comune_MURA, big.mark=","), ' - ', format(new_chiave_comune - new_chiave_comune_MURA, big.mark=","), 'removed')
-    rm(chiave_comune_to_remove_MURA)
-    summary_remove = summary_remove %>% bind_rows(data.frame('Removing chiave_comune from MURA', format(new_chiave_comune_MURA, big.mark=","),
-                                                             format(new_ndg_MURA, big.mark=","), stringsAsFactors = F) %>% setNames(colnames(summary_remove)))
     
     # join all dataset
     if (reload_final_dataset == FALSE){
       df_final = df_final_reference_combination
       abi_ndg_to_keep = df_final %>% select(abi, ndg) %>% unique() %>% mutate(abi_ndg = paste0(abi, '_', ndg)) %>% pull(abi_ndg)
-      rm(df_final_reference_combination)
       col_not_to_check = colnames(df_final)
       total_cols = ncol(df_final)
       total_rowS = nrow(df_final)
@@ -2016,13 +2278,13 @@ reload_final_dataset = T  # reload df_final
           if (tot_elements_df != tot_elements_df_after_join){cat('\n-- total non-NA elements mismatch');save_flag = F}
           tot_diff=seconds_to_period(difftime(Sys.time(), start_time, units='secs'))
           cat('Done in:', paste0(lubridate::hour(tot_diff), 'h:', lubridate::minute(tot_diff), 'm:', round(lubridate::second(tot_diff))))
-        } else {cat('Skipped')}
+        } else {cat('Skipped by month')}
         rm(df)
       }
       
       # add CRIF_anag and CRIF_bila
       for (add in c('CRIF_anag', 'CRIF_bila')){
-        cat('\n', add, '...')
+        cat('\n', add, 'by year...')
         start_time = Sys.time()
         df = readRDS(paste0('./Checkpoints/compact_data/compact_', add, '.rds'))
         col_to_check = setdiff(colnames(df), col_not_to_check)
@@ -2034,6 +2296,125 @@ reload_final_dataset = T  # reload df_final
         cat('Done in:', paste0(lubridate::hour(tot_diff), 'h:', lubridate::minute(tot_diff), 'm:', round(lubridate::second(tot_diff))))
       }
       
+      # add Tot_Attivo and Tot_Valore_Produzione
+      compact_CRIF_bilanci_Attivo_Produzione = readRDS('./Checkpoints/compact_data/compact_CRIF_bilanci_Attivo_Produzione.rds')
+      df_final = df_final %>%
+        left_join(compact_CRIF_bilanci_Attivo_Produzione, by = c("abi", "ndg", "year"))
+      total_cols = total_cols + ncol(compact_CRIF_bilanci_Attivo_Produzione) - 3
+      rm(compact_CRIF_bilanci_Attivo_Produzione)
+      if (total_rowS != nrow(df_final)){cat('\n\n ###### wrong number of rows:', nrow(df_final), '- expected:', total_rowS);save_flag = F}
+      
+      # check percentage of matching abi+ndg for Tot_Attivo and Tot_Valore_Produzione
+      summary_df_bilanci = df_final %>%
+        select(abi, ndg, year, segmento_CRIF) %>%
+        left_join(
+          df_final %>%
+            select(abi, ndg, BILA_tipo_dataentry_fin) %>%
+            group_by(abi, ndg) %>%
+            summarise(Tipo_Bilancio = paste0(sort(unique(BILA_tipo_dataentry_fin)), collapse = '|'), .groups = 'drop'), by = c("abi", "ndg")) %>%
+        left_join(readRDS('./Checkpoints/compact_data/compact_CRIF_bilanci_Attivo_Produzione.rds'), by = c("abi", "ndg", "year")) %>%
+        unique() %>%
+        group_by(Tipo_Bilancio, abi, ndg) %>%
+        summarize(Expected_years = n(),#uniqueN(year),
+                  Available_years = sum(!is.na(Tot_Attivo)), .groups = 'drop') %>%
+        mutate(Expected_years = ifelse(Available_years == 0, '1,2,3', Expected_years),
+               Available_years = ifelse(Available_years == 0, 'Missing', Available_years)) %>%
+        mutate(match = Expected_years == Available_years) %>%
+        mutate(Expected_years = ifelse(match, '1,2,3', Expected_years),
+               Available_years = ifelse(match, 'Matched', Available_years)) %>%
+        group_by(Tipo_Bilancio, Expected_years, Available_years) %>%
+        summarize(Total_abi_ndg = n(), .groups = 'drop')
+      if (sum(summary_df_bilanci$Total_abi_ndg) != df_final %>% select(abi, ndg) %>% uniqueN()){cat('\n\n ###### abi+ndg mismatch in summary_df_bilanci')}
+      summary_df_bilanci = summary_df_bilanci %>% 
+        bind_rows(data.frame(t(c('---', '', '', NA)), stringsAsFactors = F) %>%
+                    setNames(colnames(summary_df_bilanci)) %>%
+                    mutate(Total_abi_ndg = as.numeric(Total_abi_ndg)),
+                  summary_df_bilanci %>%
+                    mutate(Tipo_Bilancio = ifelse(str_detect(Tipo_Bilancio, 'noncebi_'), 'TOTAL_NONCEBI', 'TOTAL_CEBI')) %>%
+                    group_by(Tipo_Bilancio, Expected_years, Available_years) %>%
+                    summarize(Total_abi_ndg = sum(Total_abi_ndg), .groups = 'drop')
+        ) %>%
+        mutate(Total_abi_ndg_perc = paste0(round(Total_abi_ndg / (sum(Total_abi_ndg, na.rm = T) / 2) * 100, 1), '%'),
+               Total_abi_ndg = format(Total_abi_ndg, big.mark = ',')) %>%
+        replace(. == "    NA" | . == "NA%", '')
+      write.table(summary_df_bilanci, './Stats/09_df_bilanci_matching_by_year.csv', sep = ';', row.names = F, append = F)
+      
+      # remove abi+ndg with missing Tot_Attivo and Tot_Valore_Produzione
+      cat('\n\nRemoving missing Tot_Attivo and Tot_Valore_Produzione')
+      final_rows = nrow(df_final)
+      final_abi_ndg = df_final %>% select(abi, ndg) %>% uniqueN()
+      final_chiave_comune = df_final %>% select(chiave_comune) %>% uniqueN()
+      abi_ndg_to_remove = df_final %>%
+        filter(is.na(Tot_Attivo)) %>%
+        select(abi, ndg) %>%
+        unique() %>%
+        mutate(mm = paste0(abi, ndg)) %>%
+        pull(mm)
+      abi_ndg_to_keep = df_final %>%
+        filter(!is.na(Tot_Attivo)) %>%
+        select(abi, ndg) %>%
+        unique() %>%
+        mutate(mm = paste0(abi, ndg)) %>%
+        pull(mm)
+      if (length(intersect(abi_ndg_to_remove, abi_ndg_to_keep)) > 0){cat('\n\n ###### abi+ndg partially removed for Tot_Attivo and Tot_Valore_Produzione')}
+      df_final = df_final %>%
+        filter(!is.na(Tot_Attivo))
+      if (sum(is.na(df_final$Tot_Attivo)) > 0){cat('\n\n ###### missing Tot_Attivo still present')}
+      if (sum(is.na(df_final$Tot_Valore_Produzione)) > 0){cat('\n\n ###### missing Tot_Valore_Produzione still present')}
+      rm(abi_ndg_to_remove, abi_ndg_to_keep)
+      
+      new_abi_ndg = df_final %>% select(abi, ndg) %>% uniqueN()
+      nwe_chiave_comune = df_final %>% select(chiave_comune) %>% uniqueN()
+      cat('\nTotal rows after removing missing Tot_Attivo and Tot_Valore_Produzione:', format(nrow(df_final), big.mark=","), ' - ', format(final_rows - nrow(df_final), big.mark=","), 'removed')
+      cat('\n -- Total NDG:', format(new_abi_ndg, big.mark=","), ' - ', format(final_abi_ndg - new_abi_ndg, big.mark=","), 'removed')
+      cat('\n -- Total chiave_comune:', format(nwe_chiave_comune, big.mark=","), ' - ', format(final_chiave_comune - nwe_chiave_comune, big.mark=","), 'removed')
+      summary_remove = summary_remove %>% bind_rows(data.frame('Removing missing Tot_Attivo and Tot_Valore_Produzione', format(nwe_chiave_comune, big.mark=","),
+                                                               format(new_abi_ndg, big.mark=","), stringsAsFactors = F) %>% setNames(colnames(summary_remove)))
+      
+      # remove abi = '3599' - Cassa Centrale Banca
+      final_rows = nrow(df_final)
+      final_abi_ndg = df_final %>% select(abi, ndg) %>% uniqueN()
+      final_chiave_comune = df_final %>% select(chiave_comune) %>% uniqueN()
+      
+      df_final = df_final %>%
+        filter(abi != '3599')
+      
+      new_abi_ndg = df_final %>% select(abi, ndg) %>% uniqueN()
+      nwe_chiave_comune = df_final %>% select(chiave_comune) %>% uniqueN()
+      cat('\nTotal rows after removing abi=3599:', format(nrow(df_final), big.mark=","), ' - ', format(final_rows - nrow(df_final), big.mark=","), 'removed')
+      cat('\n -- Total NDG:', format(new_abi_ndg, big.mark=","), ' - ', format(final_abi_ndg - new_abi_ndg, big.mark=","), 'removed')
+      cat('\n -- Total chiave_comune:', format(nwe_chiave_comune, big.mark=","), ' - ', format(final_chiave_comune - nwe_chiave_comune, big.mark=","), 'removed')
+      summary_remove = summary_remove %>% bind_rows(data.frame('Removing abi 3599', format(nwe_chiave_comune, big.mark=","),
+                                                               format(new_abi_ndg, big.mark=","), stringsAsFactors = F) %>% setNames(colnames(summary_remove)))
+      
+      # remove missing in BILA_tipo_dataentry_fin (77 rows) -> 125 rows because of same abi+ndg
+      final_rows = nrow(df_final)
+      final_abi_ndg = df_final %>% select(abi, ndg) %>% uniqueN()
+      final_chiave_comune = df_final %>% select(chiave_comune) %>% uniqueN()
+      
+      abi_ndg_to_remove = df_final %>%
+        filter(is.na(BILA_tipo_dataentry_fin)) %>%
+        select(abi, ndg) %>%
+        unique() %>%
+        mutate(abi_ndg = paste0(abi, ndg))
+      # total_NA = sum(is.na(df_final$BILA_tipo_dataentry_fin))
+      # 
+      # check_remove = df_final %>% select(abi, ndg) %>%
+      #   mutate(abi_ndg = paste0(abi, ndg)) %>%
+      #   left_join(abi_ndg_to_remove %>% select(abi_ndg) %>% mutate(REMOVE = 'YES'), by = "abi_ndg")
+      # total_NA == sum(!is.na(check_remove$REMOVE))
+      df_final = df_final %>%
+        left_join(abi_ndg_to_remove %>% select(abi, ndg) %>% mutate(REMOVE = 'YES'), by = c("abi", "ndg")) %>%
+        filter(is.na(REMOVE)) %>%
+        select(-REMOVE)
+      new_abi_ndg = df_final %>% select(abi, ndg) %>% uniqueN()
+      nwe_chiave_comune = df_final %>% select(chiave_comune) %>% uniqueN()
+      cat('\nTotal rows after removing missing BILA_tipo_dataentry_fin:', format(nrow(df_final), big.mark=","), ' - ', format(final_rows - nrow(df_final), big.mark=","), 'removed')
+      cat('\n -- Total NDG:', format(new_abi_ndg, big.mark=","), ' - ', format(final_abi_ndg - new_abi_ndg, big.mark=","), 'removed')
+      cat('\n -- Total chiave_comune:', format(nwe_chiave_comune, big.mark=","), ' - ', format(final_chiave_comune - nwe_chiave_comune, big.mark=","), 'removed')
+      summary_remove = summary_remove %>% bind_rows(data.frame('Removing missing tipo bilancio', format(nwe_chiave_comune, big.mark=","),
+                                                               format(new_abi_ndg, big.mark=","), stringsAsFactors = F) %>% setNames(colnames(summary_remove)))
+      
       # check full missing rows
       check_missing = df_final %>%
         select(-abi, -ndg, -chiave_comune, -year, -month, -segmento_CRIF, -FLAG_Multibank) %>%
@@ -2041,53 +2422,546 @@ reload_final_dataset = T  # reload df_final
       na_full = sum(check_missing$NA_count == (ncol(check_missing) - 1))
       if (na_full > 0){cat('\n\n ###### full missing rows:', na_full)}
       
-      rm(df_final_reference, check_missing)
       if (total_cols != ncol(df_final)){cat('\n\n ###### wrong number of columns:', ncol(df_final), '- expected:', total_cols);save_flag = F}
-      if (total_rowS != nrow(df_final)){cat('\n\n ###### wrong number of rows:', nrow(df_final), '- expected:', total_rowS);save_flag = F}
-      if (save_flag){saveRDS(df_final, './Checkpoints/df_final.rds')}
       write.table(summary_remove, './Stats/10_df_final_perimeter_summary.csv', sep = ';', row.names = F, append = F)
+      rm(df_final_reference, check_missing, df_reference_new_perimeter, summary_remove, df_final_reference_combination, summary_df_bilanci)
+      
+      # add flag CEBI vs NON_CEBI
+      df_final = df_final %>%
+        mutate(FLAG_BILANCIO = ifelse(str_detect(BILA_tipo_dataentry_fin, 'noncebi_'), 'NONCEBI', 'CEBI'))
+      if (df_final %>% group_by(abi, ndg) %>% summarize(COUNT = uniqueN(FLAG_BILANCIO), .groups = 'drop') %>% pull(COUNT) %>% max() > 1){
+        cat('\n\n ###### abi+ndg with multiple FLAG_BILANCIO found')}
       
       # evaluate statistics for df_final
-      write.table(basicStatistics(df_final), './Stats/10_df_final_stats.csv', sep = ';', row.names = F, append = F)
+      write.table(basicStatistics(df_final) %>%
+                    rowwise() %>%
+                    mutate(VAR = strsplit(VARIABLE, '_')[[1]][2],
+                           COD_FT_RAPPORTO = strsplit(VARIABLE, '_')[[1]][3]) %>%
+                    left_join(var_descr, by = "VAR") %>%
+                    left_join(forme_tecniche, by = "COD_FT_RAPPORTO") %>%
+                    mutate(DESCRIPTION = ifelse(!is.na(FT_RAPPORTO), paste0(DESCRIPTION, ' - ', FT_RAPPORTO), DESCRIPTION)) %>%
+                    select(VARIABLE, DESCRIPTION, everything(), -VAR, -COD_FT_RAPPORTO, -FT_RAPPORTO) %>%
+                    mutate_all(as.character) %>%
+                    replace(is.na(.), ''),
+                  './Stats/10_df_final_stats.csv', sep = ';', row.names = F, append = F)
       
     }
-    df_final = readRDS('./Checkpoints/df_final.rds')
     
-    # check percentage of missing by segmento_CRIF
-    check_missing_segmento = c()
-    for (seg in unique(df_final$segmento_CRIF)){
-      stats = suppressWarnings(basicStatistics(df_final %>% filter(segmento_CRIF == seg)))
-      cols = stats %>%
-        filter(TYPE == 'CHARACTER') %>%
-        rename(Missing = BLANKs) %>%
-        select(VARIABLE, TYPE, Missing) %>%
-        bind_rows(stats %>%
-                    filter(TYPE == 'NUMERIC') %>%
-                    rename(Missing = NAs) %>%
-                    select(VARIABLE, TYPE, Missing)) %>%
-        rowwise() %>%
-        mutate(Missing = strsplit(Missing, ' ')[[1]][2]) %>%
-        mutate(Missing = gsub('[()]', '', Missing)) %>%
-        rename(!!sym(paste0('Missing_', seg, '_', stats$NUM_OSS[1],'obs')) := Missing) %>%
-        filter(!VARIABLE %in% c('abi', 'ndg', 'chiave_comune', 'segmento_CRIF', 'year', 'month', 'FLAG_Multibank'))
-      if (length(check_missing_segmento) == 0){
-        check_missing_segmento = cols
-      } else {
-        check_missing_segmento = check_missing_segmento %>% left_join(cols, by = c("VARIABLE", "TYPE"))
-      }
-      write.table(check_missing_segmento, './Stats/10_df_final_missing_by_segmento.csv', sep = ';', row.names = F, append = F)
+    # remove some variables and anomalous values
+    {
+      var_to_remove = c('ANAG_professione',	'AVG_APSE002_D11910',	'AVG_APSE002_D11916',	'AVG_APSE002_E11910',	'AVG_APSE002_E11916',
+                        'AVG_APSE003_D11910',	'AVG_APSE003_D11916',	'AVG_APSE003_E11910',	'AVG_APSE003_E11916',	'AVG_APSE004_D11910',
+                        'AVG_APSE004_E11910',	'AVG_APSE004_EST050',	'AVG_APSE004_EST054',	'AVG_APSE1854_D11910',	'AVG_APSE1854_E11910',
+                        'AVG_APSE1854_EST050',	'AVG_APSE1854_EST054',	'RAW_CR9789',	'RAW_CR9790',	'RAW_CR9791',	'RAW_CR9792',	'RAW_CR9793',
+                        'RAW_CR9794',	'RAW_CR9795',	'RAW_CR9796',	'RAW_CR9797',	'RAW_CR9798',	'RAW_CR9820',	'RAW_CR9821',	'RAW_CR9822',
+                        'RAW_CR9823',	'RAW_CR9824',	'RAW_CR9825',	'RAW_CR9852',	'SUM_ANFA010',	'SUM_ANFA011',	'SUM_ANFA012',	'SUM_ANFA013',
+                        'SUM_ANFA014',	'SUM_ANFA015',	'SUM_ANFA016',	'SUM_ANFA017',	'SUM_APSE000_D11910',	'SUM_APSE000_D11916',
+                        'SUM_APSE000_E11910',	'SUM_APSE000_E11916',	'SUM_APSE001_D11910',	'SUM_APSE001_D11916',	'SUM_APSE001_E11910',
+                        'SUM_APSE001_E11916',	'SUM_APSE005_EXPORT',	'SUM_APSE005_IMPORT',	'SUM_APSE006_EXPORT',	'SUM_APSE006_IMPORT',
+                        'SUM_APSE007_EXPORT',	'SUM_APSE007_IMPORT',	'SUM_APSE008_EXPORT',	'SUM_APSE008_IMPORT',	'SUM_APSE009_EXPORT',
+                        'SUM_APSE009_IMPORT',	'SUM_APSE010_EXPORT',	'SUM_APSE010_IMPORT',	'SUM_APSE011_EXPORT',	'SUM_APSE011_IMPORT',
+                        'SUM_APSE012_EXPORT',	'SUM_APSE012_IMPORT',	'SUM_APSE013_EXPORT',	'SUM_APSE013_IMPORT',	'SUM_APSE014_EXPORT',
+                        'SUM_APSE014_IMPORT',	'SUM_APSE015_EXPORT',	'SUM_APSE015_IMPORT',	'SUM_APSE016_EXPORT',	'SUM_APSE016_IMPORT',
+                        'SUM_PCSBF010',	'SUM_PCSBF011',	'SUM_PCSBF012',	'SUM_PCSBF013',	'SUM_PCSBF014',	'SUM_PCSBF015',	'SUM_PCSBF016',
+                        'SUM_PCSBF017',	'SUM_POFI000',	'SUM_POFI001',	'SUM_POFI002',	'SUM_POFI003')
+      
+      df_final = df_final %>%
+        select(-all_of(var_to_remove))
+      
+      # check for strange values with high frequency (like 99996)
+      # check_values = c()
+      # for (var in colnames(df_final)){
+      #   aa = data.frame(table(df_final %>% pull(var))) %>%
+      #     arrange(desc(Freq)) %>%
+      #     mutate(label = paste0(Var1, ' (', Freq, ')')) %>%
+      #     filter(row_number() <= 10) %>%
+      #     pull(label) %>%
+      #     paste0(collapse = ', ')
+      #   check_values = check_values %>%
+      #     bind_rows(data.frame(Variable = var, Values = aa, stringsAsFactors = F))
+      # }
+      # write.table(check_values, './Checks/04_df_final_anomalous_values.csv', sep = ';', row.names = F, append = F)
+      
+      # remove anomalous values
+      df_final = df_final %>%
+        mutate_if(is.numeric, ~replace(., . == 99996, NA)) %>%
+        mutate_if(is.numeric, ~replace(., . == 99995, NA))
+      
+      # evaluate statistics for df_final
+      write.table(basicStatistics(df_final) %>%
+                    rowwise() %>%
+                    mutate(VAR = strsplit(VARIABLE, '_')[[1]][2],
+                           COD_FT_RAPPORTO = strsplit(VARIABLE, '_')[[1]][3]) %>%
+                    left_join(var_descr, by = "VAR") %>%
+                    left_join(forme_tecniche, by = "COD_FT_RAPPORTO") %>%
+                    mutate(DESCRIPTION = ifelse(!is.na(FT_RAPPORTO), paste0(DESCRIPTION, ' - ', FT_RAPPORTO), DESCRIPTION)) %>%
+                    select(VARIABLE, DESCRIPTION, everything(), -VAR, -COD_FT_RAPPORTO, -FT_RAPPORTO) %>%
+                    mutate_all(as.character) %>%
+                    replace(is.na(.), ''),
+                  './Stats/11_df_final_stats_cleaning.csv', sep = ';', row.names = F, append = F)
+      
     }
     
+    # update FLAG_Multibank
+    {
+      # update FLAG_Multibank
+      new_count = df_final %>%
+        select(FLAG_Multibank, chiave_comune, abi, ndg) %>%
+        unique() %>%
+        group_by(FLAG_Multibank, chiave_comune) %>%
+        summarise(COUNT = n(), .groups = 'drop')
+      if (new_count %>% filter(FLAG_Multibank == 0) %>% pull(COUNT) %>% unique() != 1){cat('\n\n ###### wrong FLAG_Multibank == 0 in df_final')}
+      new_mono_bank = new_count %>%
+        filter(FLAG_Multibank == 1 & COUNT == 1) %>%
+        pull(chiave_comune)
+      new_chiave_comune = df_final %>%
+        select(chiave_comune) %>%
+        unique() %>%
+        left_join(data.frame(chiave_comune = new_mono_bank, change = 'YES', stringsAsFactors = F ), by = "chiave_comune") %>%
+        filter(change == 'YES') %>%
+        mutate(split = grepl('_', chiave_comune)) %>%
+        rowwise() %>%
+        mutate(new_chiave_comune = ifelse(split, strsplit(chiave_comune, '_')[[1]][2], chiave_comune)) %>%
+        mutate(new_chiave_comune = paste0('singleCenPerim_', new_chiave_comune)) %>%
+        select(-change, -split)
+      df_final = df_final %>%
+        left_join(new_chiave_comune, by = "chiave_comune") %>%
+        mutate(chiave_comune = ifelse(!is.na(new_chiave_comune), new_chiave_comune, chiave_comune)) %>%
+        select(-new_chiave_comune) %>%
+        group_by(chiave_comune, abi, ndg) %>%
+        mutate(FLAG_Multibank = ifelse(n() > 1, 1, 0)) %>%
+        ungroup()
+      if (sum(is.na(df_final$chiave_comune)) > 0){cat('\n\n ###### missing in chiave_comune df_final')}
+      new_count = df_final %>%
+        select(FLAG_Multibank, chiave_comune, abi, ndg) %>%
+        unique() %>%
+        group_by(FLAG_Multibank, chiave_comune) %>%
+        summarise(COUNT = n(), .groups = 'drop')
+      if (new_count %>% filter(FLAG_Multibank == 0) %>% pull(COUNT) %>% unique() != 1){cat('\n\n ###### wrong FLAG_Multibank == 0 in df_final')}
+      if (new_count %>% filter(FLAG_Multibank == 1) %>% pull(COUNT) %>% unique() %>% min() == 0){cat('\n\n ###### wrong FLAG_Multibank == 1 in df_final')}
+      rm(new_count, new_chiave_comune)
+    }
     
+    # check percentage of missing by segmento_CRIF
+    {
+      check_missing_segmento = c()
+      for (seg in unique(df_final$segmento_CRIF)){
+        stats = suppressWarnings(basicStatistics(df_final %>% filter(segmento_CRIF == seg)))
+        cols = stats %>%
+          filter(TYPE == 'CHARACTER') %>%
+          rename(Missing = BLANKs) %>%
+          select(VARIABLE, TYPE, Missing) %>%
+          bind_rows(stats %>%
+                      filter(TYPE == 'NUMERIC') %>%
+                      rename(Missing = NAs) %>%
+                      select(VARIABLE, TYPE, Missing)) %>%
+          rowwise() %>%
+          mutate(Missing = strsplit(Missing, ' ')[[1]][2]) %>%
+          mutate(Missing = gsub('[()]', '', Missing)) %>%
+          rename(!!sym(paste0('Missing_', seg, '_', stats$NUM_OSS[1],'obs')) := Missing) %>%
+          filter(!VARIABLE %in% c('abi', 'ndg', 'chiave_comune', 'segmento_CRIF', 'year', 'month', 'FLAG_Multibank'))
+        if (length(check_missing_segmento) == 0){
+          check_missing_segmento = cols
+        } else {
+          check_missing_segmento = check_missing_segmento %>% left_join(cols, by = c("VARIABLE", "TYPE"))
+        }
+      }
+      write.table(check_missing_segmento, './Stats/10_df_final_missing_by_segmento.csv', sep = ';', row.names = F, append = F)
+      rm(cols, stats, check_missing_segmento)
+    }
+    
+    # check number of abi+ndg for total years and months
+    {
+      check_by_years = df_final %>%
+        group_by(abi, ndg) %>%
+        summarize(Available_Years = uniqueN(year), .groups = 'drop') %>%
+        group_by(Available_Years) %>%
+        summarize(Total_Abi_Ndg = n(), .groups = 'drop')
+      if (sum(check_by_years$Total_Abi_Ndg) != df_final %>% select(abi, ndg) %>% uniqueN()){
+        cat('\n\n ###### abi+ndg mismatch in check_by_years')
+      } else {
+        write.table(check_by_years %>% mutate(Total_Abi_Ndg = format(Total_Abi_Ndg, big.mark = ',')),
+                    './Stats/10_df_final_distribution_year.csv', sep = ';', row.names = F, append = F)
+      }
+      
+      check_by_months = df_final %>%
+        group_by(abi, ndg) %>%
+        summarize(Available_Months = n(), .groups = 'drop') %>%
+        group_by(Available_Months) %>%
+        summarize(Total_Abi_Ndg = n(), .groups = 'drop')
+      if (sum(check_by_months$Total_Abi_Ndg) != df_final %>% select(abi, ndg) %>% uniqueN()){
+        cat('\n\n ###### abi+ndg mismatch in check_by_months')
+      } else {
+        write.table(check_by_months %>% mutate(Total_Abi_Ndg = format(Total_Abi_Ndg, big.mark = ',')),
+                    './Stats/10_df_final_distribution_month.csv', sep = ';', row.names = F, append = F)
+      }
+      rm(check_by_years, check_by_months)
+    }
+    
+    # save distribution by Dimensione_Impresa
+    {
+      check_Impresa = df_final %>%
+        select(abi, ndg, Dimensione_Impresa) %>%
+        unique() %>%
+        group_by(Dimensione_Impresa) %>%
+        summarize(Tot_Abi_Ndg = n(), .groups = 'drop') %>%
+        arrange(Tot_Abi_Ndg) %>%
+        mutate(Tot_Abi_Ndg = format(Tot_Abi_Ndg, big.mark = ','))
+      write.table(check_Impresa, './Stats/10_df_final_Dimensione_Impresa.csv', sep = ';', row.names = F, append = F)
+      
+      segmento_map = df_final %>%
+        select(abi, ndg, segmento_CRIF, Dimensione_Impresa) %>%
+        unique()
+      segmento_map = as.data.frame(table(factor(segmento_map$Dimensione_Impresa, levels = check_Impresa$Dimensione_Impresa), 
+                                         factor(segmento_map$segmento_CRIF, levels = unique(segmento_map$segmento_CRIF)))) %>%
+        spread(Var2, Freq) %>%
+        rename(`Dimensione_Impresa\\CRIF` = Var1) %>%
+        mutate_all(list(~format(., big.mark=",")))
+      write.table(segmento_map, './Stats/10_df_final_Dimensione_Impresa_mapping.csv', sep = ';', row.names = F, append = F)
+      rm(var_descr, forme_tecniche, check_Impresa, segmento_map)
+    }
+
+    # replace missing
+    {
+      # BILA
+      {
+        replace_0 = c('BILA_ARIC_VPROD', 'BILA_IMM_VPROD', 'BILA_ammor_su_costi', 'BILA_costolavoro_ricavi', 'BILA_costolavoro_valagg',
+                      'BILA_costolavoro_valprod', 'BILA_totdebiti_su_passivo', 'BILA_IMM_Patnetto', 'BILA_IMM_attivo', 'BILA_Mat_Patnetto',
+                      'BILA_Mat_attivo', 'BILA_debbanche_passivo')
+        replace_median = c('BILA_cashflow_valprod', 'BILA_liquid_attivo', 'BILA_VAGG_VPROD', 'BILA_autonomia_finanz', 'BILA_cashflow_ricavi',
+                           'BILA_copertura_attivo', 'BILA_copertura_immob', 'BILA_copertura_finanz', 'BILA_crediti_su_attivo', 'BILA_indebitamento_breve',
+                           'BILA_indebitamento_ml', 'BILA_dipend_finanz', 'BILA_liquid_imm', 'BILA_rigidita_impieghi', 'BILA_mol_ricavi', 'BILA_oneri_ricavi',
+                           'BILA_oneri_valagg', 'BILA_patr_su_patrml', 'BILA_leverage', 'BILA_mol_valprod', 'BILA_rimanenze_attivo', 'BILA_riman_debbreve',
+                           'BILA_riman_debml', 'BILA_rimanenze_debtot', 'BILA_rimanenze_debbanche', 'BILA_roa', 'BILA_rod', 'BILA_roe', 'BILA_roi',
+                           'BILA_ros', 'BILA_rotazione_capitale', 'BILA_rotazione_circolante', 'BILA_rotazione_magazzino', 'BILA_turnover',
+                           'BILA_valagg_fatturato',	'BILA_valprod_riman', 'Tot_Valore_Produzione')
+        replace_100 = c('BILA_onerifinanz_mol')
+        
+        df_final = df_final %>%
+          mutate_at(all_of(replace_median), funs(ifelse(is.na(.),median(., na.rm = TRUE),.))) %>%
+          mutate_at(all_of(replace_0), funs(ifelse(is.na(.),0,.))) %>%
+          mutate_at(all_of(replace_100), funs(ifelse(is.na(.),100,.))) %>%
+          mutate(BILA_acid_test = ifelse(is.na(BILA_acid_test) & (BILA_rimanenze_attivo == 0 | BILA_riman_debbreve == 0 | BILA_riman_debml == 0 |
+                                                                    BILA_rimanenze_debtot == 0 | BILA_rimanenze_debbanche == 0), BILA_current_ratio, BILA_acid_test)) %>%
+          mutate(BILA_durata_scorte = ifelse(is.na(BILA_durata_scorte) & (BILA_rimanenze_attivo == 0 | BILA_riman_debbreve == 0 | BILA_riman_debml == 0 |
+                                                                            BILA_rimanenze_debtot == 0 | BILA_rimanenze_debbanche == 0), 0, BILA_durata_scorte)) %>%
+          mutate(BILA_patr_su_patrrim = ifelse(is.na(BILA_patr_su_patrrim) & (BILA_rimanenze_attivo == 0 | BILA_riman_debbreve == 0 | BILA_riman_debml == 0 |
+                                                                                BILA_rimanenze_debtot == 0 | BILA_rimanenze_debbanche == 0), 100, BILA_patr_su_patrrim)) %>%
+          
+          mutate(BILA_debitifornit_su_totdebiti = ifelse(is.na(BILA_debitifornit_su_totdebiti) & BILA_totdebiti_su_debitibreve == 0, 100, BILA_debitifornit_su_totdebiti)) %>%
+          mutate(BILA_totdebiti_su_debitibreve = ifelse(is.na(BILA_totdebiti_su_debitibreve) & (BILA_debbrevi_debbanche == 0 | BILA_debbrevi_patrim == 0), 100, BILA_totdebiti_su_debitibreve)) %>%
+          mutate(BILA_debbanche_circolante = ifelse(is.na(BILA_debbanche_circolante) & BILA_debbanche_passivo == 0 , 0, BILA_debbanche_circolante)) %>%
+          mutate(BILA_current_ratio = ifelse(is.na(BILA_current_ratio) & BILA_IMM_attivo == 100 , 0, BILA_current_ratio)) %>%
+          mutate(BILA_debbrevi_debbanche = ifelse(is.na(BILA_debbrevi_debbanche) & BILA_debbanche_passivo == 0 , 100, BILA_debbrevi_debbanche)) %>%
+          mutate(BILA_debbrevi_patrim = ifelse(is.na(BILA_debbrevi_patrim) & BILA_patr_su_patrml == 0 , 100, BILA_debbrevi_patrim)) %>%
+          mutate(BILA_totdebiti_su_patrim = ifelse(is.na(BILA_totdebiti_su_patrim) & BILA_patr_su_patrml == 0 , 100, BILA_totdebiti_su_patrim)) %>%
+          mutate(BILA_debitifornit_su_patrim = ifelse(is.na(BILA_debitifornit_su_patrim) & BILA_patr_su_patrml == 0 , 100, BILA_debitifornit_su_patrim))
+        
+        # replace everything else with median
+        BILA_with_missing = df_final %>%
+          select(starts_with('BILA_')) %>%
+          summarise_all(funs(sum(is.na(.)))) %>%
+          t() %>%
+          as.data.frame() %>%
+          filter(V1 > 0) %>%
+          rownames()
+        df_final = df_final %>%
+          mutate_at(all_of(BILA_with_missing), funs(ifelse(is.na(.),median(., na.rm = TRUE),.)))
+      }
+    }
+    
+    # winsorize variables
+    {
+      var_to_winsorize = c('BILA_ARIC_VPROD', 'BILA_cashflow_valprod', 'BILA_IMM_VPROD', 'BILA_liquid_attivo', 'BILA_VAGG_VPROD', 'BILA_acid_test',
+                           'BILA_ammor_su_costi', 'BILA_autonomia_finanz', 'BILA_debbanche_circolante', 'BILA_cashflow_ricavi', 'BILA_copertura_attivo',
+                           'BILA_copertura_immob', 'BILA_copertura_finanz', 'BILA_costolavoro_ricavi', 'BILA_costolavoro_valagg', 'BILA_costolavoro_valprod',
+                           'BILA_crediti_su_attivo', 'BILA_current_ratio', 'BILA_debbrevi_debbanche', 'BILA_debbrevi_patrim', 'BILA_totdebiti_su_debitibreve',
+                           'BILA_totdebiti_su_patrim', 'BILA_debitifornit_su_patrim', 'BILA_debitifornit_su_totdebiti', 'BILA_durata_scorte',
+                           'BILA_totdebiti_su_passivo', 'BILA_IMM_Patnetto', 'BILA_IMM_attivo', 'BILA_Mat_Patnetto', 'BILA_Mat_attivo',
+                           'BILA_indebitamento_breve', 'BILA_indebitamento_ml', 'BILA_debbanche_passivo', 'BILA_dipend_finanz', 'BILA_liquid_imm',
+                           'BILA_onerifinanz_mol', 'BILA_rigidita_impieghi', 'BILA_mol_ricavi', 'BILA_oneri_ricavi', 'BILA_oneri_valagg', 'BILA_patr_su_patrml',
+                           'BILA_patr_su_patrrim', 'BILA_leverage', 'BILA_mol_valprod', 'BILA_rimanenze_attivo', 'BILA_riman_debbreve', 'BILA_riman_debml',
+                           'BILA_rimanenze_debtot', 'BILA_rimanenze_debbanche', 'BILA_roa', 'BILA_rod', 'BILA_roe', 'BILA_roi', 'BILA_ros',
+                           'BILA_rotazione_capitale', 'BILA_rotazione_circolante', 'BILA_rotazione_magazzino', 'BILA_turnover', 'BILA_valagg_fatturato',
+                           'BILA_valprod_riman')
+      
+      winsorize = function(x, alpha){
+        quant = quantile(x, c(alpha, 1-alpha))
+        x[x < quant[1]] = quant[1]
+        x[x > quant[2]] = quant[2]
+        return(x) 
+      }
+      
+      df_final = df_final %>%
+        mutate_at(all_of(var_to_winsorize), ~winsorize(., 0.01))
+      
+    }
+    
+    # evaluate statistics on recovered missing and winsorized dataset
+    {
+      write.table(basicStatistics(df_final) %>%
+                    rowwise() %>%
+                    mutate(VAR = strsplit(VARIABLE, '_')[[1]][2],
+                           COD_FT_RAPPORTO = strsplit(VARIABLE, '_')[[1]][3]) %>%
+                    left_join(var_descr, by = "VAR") %>%
+                    left_join(forme_tecniche, by = "COD_FT_RAPPORTO") %>%
+                    mutate(DESCRIPTION = ifelse(!is.na(FT_RAPPORTO), paste0(DESCRIPTION, ' - ', FT_RAPPORTO), DESCRIPTION)) %>%
+                    select(VARIABLE, DESCRIPTION, everything(), -VAR, -COD_FT_RAPPORTO, -FT_RAPPORTO) %>%
+                    mutate_all(as.character) %>%
+                    replace(is.na(.), ''),
+                  './Stats/12_df_final_stats_missing_winsor.csv', sep = ';', row.names = F, append = F)
+    }
+    
+    if (save_flag){saveRDS(df_final, './Checkpoints/df_final.rds')}
   }
 }
+df_final = readRDS('./Checkpoints/df_final.rds')
 
+# check if in CR sum of Banca == Sistema
+{
+  chiave_comune = readRDS('./Checkpoints/chiave_comune.rds')
+  df_final = readRDS('./Checkpoints/df_final.rds')
+  
+  
+  
+  
+  df_CR = readRDS('./Checkpoints/compact_data/compact_CR.rds')
+  chiave_comune = readRDS('./Checkpoints/chiave_comune.rds')
+  
+  check_tot_chiave_comune = df_CR %>%
+    select(abi, ndg) %>%
+    unique() %>%
+    left_join(chiave_comune %>% select(abi, ndg, chiave_comune), by = c("abi", "ndg")) %>%
+    group_by(chiave_comune) %>%
+    summarize(Count = n(), .groups = 'drop') %>%
+    filter(!is.na(chiave_comune)) %>%
+    left_join(chiave_comune %>%
+                group_by(chiave_comune) %>%
+                summarize(Expected_count = n(), .groups = 'drop'), by = "chiave_comune") %>%
+    mutate(Complete_abi_ndg = ifelse(Count == Expected_count, 'YES', 'NO')) %>%
+    select(-Count, -Expected_count)
+  chiave_comune = chiave_comune %>%
+    select(-Cartelle, -Folder_directory) %>%
+    left_join(check_tot_chiave_comune, by = "chiave_comune")
+  
+  check_CR_sistema = df_CR %>%
+    left_join(chiave_comune, by = c("abi", "ndg"))
+  CR_cod_dato = read.csv("./Coding_tables/CR_COD_DATO.csv", sep=";", stringsAsFactors=FALSE) %>%
+    mutate(CLS_DATO = as.character(CLS_DATO),
+           DESCR = paste0(DESCRIZIONE, '-', FENOMENO)) %>%
+    select(COD_DATO, RILEVAZIONE, DESCR) %>%
+    filter(RILEVAZIONE != '') %>%
+    filter(!COD_DATO %in% as.character(c(9789:9794, 9522))) %>%    # 9522 is available only for Banca
+    mutate(COD_DATO = paste0('CR', COD_DATO))
+  avail_CR = data.frame(COD_DATO = gsub('RAW_', '', check_CR_sistema %>% select(starts_with('RAW_')) %>% colnames()), stringsAsFactors = F) %>%
+    left_join(CR_cod_dato, by = "COD_DATO") %>%
+    group_by(DESCR) %>%
+    summarise(COUNT = n(), .groups='drop') %>%
+    filter(COUNT == 2)
+  CR_cod_dato = CR_cod_dato %>%
+    filter(DESCR %in% avail_CR$DESCR)
+  if (uniqueN(CR_cod_dato$DESCR) != nrow(CR_cod_dato) / 2){cat('\n\n ######## check check_CR_sistema')}
+  rm(chiave_comune, df_CR, check_tot_chiave_comune)
 
-
-
-
-
-
+  # check_banca = check_CR_sistema %>%
+  #   setNames(gsub('RAW_', '', names(.))) %>%
+  #   select(Complete_abi_ndg, chiave_comune, year, month, all_of(CR_cod_dato %>% filter(RILEVAZIONE == 'Banca') %>% pull(COD_DATO))) %>%
+  #   replace(is.na(.), 0) %>%
+  #   group_by(Complete_abi_ndg, chiave_comune, year, month) %>%
+  #   summarise_all(sum) %>%
+  #   ungroup()
+  # saveRDS(check_banca, './Checkpoints/aa_banca_full.rds')
+  check_banca = readRDS('./Checkpoints/aa_banca_full.rds')
+  
+  
+  # check_sistema_count = check_CR_sistema %>%
+  #   setNames(gsub('RAW_', '', names(.))) %>%
+  #   select(Complete_abi_ndg, chiave_comune, year, month, all_of(CR_cod_dato %>% filter(RILEVAZIONE == 'Sistema') %>% pull(COD_DATO))) %>%
+  #   group_by(Complete_abi_ndg, chiave_comune, year, month) %>%
+  #   summarise_all(function(x) uniqueN(x, na.rm = T)) %>%
+  #   ungroup()
+  # saveRDS(check_sistema_count, './Checkpoints/aa_sistema_count_full.rds')
+  check_sistema_count = readRDS('./Checkpoints/aa_sistema_count_full.rds')
+  if (max(check_sistema_count %>% select(-Complete_abi_ndg, -chiave_comune, -year, -month)) > 1){cat('\n\n ######## check_sistema_count has multiple values for same chiave_comune')}
+  max_unique_values = check_sistema_count %>%
+    mutate(cc = apply(., 1, function(x) max(x[5:22]))) %>%
+    filter(cc > 1)
+  max_unique_values %>% select(-Complete_abi_ndg, -chiave_comune, -year, -month) %>% summarise_all(max)
+  
+  # check_sistema = check_CR_sistema %>%
+  #   setNames(gsub('RAW_', '', names(.))) %>%
+  #   select(Complete_abi_ndg, chiave_comune, year, month, all_of(CR_cod_dato %>% filter(RILEVAZIONE == 'Sistema') %>% pull(COD_DATO))) %>%
+  #   group_by(Complete_abi_ndg, chiave_comune, year, month) %>%
+  #   summarise_all(function(x) max(x, na.rm = T)) %>%
+  #   replace(. == -Inf, 0) %>%
+  #   ungroup()
+  # saveRDS(check_sistema, './Checkpoints/aa_sistema.rds')
+  check_sistema = readRDS('./Checkpoints/aa_sistema.rds')
+  
+  
+  
+    
+  
+  
+  
+  
+  
+  
+  
+  
+    
+  check_CR_sistema = df_final %>% select(abi, ndg, chiave_comune, year, month, FLAG_Multibank, starts_with('RAW_CR'))
+  CR_cod_dato = read.csv("./Coding_tables/CR_COD_DATO.csv", sep=";", stringsAsFactors=FALSE) %>%
+    mutate(CLS_DATO = as.character(CLS_DATO),
+           DESCR = paste0(DESCRIZIONE, '-', FENOMENO)) %>%
+    select(COD_DATO, RILEVAZIONE, DESCR) %>%
+    filter(RILEVAZIONE != '') %>%
+    filter(!COD_DATO %in% as.character(c(9789:9794, 9522))) %>%    # 9522 is available only for Banca
+    mutate(COD_DATO = paste0('CR', COD_DATO))
+  avail_CR = data.frame(COD_DATO = gsub('RAW_', '', check_CR_sistema %>% select(starts_with('RAW_')) %>% colnames()), stringsAsFactors = F) %>%
+    left_join(CR_cod_dato, by = "COD_DATO") %>%
+    group_by(DESCR) %>%
+    summarise(COUNT = n(), .groups='drop') %>%
+    filter(COUNT == 2)
+  CR_cod_dato = CR_cod_dato %>%
+    filter(DESCR %in% avail_CR$DESCR)
+  if (uniqueN(CR_cod_dato$DESCR) != nrow(CR_cod_dato) / 2){cat('\n\n ######## check check_CR_sistema')}
+  
+  
+  # check_banca = check_CR_sistema %>%
+  #   setNames(gsub('RAW_', '', names(.))) %>%
+  #   select(chiave_comune, year, month, all_of(CR_cod_dato %>% filter(RILEVAZIONE == 'Banca') %>% pull(COD_DATO))) %>%
+  #   replace(is.na(.), 0) %>%
+  #   group_by(chiave_comune, year, month) %>%
+  #   summarise_all(sum) %>%
+  #   ungroup()
+  # saveRDS(check_banca, './Checkpoints/aa_banca.rds')
+  check_banca = readRDS('./Checkpoints/aa_banca.rds')
+  
+  
+  # check_sistema_count = check_CR_sistema %>%
+  #   setNames(gsub('RAW_', '', names(.))) %>%
+  #   select(chiave_comune, year, month, all_of(CR_cod_dato %>% filter(RILEVAZIONE == 'Sistema') %>% pull(COD_DATO))) %>%
+  #   group_by(chiave_comune, year, month) %>%
+  #   summarise_all(function(x) uniqueN(x, na.rm = T)) %>%
+  #   ungroup()
+  # saveRDS(check_sistema_count, './Checkpoints/aa_sistema_count.rds')
+  check_sistema_count = readRDS('./Checkpoints/aa_sistema_count.rds')
+  if (max(check_sistema_count %>% select(-chiave_comune, -year, -month)) > 1){cat('\n\n ######## check_sistema_count has multiple values for same chiave_comune')}
+  max_unique_values = check_sistema_count %>%
+    mutate(cc = apply(., 1, function(x) max(x[4:22]))) %>%
+    filter(cc > 1)
+  max_unique_values %>% select(-chiave_comune, -year, -month) %>% summarise_all(max)
+  
+  # the only variable with more than one single value for each year-month is CR9520 - it is due to RILEVAZIONE switch with CR9521
+  example = check_CR_sistema %>%
+    select(-FLAG_Multibank) %>%
+    filter(chiave_comune == '23657') %>%
+    filter(year == 2014) %>%
+    filter(month == 10) %>%
+    gather(variable, value, -c(chiave_comune, abi, ndg, year, month), factor_key=F) %>%
+    mutate(variable = gsub('RAW_', '', variable)) %>%
+    left_join(CR_cod_dato, by = c('variable' = 'COD_DATO'))
+  write.table(example, './Checks/05_sample_of_CR_multiple_values_sistema.csv', sep = ';', row.names = F, append = F)
+  
+  
+  # check_sistema = check_CR_sistema %>%
+  #   setNames(gsub('RAW_', '', names(.))) %>%
+  #   select(chiave_comune, year, month, all_of(CR_cod_dato %>% filter(RILEVAZIONE == 'Sistema') %>% pull(COD_DATO))) %>%
+  #   group_by(chiave_comune, year, month) %>%
+  #   summarise_all(function(x) max(x, na.rm = T)) %>%
+  #   replace(. == -Inf, 0) %>%
+  #   ungroup()
+  # saveRDS(check_sistema, './Checkpoints/aa_sistema.rds')
+  check_sistema = readRDS('./Checkpoints/aa_sistema.rds')
+  
+  
+  check_difference = check_banca %>%
+    gather(variable_Banca, sum_value_Banca, -c(chiave_comune, year, month), factor_key=F) %>%
+    left_join(CR_cod_dato %>% select(-RILEVAZIONE), by = c('variable_Banca' = 'COD_DATO')) %>%
+    left_join(
+      check_sistema %>%
+        gather(variable_Sistema, value_Sistema, -c(chiave_comune, year, month), factor_key=F) %>%
+        left_join(CR_cod_dato %>% select(-RILEVAZIONE), by = c('variable_Sistema' = 'COD_DATO')),
+      by = c("chiave_comune", "year", "month", "DESCR")
+    )
+  if (nrow(check_sistema) * (ncol(check_sistema) - 3) != nrow(check_difference)){cat('\n\n ######## check_difference expected rows mismatch')}
+  
+  # check matching sistema and banca
+  check_difference_same = check_difference %>%
+    mutate(check = sum_value_Banca == value_Sistema) %>%
+    group_by(chiave_comune, year, month) %>%
+    summarize(all_same = sum(check) == n(), .groups = 'drop') %>%
+    filter(all_same == TRUE)
+  
+  chiave = '105159'
+  a_year = 2014
+  a_month = 1
+  
+  example = check_CR_sistema %>%
+    select(-FLAG_Multibank) %>%
+    filter(chiave_comune == chiave) %>%
+    filter(year == a_year) %>%
+    filter(month == a_month) %>%
+    gather(variable, value, -c(chiave_comune, abi, ndg, year, month), factor_key=F) %>%
+    mutate(variable = gsub('RAW_', '', variable)) %>%
+    left_join(CR_cod_dato, by = c('variable' = 'COD_DATO'))
+  write.table(example, './Checks/05_sample_of_matching_CR_sistema_banca.csv', sep = ';', row.names = F, append = F)
+  
+  # check_difference_same_9520 = check_difference %>%
+  #   mutate(check = sum_value_Banca == value_Sistema) %>%
+  #   left_join(check_difference %>%
+  #               filter(variable_Sistema == 'CR9520' & value_Sistema > 0) %>%
+  #               filter(sum_value_Banca != value_Sistema) %>%
+  #               select(chiave_comune, year, month) %>%
+  #               unique() %>%
+  #               mutate(keep = 'YES'), by = c("chiave_comune", "year", "month")) %>%
+  #   filter(!is.na(keep)) %>%
+  #   group_by(chiave_comune, year, month) %>%
+  #   summarize(all_same = sum(check) == n(), .groups = 'drop') %>%
+  #   filter(all_same == TRUE)
+  # 
+  # chiave = '105790'
+  # a_year = 2014
+  # a_month = 3
+  # 
+  # example = check_CR_sistema %>%
+  #   select(-FLAG_Multibank) %>%
+  #   filter(chiave_comune == chiave) %>%
+  #   filter(year == a_year) %>%
+  #   filter(month == a_month) %>%
+  #   gather(variable, value, -c(chiave_comune, abi, ndg, year, month), factor_key=F) %>%
+  #   mutate(variable = gsub('RAW_', '', variable)) %>%
+  #   left_join(CR_cod_dato, by = c('variable' = 'COD_DATO')) %>%
+  #   arrange(DESCR)
+  
+  # check mismatching sistema and banca
+  check_difference_diff = check_difference %>%
+    filter(sum_value_Banca != value_Sistema)
+  summary_difference = check_difference_diff %>%
+    group_by(DESCR, variable_Banca, variable_Sistema) %>%
+    summarize(Year_month_Count = n(),
+              Chiave_comune_Count = uniqueN(chiave_comune), .groups = 'drop')
+  write.table(summary_difference, './Checks/05_summary_of_mismatching_CR_sistema_banca.csv', sep = ';', row.names = F, append = F)
+  
+  
+  chiave = '10008'
+  a_year = 2012
+  a_month = 1
+  
+  example = check_CR_sistema %>%
+    select(-FLAG_Multibank) %>%
+    filter(chiave_comune == chiave) %>%
+    filter(year == a_year) %>%
+    filter(month == a_month) %>%
+    gather(variable, value, -c(chiave_comune, abi, ndg, year, month), factor_key=F) %>%
+    mutate(variable = gsub('RAW_', '', variable)) %>%
+    left_join(CR_cod_dato, by = c('variable' = 'COD_DATO')) %>%
+    arrange(DESCR)
+  write.table(example, './Checks/05_sample_of_mismatching_CR_sistema_banca.csv', sep = ';', row.names = F, append = F)
+  write.table(chiave_comune %>% filter(chiave_comune == chiave), './Checks/05_sample_of_mismatching_CR_sistema_banca_chiave_comune.csv',
+              sep = ';', row.names = F, append = F)
+}
 
 
 
