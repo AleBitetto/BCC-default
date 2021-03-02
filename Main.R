@@ -883,7 +883,6 @@ reload_perimeter = T  # reload main perimeter
 skip_data_extraction = T  # skip data extraction from every CSV
 reload_prepare = T   # reload prepared dataset
 reload_final_combination = T   # reload df_final_reference_combination before joining all datasets
-reload_final_dataset = T  # reload df_final
 {
   # define perimeter
   {
@@ -2247,7 +2246,7 @@ reload_final_dataset = T  # reload df_final
     }
     
     # join all dataset
-    if (reload_final_dataset == FALSE){
+    {
       df_final = df_final_reference_combination
       abi_ndg_to_keep = df_final %>% select(abi, ndg) %>% unique() %>% mutate(abi_ndg = paste0(abi, '_', ndg)) %>% pull(abi_ndg)
       col_not_to_check = colnames(df_final)
@@ -2407,6 +2406,7 @@ reload_final_dataset = T  # reload df_final
         left_join(abi_ndg_to_remove %>% select(abi, ndg) %>% mutate(REMOVE = 'YES'), by = c("abi", "ndg")) %>%
         filter(is.na(REMOVE)) %>%
         select(-REMOVE)
+	  rm(abi_ndg_to_remove)
       new_abi_ndg = df_final %>% select(abi, ndg) %>% uniqueN()
       nwe_chiave_comune = df_final %>% select(chiave_comune) %>% uniqueN()
       cat('\nTotal rows after removing missing BILA_tipo_dataentry_fin:', format(nrow(df_final), big.mark=","), ' - ', format(final_rows - nrow(df_final), big.mark=","), 'removed')
@@ -2431,6 +2431,25 @@ reload_final_dataset = T  # reload df_final
         mutate(FLAG_BILANCIO = ifelse(str_detect(BILA_tipo_dataentry_fin, 'noncebi_'), 'NONCEBI', 'CEBI'))
       if (df_final %>% group_by(abi, ndg) %>% summarize(COUNT = uniqueN(FLAG_BILANCIO), .groups = 'drop') %>% pull(COUNT) %>% max() > 1){
         cat('\n\n ###### abi+ndg with multiple FLAG_BILANCIO found')}
+      
+      # add Regione and Regione_Macro
+      mapping_regione = read.csv2('./Coding_tables/Mapping_regione.csv', stringsAsFactors=FALSE, colClasses = 'character', na.strings = 'ccc') %>%
+        select(-PROVINCIA, -REGIONE)
+      mapping_regione_missing = read.csv2('./Coding_tables/Mapping_regione_missing.csv', stringsAsFactors=FALSE, colClasses = 'character')
+      df_final = df_final %>%
+        left_join(mapping_regione, by = "ANAG_cod_provincia") %>%
+        left_join(mapping_regione_missing, by = "abi") %>%
+        mutate(Regione = ifelse(Regione == 'OTH', Regione_recover, Regione)) %>%
+        mutate(
+          Regione_Macro = case_when(
+            Regione %in% c("PIE", "LIG", "LOM", "VDA") ~ "NORD-OVEST",
+            Regione %in% c("TAA", "VEN", "FVG", "EMR") ~ "NORD-EST",
+            Regione %in% c("TOS", "UMB", "MAR", "LAZ") ~ "CENTRO",
+            Regione %in% c("ABR", "CAM", "PUG", "BAS", "CAL", "MOL") ~ "SUD",
+            Regione %in% c("SIC", "SAR") ~ "ISOLE")
+        ) %>%
+        select(-Regione_recover)
+      rm(mapping_regione, mapping_regione_missing)
       
       # evaluate statistics for df_final
       write.table(basicStatistics(df_final) %>%
@@ -2618,7 +2637,27 @@ reload_final_dataset = T  # reload df_final
         rename(`Dimensione_Impresa\\CRIF` = Var1) %>%
         mutate_all(list(~format(., big.mark=",")))
       write.table(segmento_map, './Stats/10_df_final_Dimensione_Impresa_mapping.csv', sep = ';', row.names = F, append = F)
-      rm(var_descr, forme_tecniche, check_Impresa, segmento_map)
+      rm(check_Impresa, segmento_map)
+    }
+    
+    # check missing distribution for BILA by BILA_tipo_dataentry_fin
+    {
+      var_to_check = c('BILA_onerifinanz_mol', 'BILA_oneri_ricavi', 'BILA_oneri_valagg', 'BILA_rimanenze_attivo', 'BILA_riman_debbreve',
+                       'BILA_riman_debml', 'BILA_rimanenze_debtot', 'BILA_rimanenze_debbanche', 'BILA_roi', 'BILA_ros', 'BILA_valprod_riman')
+      check_missing = data.frame(Tot_Abi_Ndg = unique(df_final$BILA_tipo_dataentry_fin), stringsAsFactors = F)
+      for (v in var_to_check){
+        check_missing = check_missing %>%
+          left_join(df_final %>%
+                      select(abi, ndg, BILA_tipo_dataentry_fin, all_of(v)) %>%
+                      mutate(abi_ndg = paste0(abi, ndg)) %>%
+                      filter(is.na(!!sym(v))) %>%
+                      group_by(BILA_tipo_dataentry_fin) %>%
+                      summarize(Count_Abi_Ndg = format(uniqueN(abi_ndg), big.mark = ','), .groups = 'drop') %>%
+                      rename(!!sym(v) := Count_Abi_Ndg,
+                             Tot_Abi_Ndg = BILA_tipo_dataentry_fin), by = "Tot_Abi_Ndg")
+      }
+      write.table(check_missing %>% replace(is.na(.), ''), './Checks/06_df_final_missing_BILA.csv', sep = ';', row.names = F, append = F)
+      rm(check_missing)
     }
 
     # replace missing
@@ -2672,6 +2711,7 @@ reload_final_dataset = T  # reload df_final
     
     # winsorize variables
     {
+      winsor_level = 0.05
       var_to_winsorize = c('BILA_ARIC_VPROD', 'BILA_cashflow_valprod', 'BILA_IMM_VPROD', 'BILA_liquid_attivo', 'BILA_VAGG_VPROD', 'BILA_acid_test',
                            'BILA_ammor_su_costi', 'BILA_autonomia_finanz', 'BILA_debbanche_circolante', 'BILA_cashflow_ricavi', 'BILA_copertura_attivo',
                            'BILA_copertura_immob', 'BILA_copertura_finanz', 'BILA_costolavoro_ricavi', 'BILA_costolavoro_valagg', 'BILA_costolavoro_valprod',
@@ -2693,7 +2733,7 @@ reload_final_dataset = T  # reload df_final
       }
       
       df_final = df_final %>%
-        mutate_at(all_of(var_to_winsorize), ~winsorize(., 0.01))
+        mutate_at(all_of(var_to_winsorize), ~winsorize(., winsor_level))
       
     }
     
@@ -2710,6 +2750,7 @@ reload_final_dataset = T  # reload df_final
                     mutate_all(as.character) %>%
                     replace(is.na(.), ''),
                   './Stats/12_df_final_stats_missing_winsor.csv', sep = ';', row.names = F, append = F)
+      rm(var_descr, forme_tecniche)
     }
     
     if (save_flag){saveRDS(df_final, './Checkpoints/df_final.rds')}
@@ -2964,6 +3005,41 @@ df_final = readRDS('./Checkpoints/df_final.rds')
 }
 
 
+# export to csv and dta
+{
+  library(haven)
+  for (bila in unique(df_final$FLAG_BILANCIO)){
+    tt = df_final %>% filter(FLAG_BILANCIO == bila)
+    write_dta(tt, paste0(bila,'_mensile_2012_2014.dta'))
+    write.table(tt, paste0(bila,'_mensile_2012_2014.csv'), sep = ',', row.names = F, append = F)
+    rm(tt)
+  }
+  
+  for (bila in unique(df_final$FLAG_BILANCIO)){
+    tt = df_final %>%
+      filter(FLAG_BILANCIO == bila) %>%
+      select(abi, ndg, chiave_comune, year, month, segmento_CRIF, FLAG_Multibank, ANAG_ateco, ANAG_sae, ANAG_rae, ANAG_cab_residenza,
+             ANAG_cod_provincia, ANAG_comune, ANAG_cab_comune, ANAG_flag_def, ANAG_tipo_ndg, ANAG_socio, Tot_Attivo_log10, Dimensione_Impresa,
+             Regione, Regione_Macro, MAX_CC011, MAX_CC012, AVG_CC011, AVG_CC012, SUM_CC000, SUM_CC001, SUM_MURA005_CHIRO, SUM_MURA005_IPO,
+             SUM_MURA006_CHIRO, SUM_MURA006_IPO, SUM_MURA008_CHIRO, SUM_MURA008_IPO, SUM_MURA009_CHIRO, SUM_MURA009_IPO, SUM_ANFA000, SUM_ANFA001,
+             SUM_PCSBF000, SUM_PCSBF001, RAW_CR9501, RAW_CR9503, RAW_CR9505, RAW_CR9507, RAW_CR9509, RAW_CR9511, RAW_CR9513, RAW_CR9515, RAW_CR9517,
+             RAW_CR9525, RAW_CR9527, RAW_CR9528, RAW_CR9529, RAW_I001, RAW_I002, RAW_I003, RAW_I004, RAW_I005, RAW_I006, RAW_I007, RAW_IO,
+             RAW_PD_180, RAW_PD_90 , RAW_PR, RAW_SO, RAW_SS, ANAG_gg_sconf, ANAG_acc_cassa , ANAG_acc_firma, ANAG_accordato, ANAG_util_cassa,
+             ANAG_util_firma, ANAG_utilizzato) %>%
+      filter(year == 2013)
+    write.table(tt, paste0(bila,'_mensile_2013.csv'), sep = ',', row.names = F, append = F)
+    
+    tt = df_final %>%
+      filter(FLAG_BILANCIO == bila) %>%
+      filter(year != 2014) %>%
+      select(abi, ndg, chiave_comune, year, segmento_CRIF, FLAG_Multibank, Tot_Attivo_log10, Dimensione_Impresa, Regione, Regione_Macro,
+             starts_with('BILA_')) %>%
+      unique()
+    write.table(tt, paste0(bila,'_Bilancio_2012-2013.csv'), sep = ',', row.names = F, append = F)
+    rm(tt)
+  }
+  
+}
 
 
 
@@ -2972,47 +3048,12 @@ df_final = readRDS('./Checkpoints/df_final.rds')
 
 
 
-
-
-
-# todo: una volta capiti come sono fatti i file crea un "loader" che, in base al nome del file, formatti le colonne del file da leggere
-#       e faccia le eventuali trasformazioni (tipo sostituire , con . per i decimali). Magari puoi mettere un switch per capire solo il formato
-#       atteso delle colonne così da avere una descrizione precisa nella funzione file_stats -> in realtà è superfluo perché se leggi già il file formattato
-#       con le trasformazioni tutte le statistiche vengono già calcolate correttamente.
-# todo: puoi anche ritornare il numero di colonne scartate (ad esempio abi = ***) così da aggiungere l'info in file_stats
-
-# todo: controlla in quanti casi ho o solo il NAG o solo il NAG_COLLEGATO con la chiave_comune (potremmo estenderla a quello non censito con la chiave_comune)
 
 # todo: controllare se gli NDG multipli nella stessa banca sono consecutivi (cambio di NDG nel tempo) o contemporanei. Controlla i file AI_CC
 #       oppure possiamo controllare per ogni tipologia di file?
 
-
-
-
-
-
-
-
-# todo: aggancia tutti i dati CRIF evidenziati in 'Contenuto BD Crif...'
-#       aggancia tutti i dati CSD evidenziati in 'Legenda flussi AI' e 'CR' (bisogna capire come agganciare la colonna COD_PRODOTTO)
-
-
-
-
-# todo: in bilancio e anagrafica ci sono dei casi in cui l'informazione è diversa in base all'anno e la possiamo agganciare puntualmente.
-#       cosa facciamo con quelli che hanno l'informazione solo per un anno? la riportiamo uguale anche per gli anni mancanti?
-#       tagliamo fuori il 2012? ciò potrebbe rendere mancanti dei dati. E se ho 2 anni su 3, quale uso per recuperare il mancante?
-# todo: per anagrafica, spalma dati disponibili, per bilancio, lascia quelli presenti (magari crea un flag dove per abi+ndg c'è il conteggio degli anni presenti)
-
-
-
-# todo: crea report numero di abi+ndg agganciati + numero di anni presenti (per bilancio)
-
 # todo: controlla quante aziende con bilancio 3 anni hanno effettivamente lavorato per i 3 anni con le banche (dagli andamentali interni).
 #       si può fare una statistica generica su quanto sono popolati i dati panel per ogni anno
-
-
-
 
 
 
@@ -3021,14 +3062,3 @@ df_final = readRDS('./Checkpoints/df_final.rds')
 #       così si può evitare il problema di NDG che cambiano nel tempo. Meglio, si può prendere l'unique di chiavi comuni per ogni tipologia 
 #       di file (quindi considerando tutti i mesi insieme) e poi fare il confronto. Mi aspetterei che in anagrafica ci siano sempre tutti, in altri no 
 
-# todo: controlla come agganciare l'anagrafica    <<-------
-#       per ogni coppia abi+ndg ci sono più righe relative a date differenti. Prendiamo la più recente? A volte la data più recente ha dei missing rispetto
-#       alle altre (e.s. filter(abi == "8354" & ndg == "0000000000000470") )
-
-# le colonne X in BILDATI corrispondono a CEBI (la X la aggiunge R)
-
-# todo: dopo aver creato il data_loader crea lista di tutte le colonne disponibili con minime statistiche (min/max, uniqueN, alcuni esempi)
-#       ha senso fare un controllo sugli NDG per confrontarli in chiave_comune?
-
-
-# todo: 3599 dovrebbe essere esclusa dall'analisi finale

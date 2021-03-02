@@ -442,7 +442,7 @@ basicStatistics = function(data){
   } else {StatNum=data.frame()}
   
   # Get dates columns
-  dates <- names(which(sapply(data, is.Date)))
+  dates <- names(which(sapply(data, lubridate::is.Date)))
   if (length(dates)>0){
     StatDat = c()
     for (col in dates){
@@ -487,10 +487,12 @@ basicStatistics = function(data){
   } else {StatChar=data.frame()}
   
   Stat=bind_rows(StatNum,StatDat,StatChar)
+  
   Stat=cbind(VARIABLE=c(rownames(StatNum),rownames(StatDat),rownames(StatChar)),
              TYPE=c(rep('NUMERIC',length(nums)),rep('DATE',length(dates)),rep('CHARACTER',length(chars))),
-             NUM_OSS=nrow(data),Stat) %>%
-    select(VARIABLE, TYPE, NUM_OSS, UNIQUE_VALS, NAs, BLANKs, everything())
+             NUM_OSS=nrow(data),Stat)
+  col_first = intersect(c('VARIABLE', 'TYPE', 'NUM_OSS', 'UNIQUE_VALS', 'NAs', 'BLANKs'), colnames(Stat))
+  Stat = Stat %>% select(all_of(col_first), everything())
   
   final=data.frame(VARIABLE=colnames(data), stringsAsFactors = F)
   final = final %>% left_join(Stat, by = "VARIABLE")
@@ -499,4 +501,402 @@ basicStatistics = function(data){
   final = as.data.frame(final, stringsAsFactors = F)
   
   return(final)
+}
+
+# evaluate correlation and partial correlation
+evaluate_correlation = function(df, corr_method = 'pearson'){
+  # df: data.frame of variables
+  
+  corr = rcorr(df %>% as.matrix(), type = corr_method)
+  corr_v = corr$r
+  corr_v[lower.tri(corr_v, diag = T)] = NA
+  corr_v = reshape2::melt(corr_v) %>% filter(!is.na(value)) %>% setNames(c('Var1', 'Var2', 'Corr')) %>% mutate_if(is.factor, as.character)
+  corr_p = round(corr$P, 8)
+  corr_p[lower.tri(corr_p, diag = T)] = NA
+  corr_p = reshape2::melt(corr_p) %>% filter(!is.na(value)) %>% setNames(c('Var1', 'Var2', 'Corr_pVal')) %>% mutate_if(is.factor, as.character)
+  
+  pcorr = suppressWarnings(pcor(df, method = corr_method))
+  pcorr_v = pcorr$estimate
+  rownames(pcorr_v) = colnames(pcorr_v) = colnames(df)
+  pcorr_v[lower.tri(pcorr_v, diag = T)] = NA
+  pcorr_v = reshape2::melt(pcorr_v) %>% filter(!is.na(value)) %>% setNames(c('Var1', 'Var2', 'PartCorr')) %>% mutate_if(is.factor, as.character)
+  pcorr_p = round(pcorr$p.value, 8)
+  rownames(pcorr_p) = colnames(pcorr_p) = colnames(df)
+  pcorr_p[lower.tri(pcorr_p, diag = T)] = NA
+  pcorr_p = reshape2::melt(pcorr_p) %>% filter(!is.na(value)) %>% setNames(c('Var1', 'Var2', 'PartCorr_pVal')) %>% mutate_if(is.factor, as.character)
+  
+  correlation_list = corr_v %>%
+    left_join(corr_p, by = c("Var1", "Var2")) %>%
+    left_join(pcorr_v, by = c("Var1", "Var2")) %>%
+    left_join(pcorr_p, by = c("Var1", "Var2")) %>%
+    mutate(abs = abs(PartCorr)) %>%
+    arrange(desc(abs))
+  
+  return(correlation_list)
+}
+
+# PCA output
+pca_fun = function(slice, k_fold, cv, method_title){
+  pca = prcomp(slice,
+               center = F,
+               scale = F)
+  
+  # find optimal number of PC
+  PC_opt = c(PC_CV = ncol(slice))
+  if(cv){
+    PC_opt = cv_pca(slice, func = pca_fun, k_fold)
+  }
+  pca$PC_opt = PC_opt
+  
+  load = pca$rotation
+  summ = summary(pca)
+  scree_plot = fviz_eig_mod(pca, addlabels = T, pc_to_highlight = min(PC_opt))
+  scree_plot$labels$title = paste0(method_title, ' - ', scree_plot$labels$title)
+  load_plot = factoextra::fviz_pca_var(pca,
+                           col.var = "contrib", # Color by contributions to the PC
+                           gradient.cols = c("#00AFBB", "#E7B800", "#FC4E07"),
+                           repel = TRUE     # Avoid text overlapping
+  )
+  load_plot$labels$title = paste0(method_title, ' - ', load_plot$labels$title)
+  bi_plot = factoextra::fviz_pca_biplot(pca, repel = TRUE,
+                            col.var = "#2E9FDF", # Variables color
+                            col.ind = "#696969"  # Individuals color
+  )
+  bi_plot$labels$title = paste0(method_title, ' - ', bi_plot$labels$title)
+  load_table = data.frame(variable = rep(rownames(load), ncol(load)),
+                          PC = rep(c(1:ncol(load)), rep(nrow(load), ncol(load))),
+                          loading = as.numeric(load), stringsAsFactors = F)
+  importance_table = data.frame(PC = colnames(summ$importance), stringsAsFactors = F) %>%
+    cbind(as.data.frame(t(summ$importance)[, -1], stringsAsFactors = F))
+  return(list(pca = pca,
+              load_table = load_table,
+              importance_table = importance_table,
+              scree_plot = scree_plot,
+              load_plot = load_plot,
+              bi_plot = bi_plot))
+}
+
+# PC number selection
+cv_pca = function(slice, func, k_fold){
+  
+  # Wold Cross Validation - https://www.researchgate.net/publication/5638191_Cross-validation_of_component_models_A_critical_look_at_current_methods
+  
+  n = nrow(slice)
+  max_pc = min(dim(slice))
+  set.seed(10)
+  cv_ind = caret::createFolds(c(1:n), k = k_fold, list = TRUE, returnTrain = FALSE)
+  max_pc_fold = min(c(n - max(unlist(lapply(cv_ind,length))), max_pc))
+  cv_err = c()
+  for (fold in 1:length(cv_ind)){
+    cal_set = slice[setdiff(1:n, cv_ind[[fold]]), ] %>% as.matrix()
+    val_set = slice[cv_ind[[fold]], ] %>% as.matrix()
+    cv_est = func(slice = cal_set, k_fold = NULL, cv = F, method_title = '')
+    
+    for (pc in 1:(max_pc_fold - 1)){
+      load_pc = cv_est$pca$rotation[, 1:pc]
+      score_pc = val_set %*% load_pc
+      val_set_approx = score_pc %*% t(load_pc)
+      cv_err = cv_err %>% rbind(c(FOLD = fold, PC = pc, ERR = sum((val_set - val_set_approx) ^ 2)))
+      
+    }
+  }
+  tot_var = sum(slice ^ 2)
+  cv_err_avg = cv_err %>% as.data.frame() %>%
+    group_by(PC) %>%
+    summarise(R = sum(ERR) / tot_var, .groups = "drop") %>%
+    filter(R < 1) %>%
+    arrange(desc(PC))
+  pc_opt_wold = cv_err_avg$PC[1]
+  
+  
+  # Malinowski error (REV - Reduced EigenValue)
+  
+  F_signif = 0.1
+  
+  eval_pca = func(slice, k_fold = NULL, cv = F, method_title = '')$pca
+  eig = eval_pca$sdev^2
+  # rev_l = c()
+  # for (pc in 1:(max_pc - 1)){
+  #  den = 0
+  #  for (m in (pc + 1):max_pc){
+  #    den = den + eig[m] / ((max_pc - m + 1) * (n - m + 1))
+  #  }
+  #  F_ratio = (eig[pc] / ((max_pc - pc + 1) * (n - pc + 1))) / den
+  #  F_quant = qf(F_signif, 1, n - pc, lower.tail = TRUE, log.p = FALSE)
+  #  rev_l = c(rev_l, ifelse(F_ratio < F_quant, 0, 1))
+  # }
+  REV = rev_l = c()
+  for (pc in 1:(max_pc - 1)){
+    REV = c(REV, eig[pc] / ((max_pc - pc + 1) * (n - pc + 1)))
+  }
+  for (pc in 1:(max_pc - 2)){
+    F_ratio = (n - pc) * REV[pc] / sum(REV[(pc + 1):(max_pc - 1)])
+    F_quant = qf(F_signif, 1, n - pc, lower.tail = TRUE, log.p = FALSE)
+    rev_l = c(rev_l, ifelse(F_ratio < F_quant, 0, 1))
+  }
+  pc_opt_REV =  suppressWarnings(min(which(rev_l == 0)) - 1)
+  if (!is.finite(pc_opt_REV)){pc_opt_REV = max_pc - 1}
+  
+  
+  # Q-stat
+  
+  Q_signif = 0.1
+  
+  Q_val = c()
+  load = eval_pca$rotation
+  for (pc in 1:(max_pc - 1)){
+    r = (diag(max_pc) - load[1:max_pc, 1:pc] %*% t(load[1:max_pc, 1:pc])) %*% t(eval_pca$x)
+    Q = diag(t(r) %*% r)
+    T1 = sum(eig[(pc + 1):max_pc])
+    T2 = sum(eig[(pc + 1):max_pc] ^ 2)
+    T3 = sum(eig[(pc + 1):max_pc] ^ 3)
+    h0 = 1 - 2 * T1 * T2 / (3 * T3 ^ 2)
+    Q_lim = T1 * (1 + (h0 * qnorm(Q_signif) * sqrt(2 * T2)) / T1 + (T2 * h0 * (h0 - 1)) / T1 ^ 2) ^ (1 / h0)
+    Q_val = c(Q_val, sum(Q > Q_lim))
+  }
+  pc_opt_Q = which.min(Q_val)
+  
+  return(c(Wold = pc_opt_wold,
+           REV = pc_opt_REV,
+           Q = pc_opt_Q))
+}
+
+# fviz_eig modified to show suggested number of PC
+fviz_eig_mod = function (X, choice = c("variance", "eigenvalue"), geom = c("bar", 
+                                                                           "line"), barfill = c("steelblue", 'red'), barcolor = "steelblue", 
+                         linecolor = "black", ncp = 10, addlabels = FALSE, hjust = 0, 
+                         main = NULL, xlab = NULL, ylab = NULL, ggtheme = theme_minimal(), pc_to_highlight,
+                         ...){
+  eig <- factoextra::get_eigenvalue(X)
+  eig <- eig[1:min(ncp, nrow(eig)), , drop = FALSE]
+  choice <- choice[1]
+  if (choice == "eigenvalue") {
+    eig <- eig[, 1]
+    text_labels <- round(eig, 0)
+    if (is.null(ylab)) 
+      ylab <- "Eigenvalue"
+  }
+  else if (choice == "variance") {
+    eig <- eig[, 2]
+    text_labels <- round(eig, 0)
+  }
+  else stop("Allowed values for the argument choice are : 'variance' or 'eigenvalue'")
+  text_labels[5:length(text_labels)] = ""
+  if (length(intersect(geom, c("bar", "line"))) == 0) 
+    stop("The specified value(s) for the argument geom are not allowed ")
+  df.eig <- data.frame(dim = factor(1:length(eig)), eig = eig)
+  df.eig$hl = ifelse(df.eig$dim == pc_to_highlight, 1, 0)
+  df.eig$hl = factor(df.eig$hl)
+  extra_args <- list(...)
+  bar_width <- extra_args$bar_width
+  linetype <- extra_args$linetype
+  if (is.null(linetype)) 
+    linetype <- "solid"
+  p <- ggplot(df.eig, aes(dim, eig, group = hl))
+  if ("bar" %in% geom) 
+    p <- p + geom_bar(stat = "identity", aes(fill=hl), 
+                      color = barcolor, width = bar_width) +
+    scale_fill_manual(values = barfill)
+  if ("line" %in% geom) 
+    p <- p + geom_line(color = linecolor, linetype = linetype) + 
+    geom_point(shape = 19, color = linecolor)
+  if (addlabels) 
+    p <- p + geom_text(label = text_labels, vjust = -0.4, 
+                       hjust = hjust)
+  if (is.null(main)) 
+    main <- "Scree plot"
+  if (is.null(xlab)) 
+    xlab <- "Dimensions"
+  if (is.null(ylab)) 
+    ylab <- "Percentage of explained variances"
+  p <- p + labs(title = main, x = xlab, y = ylab) +
+    theme(legend.position = "none")
+  ggpubr::ggpar(p, ...)
+  return(p)
+}
+
+# fit Robust PCA and automatically select optimal number of PC
+fit_pca = function(pca_input, NA_masking = NULL){
+  
+  if (!is.null(NA_masking)){
+    pca_input = pca_input %>%
+      replace(is.na(.), NA_masking)
+    masking = is.na(pca_input)
+  } else {
+    masking = matrix(FALSE, ncol = ncol(pca_input), nrow = nrow(pca_input))
+  }
+  
+  robpca = rpca(as.matrix(pca_input), trace = F, max.iter = 10000)
+  
+  if (robpca$convergence$converged == F){cat('\n #### RobPCA did not converge')}
+  L = robpca$L; colnames(L) = colnames(pca_input); rownames(L) = rownames(pca_input)
+  S = robpca$S
+  res_pca = pca_fun(L, k_fold=3, cv = F, method_title = '')
+  loadings = res_pca$pca$rotation
+  scores = res_pca$pca$x
+  
+  # select optimal number of PC based on % increase in cumulative expl. var.
+  max_increase = 0.05
+  importance_selection = res_pca$importance_table
+  importance_selection = c(0, importance_selection$`Cumulative Proportion`[-1]/importance_selection$`Cumulative Proportion`[-22]-1)
+  pc_selection = which(importance_selection > max_increase) %>% max()
+  
+  scores_pc = L %*% loadings[, 1:pc_selection]
+  pca_input_reconstr = scores_pc %*% t(loadings[,1:pc_selection]) + S
+  
+  recRMSE = mean((as.matrix(pca_input) - pca_input_reconstr)^2) %>% sqrt()
+  AvgAbsInput = mean(abs(pca_input) %>% as.matrix())
+  recRMSE_no_mask = mean((as.matrix(pca_input)[!masking] - pca_input_reconstr[!masking])^2) %>% sqrt()
+  AvgAbsInput_no_mask = mean(abs(as.matrix(pca_input))[!masking])
+  R2 = round(eval_R2(pca_input, pca_input_reconstr) * 100, 1)
+  R2_99 = round(eval_R2(pca_input, pca_input_reconstr, 0.99) * 100, 1)
+  R2_95 = round(eval_R2(pca_input, pca_input_reconstr, 0.95) * 100, 1)
+  
+  return(list(embedding_dim = pc_selection,
+              Embedding = scores_pc,
+              ExplCumVar_loading = round(res_pca$importance_table$`Cumulative Proportion`[pc_selection] * 100, 1),
+              AvgAbsInput = AvgAbsInput,
+              ReconstErrorRMSE = recRMSE,
+              ReconstErrorRMSE_no_mask = recRMSE_no_mask,
+              AvgAbsInput_no_mask = AvgAbsInput_no_mask,
+              R2 = R2,
+              R2_99 = R2_99,
+              R2_95 = R2_95,
+              robpca = robpca,
+              res_pca = res_pca,
+              importance_table = res_pca$importance_table,
+              report = data.frame(Embedding_Dimension = pc_selection,
+                                  PCA_ExplCumVar = round(res_pca$importance_table$`Cumulative Proportion`[pc_selection] * 100, 1),
+                                  rr = paste0(round(recRMSE, 4), ' (', round(recRMSE / AvgAbsInput * 100, 1), '%)'),
+                                  Reconst_RMSE_no_mask = round(recRMSE_no_mask, 4),
+                                  R2 = R2,
+                                  R2_99 = R2_99,
+                                  R2_95 = R2_95, stringsAsFactors = F) %>%
+                rename(`Reconst_RMSE (% of AvgAbsInput)` = rr))
+  )
+}
+
+# evaluate R^2 and its percentile
+eval_R2 = function(orginal_data, predicted_data, alpha = NULL){
+  # evaluare R2 = 1 - RSS/TSS
+  
+  TSS_val = (as.matrix(orginal_data) - mean(as.matrix(orginal_data))) ^ 2
+  RSS_val = (as.matrix(orginal_data) - as.matrix(predicted_data)) ^ 2
+  
+  if (is.null(alpha)){
+    RSS = sum(RSS_val)
+    TSS = sum(TSS_val)
+  } else {
+    ind = RSS_val <= quantile(RSS_val, alpha)
+    RSS = sum(RSS_val[ind])
+    TSS = sum(TSS_val[ind])
+  }
+  
+  R2 = 1 - RSS / TSS
+  
+  return(R2)
+}
+
+# aggregate data to plot into grid
+aggregate_points = function(plot_data, label_values, n_cell = 20){
+  # plot_data: data.frame with Dim1, Dim2 and Label columns
+  # label_values: available values to be converted to factor
+  # n_cell: number of cells on shortest dimension
+  
+  # return: data.frame with Dim1, Dim2, Label and size columns for evaluated centroid of each Label value
+  #         grid_x, grid_y with grid points
+  
+  max_x = max(plot_data$Dim1)
+  min_x = min(plot_data$Dim1)
+  max_y = max(plot_data$Dim2)
+  min_y = min(plot_data$Dim2)
+  cell_size = min(c((max_x - min_x) / n_cell, (max_y - min_y) / n_cell))
+  grid_x = round(sort(unique(c(seq(min_x, max_x, by = cell_size), min_x, max_x))), 4)
+  grid_y = round(sort(unique(c(seq(min_y, max_y, by = cell_size), min_y, max_y))), 4)
+  
+  cell_summary = c()
+  for (i in 2:length(grid_x)){
+    for (j in 2:length(grid_y)){
+      x_min = grid_x[i-1]
+      x_max = grid_x[i]
+      y_min = grid_y[j-1]
+      y_max = grid_y[j]
+      x_filter = paste0('Dim1 >= ', x_min, ' & Dim1 <', ifelse(i == length(grid_x), '=', ''), ' ', x_max)
+      y_filter = paste0('Dim2 >= ', y_min, ' & Dim2 <', ifelse(j == length(grid_y), '=', ''), ' ', y_max)
+      # cat('\n', i,j, x_filter, '     ', y_filter)
+      cell = plot_data %>%
+        filter(!!quo(eval(parse(text=x_filter)))) %>%
+        filter(!!quo(eval(parse(text=y_filter))))
+      for (val in label_values){
+        centroid = cell %>%
+          filter(Label == val) %>%
+          select(-Label) %>%
+          summarize_all(mean) %>%
+          as.numeric()
+        cell_summary = cell_summary %>%
+          bind_rows(data.frame(cell = paste0('(', i-1, ',', j-1, ')'), Label = val, size = sum(cell$Label == val),
+                               Dim1 = centroid[1], Dim2 = centroid[2],
+                               cell_range = paste0(x_min, ',', x_max, '|', y_min, ',', y_max), stringsAsFactors = F))
+      } # val
+    } # j
+  } # i
+  cell_summary = cell_summary %>%
+    filter(is.finite(Dim1))
+  if (sum(cell_summary$size) != nrow(plot_data)){cat('\n\n ###### missing points in cell_summary')}
+  
+  # reshape centroid to be equally spaced within the cell
+  final_points = c()
+  for (cel in unique(cell_summary$cell)){
+    df_cell = cell_summary %>%
+      filter(cell == cel)
+    if (nrow(df_cell) >= 1){
+      points = generate_points(nrow(df_cell))
+      x_min = strsplit(strsplit(df_cell$cell_range[1], '\\|')[[1]][1], ',')[[1]][1] %>% as.numeric()
+      y_min = strsplit(strsplit(df_cell$cell_range[1], '\\|')[[1]][2], ',')[[1]][1] %>% as.numeric()
+      for (i in 1:nrow(df_cell)){
+        df_cell$Dim1[i] = x_min + cell_size * points[i, 1]
+        df_cell$Dim2[i] = y_min + cell_size * points[i, 2]
+      }
+      # plot(df_cell %>% select(Dim1, Dim2), xlim = c(x_min, x_min+cell_size), ylim = c(y_min, y_min+cell_size))
+    }
+    final_points = final_points %>%
+      bind_rows(df_cell)
+  }
+  final_points = final_points %>%
+    mutate(Label = factor(Label, levels = label_values))
+  if (sum(cell_summary$size) != sum(final_points$size)){cat('\n\n ###### missing points in final_points')}
+  
+  
+  return(list(cell_summary = final_points,
+              grid_x = grid_x,
+              grid_y = grid_y))
+}
+
+# generate "equally spaced" points in [0,1] x [0,1]
+generate_points = function(n){
+  
+  if (n == 2){
+    points = matrix(c(0.25, 0.75, 0.75, 0.25), ncol = 2, byrow = T)
+  } else if (n == 3){
+    points = matrix(c(0.5, 0.75, 0.2, 0.25, 0.8, 0.25), ncol = 2, byrow = T)
+  } else if (n == 4){
+    points = matrix(c(0.2, 0.2, 0.2, 0.8, 0.8, 0.2, 0.8, 0.8), ncol = 2, byrow = T)
+  } else if (n == 5){
+    points = matrix(c(0.2, 0.2, 0.2, 0.8, 0.8, 0.2, 0.8, 0.8, 0.5, 0.5), ncol = 2, byrow = T)
+  } else if (n == 6){
+    points = matrix(c(0.15, 0.4, 0.3, 0.85, 0.5, 0.1, 0.5, 0.5, 0.85, 0.4, 0.7, 0.85), ncol = 2, byrow = T)
+  } else {
+    points = sobol(n, dim = 2, scrambling = 3)
+  }
+  
+  return(points)
+}
+
+# evaluate embedding quality (residual variance)
+eval_R2_embedding = function(original_dist_mat, embedding_dist_mat){
+  d_or = c(original_dist_mat[lower.tri(original_dist_mat, diag = F)], original_dist_mat[upper.tri(original_dist_mat, diag = F)])
+  d_em = c(embedding_dist_mat[lower.tri(embedding_dist_mat, diag = F)], embedding_dist_mat[upper.tri(embedding_dist_mat, diag = F)])
+  R2emb = cor(d_or, d_em)
+  
+  return(R2emb)
 }
