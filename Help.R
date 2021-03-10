@@ -716,30 +716,41 @@ fviz_eig_mod = function (X, choice = c("variance", "eigenvalue"), geom = c("bar"
 }
 
 # fit Robust PCA and automatically select optimal number of PC
-fit_pca = function(pca_input, NA_masking = NULL){
+fit_pca = function(pca_input, NA_masking = NULL, force_pc_selection = NULL, RobPCA_method = TRUE){
   
   if (!is.null(NA_masking)){
+    masking = is.na(pca_input)
     pca_input = pca_input %>%
       replace(is.na(.), NA_masking)
-    masking = is.na(pca_input)
   } else {
     masking = matrix(FALSE, ncol = ncol(pca_input), nrow = nrow(pca_input))
   }
   
-  robpca = rpca(as.matrix(pca_input), trace = F, max.iter = 10000)
-  
-  if (robpca$convergence$converged == F){cat('\n #### RobPCA did not converge')}
-  L = robpca$L; colnames(L) = colnames(pca_input); rownames(L) = rownames(pca_input)
-  S = robpca$S
+  if (RobPCA_method){
+    robpca = rpca(as.matrix(pca_input), trace = F, max.iter = 10000)
+    
+    if (robpca$convergence$converged == F){cat('\n #### RobPCA did not converge')}
+    L = robpca$L; colnames(L) = colnames(pca_input); rownames(L) = rownames(pca_input)
+    S = robpca$S
+  } else {
+    L = pca_input %>% as.matrix()
+    S = matrix(0, ncol = ncol(pca_input), nrow = nrow(pca_input))
+    robpca = NULL
+  }
   res_pca = pca_fun(L, k_fold=3, cv = F, method_title = '')
   loadings = res_pca$pca$rotation
   scores = res_pca$pca$x
   
   # select optimal number of PC based on % increase in cumulative expl. var.
   max_increase = 0.05
-  importance_selection = res_pca$importance_table
-  importance_selection = c(0, importance_selection$`Cumulative Proportion`[-1]/importance_selection$`Cumulative Proportion`[-22]-1)
-  pc_selection = which(importance_selection > max_increase) %>% max()
+  if (is.null(force_pc_selection)){
+    importance_selection = res_pca$importance_table
+    importance_selection = c(0, importance_selection$`Cumulative Proportion`[-1]/importance_selection$`Cumulative Proportion`[-ncol(pca_input)]-1)
+    pc_selection = suppressWarnings(which(importance_selection > max_increase) %>% max())
+    pc_selection = ifelse(is.infinite(pc_selection), 1, pc_selection)
+  } else {
+    pc_selection = force_pc_selection
+  }
   
   scores_pc = L %*% loadings[, 1:pc_selection]
   pca_input_reconstr = scores_pc %*% t(loadings[,1:pc_selection]) + S
@@ -748,12 +759,13 @@ fit_pca = function(pca_input, NA_masking = NULL){
   AvgAbsInput = mean(abs(pca_input) %>% as.matrix())
   recRMSE_no_mask = mean((as.matrix(pca_input)[!masking] - pca_input_reconstr[!masking])^2) %>% sqrt()
   AvgAbsInput_no_mask = mean(abs(as.matrix(pca_input))[!masking])
-  R2 = round(eval_R2(pca_input, pca_input_reconstr) * 100, 1)
-  R2_99 = round(eval_R2(pca_input, pca_input_reconstr, 0.99) * 100, 1)
-  R2_95 = round(eval_R2(pca_input, pca_input_reconstr, 0.95) * 100, 1)
+  R2 = round(eval_R2(pca_input, pca_input_reconstr, masking = masking) * 100, 1)
+  R2_99 = round(eval_R2(pca_input, pca_input_reconstr, 0.99, masking = masking) * 100, 1)
+  R2_95 = round(eval_R2(pca_input, pca_input_reconstr, 0.95, masking = masking) * 100, 1)
   
   return(list(embedding_dim = pc_selection,
               Embedding = scores_pc,
+              Embedding_Range = paste0(range(scores_pc) %>% round(2), collapse = ' '),
               ExplCumVar_loading = round(res_pca$importance_table$`Cumulative Proportion`[pc_selection] * 100, 1),
               AvgAbsInput = AvgAbsInput,
               ReconstErrorRMSE = recRMSE,
@@ -765,6 +777,8 @@ fit_pca = function(pca_input, NA_masking = NULL){
               robpca = robpca,
               res_pca = res_pca,
               importance_table = res_pca$importance_table,
+              options = list(NA_masking = NA_masking,
+                             masking = masking),
               report = data.frame(Embedding_Dimension = pc_selection,
                                   PCA_ExplCumVar = round(res_pca$importance_table$`Cumulative Proportion`[pc_selection] * 100, 1),
                                   rr = paste0(round(recRMSE, 4), ' (', round(recRMSE / AvgAbsInput * 100, 1), '%)'),
@@ -777,11 +791,13 @@ fit_pca = function(pca_input, NA_masking = NULL){
 }
 
 # evaluate R^2 and its percentile
-eval_R2 = function(orginal_data, predicted_data, alpha = NULL){
+eval_R2 = function(original_data, predicted_data, alpha = NULL, masking = NULL){
   # evaluare R2 = 1 - RSS/TSS
   
-  TSS_val = (as.matrix(orginal_data) - mean(as.matrix(orginal_data))) ^ 2
-  RSS_val = (as.matrix(orginal_data) - as.matrix(predicted_data)) ^ 2
+  if (is.null(masking)){masking = matrix(FALSE, ncol = ncol(original_data), nrow = nrow(original_data))}
+  
+  TSS_val = (as.matrix(original_data)[!masking] - mean(as.matrix(original_data)[!masking])) ^ 2
+  RSS_val = (as.matrix(original_data)[!masking] - as.matrix(predicted_data)[!masking]) ^ 2
   
   if (is.null(alpha)){
     RSS = sum(RSS_val)

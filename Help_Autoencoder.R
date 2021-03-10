@@ -10,9 +10,9 @@ Autoencoder_PC = function(x_train, n_comp = 2, epochs = 300, batch_size = 400, l
   # evaluate_embedding: if false embedding is not returned (speed up tuning) 
   
   if (!is.null(NA_masking)){
+    masking = is.na(x_train)
     x_train = x_train %>%
       replace(is.na(.), NA_masking)
-    masking = is.na(x_train)
   } else {
     masking = matrix(FALSE, ncol = ncol(x_train), nrow = nrow(x_train))
   }
@@ -105,12 +105,13 @@ Autoencoder_PC = function(x_train, n_comp = 2, epochs = 300, batch_size = 400, l
   recRMSE_no_mask = mean((as.matrix(x_train)[!masking] - full_output[!masking])^2) %>% sqrt()
   # model mse is sum((as.matrix(x_input_full)[!masking] - full_output[!masking])^2) / prod(dim(masking))
   AvgAbsInput_no_mask = mean(abs(as.matrix(x_train))[!masking])
-  R2 = round(eval_R2(x_train, full_output) * 100, 1)
-  R2_99 = round(eval_R2(x_train, full_output, 0.99) * 100, 1)
-  R2_95 = round(eval_R2(x_train, full_output, 0.95) * 100, 1)
+  R2 = round(eval_R2(x_train, full_output, masking = masking) * 100, 1)
+  R2_99 = round(eval_R2(x_train, full_output, 0.99, masking = masking) * 100, 1)
+  R2_95 = round(eval_R2(x_train, full_output, 0.95, masking = masking) * 100, 1)
   
   out = list(embedding_dim = n_comp,
              Embedding = intermediate_output,
+             Embedding_Range = paste0(range(intermediate_output) %>% round(2), collapse = ' '),
              AvgAbsInput = AvgAbsInput,
              ReconstErrorRMSE = recRMSE,
              ReconstErrorRMSE_no_mask = recRMSE_no_mask,
@@ -155,15 +156,6 @@ autoencoder_tuning = function(dataset, NA_masking, masking_value, save_RDS_addit
                               max_iter = 80, design_iter = 15){
   
   # https://mlrmbo.mlr-org.com/articles/supplementary/mixed_space_optimization.html
-  
-  # save_RDS_additional_lab = 'prova'
-  # dataset = df_emb_input_wide
-  # NA_masking = 0
-  # masking_value = 0
-  # 
-  # 
-  # batch_size = 500
-  # epochs = 3
   
   layers_generator = function(layer_scaling, layer_spread, total_layers){
     return((exp(-layer_scaling * c(1:total_layers) * layer_spread) * ncol(dataset)) %>% ceiling() + 1)
@@ -250,7 +242,8 @@ autoencoder_tuning = function(dataset, NA_masking, masking_value, save_RDS_addit
     optim_step = optim_step %>%
       mutate(layers = layers_number) %>%
       rowwise() %>%
-      mutate(layers_list = layers_generator(layer_scaling, layer_spread, layers) %>% paste0(collapse = '.') %>% as.character()) %>%
+      mutate(layers_list = layers_generator(layer_scaling, layer_spread, layers) %>% paste0(collapse = '.')) %>%
+      mutate(layers_list = as.character(layers_list)) %>%
       mutate(n_comp = layers_generator(layer_scaling, layer_spread, layers + 1)[layers + 1]) %>%
       select(layers, layers_list, n_comp, everything()) %>%
       select(-layer_scaling, -layer_spread) %>%
@@ -268,6 +261,7 @@ autoencoder_tuning = function(dataset, NA_masking, masking_value, save_RDS_addit
       select(layers, starts_with("layer_list"), everything())
     write.table(optimization_results, paste0('./Distance_to_Default/Stats/Autoencoder_test/00_Optimization_list_', save_RDS_additional_lab, '.csv'), sep = ';', row.names = F, append = F)
   } # layers_number
+  tuning_add_R2(paste0('./Distance_to_Default/Stats/Autoencoder_test/00_Optimization_list_', save_RDS_additional_lab, '.csv'))
   
   return(optimization_results)
 }
@@ -391,19 +385,6 @@ AutoencoderLSTM_PC = function(x_input, n_comp = 2, epochs = 300, batch_size = 40
   
   # https://stackoverflow.com/questions/48714407/rnn-regularization-which-component-to-regularize
   
-  # masking_value = 0
-  # x_input
-  # n_comp = 10
-  # epochs = 300
-  # batch_size = 400
-  # layer_list = c(16, 8, 16, 6)
-  # kernel_reg_alpha = 0.5
-  # RNN_type = 'lstm'
-  # timestep_label = c()#c('2012', '2013', '2014')
-  # temporal_embedding = FALSE
-  # verbose = 1
-  # save_RDS = F, save_RDS_additional_lab = '', save_model = F, save_model_name = '', evaluate_embedding = TRUE
-  
   if (save_model & save_model_name == ''){stop('Please provide a name for hdf5 file: save_model_name')}
   if (temporal_embedding & is.null(timestep_label)){stop('Please provide timestep_label')}
   
@@ -426,9 +407,10 @@ AutoencoderLSTM_PC = function(x_input, n_comp = 2, epochs = 300, batch_size = 40
   
   # define kernel regularizer (if any)
   if (!is.null(kernel_reg_alpha)){
-    kern_reg = regularizer_l1_l2(l1 = 0.01*(1-kernel_reg_alpha), l2 = 0.01*kernel_reg_alpha)
+    # kern_reg = regularizer_l1_l2(l1 = 0.01*(1-kernel_reg_alpha), l2 = 0.01*kernel_reg_alpha)
+    kern_reg = paste0("keras::regularizer_l1_l2(l1 = ", 0.01*(1-kernel_reg_alpha), ", l2 = ", 0.01*kernel_reg_alpha, ")")
   } else {
-    kern_reg = NULL
+    kern_reg = 'NULL'
   }
   
   input_dim = x_input_dim[-1]   # first is #timesteps, second is #features
@@ -449,12 +431,12 @@ AutoencoderLSTM_PC = function(x_input, n_comp = 2, epochs = 300, batch_size = 40
   for (l in c(layer_list, -1, rev(layer_list))){   # -1 is the bottleneck
     if (l != -1){
       eval_text = paste0(eval_text, ifelse(RNN_type == 'lstm', " %>% layer_lstm(", " %>% layer_gru(reset_after = TRUE, "), "units = ", l,
-                         ", return_sequences = TRUE, kernel_regularizer = kern_reg, activation=\"tanh\", recurrent_activation = \"sigmoid\")")
+                         ", return_sequences = TRUE, kernel_regularizer = ", kern_reg, ", activation=\"tanh\", recurrent_activation = \"sigmoid\")")
     } else {
       eval_text = paste0(eval_text, " %>% lstm_with_mask(lstm_units = ", n_comp, ", in_shp = c(", paste0(input_dim, collapse = ","), "), return_sequences = ",
-                         temporal_embedding, ", kernel_regularizer = kern_reg, RNN_type = \"", RNN_type, "\")",
+                         temporal_embedding, ", kernel_regularizer = ", kern_reg, ", RNN_type = \"", RNN_type, "\")",
                          ifelse(RNN_type == 'lstm', " %>% layer_lstm(", " %>% layer_gru(reset_after = TRUE, "), "units = ", n_comp,
-                         ", return_sequences = TRUE, kernel_regularizer = kern_reg, activation=\"tanh\", recurrent_activation = \"sigmoid\")")
+                         ", return_sequences = TRUE, kernel_regularizer = ", kern_reg, ", activation=\"tanh\", recurrent_activation = \"sigmoid\")")
     }
     cc = cc + 1
   }
@@ -521,12 +503,13 @@ AutoencoderLSTM_PC = function(x_input, n_comp = 2, epochs = 300, batch_size = 40
   recRMSE_no_mask = mean((as.matrix(x_input_full)[!masking] - full_output[!masking])^2) %>% sqrt()
   # model mse is sum((as.matrix(x_input_full)[!masking] - full_output[!masking])^2) / prod(dim(masking))
   AvgAbsInput_no_mask = mean(abs(as.matrix(x_input_full))[!masking])
-  R2 = round(eval_R2(x_input_full, full_output) * 100, 1)
-  R2_99 = round(eval_R2(x_input_full, full_output, 0.99) * 100, 1)
-  R2_95 = round(eval_R2(x_input_full, full_output, 0.95) * 100, 1)
+  R2 = round(eval_R2(x_input_full, full_output, masking = masking) * 100, 1)
+  R2_99 = round(eval_R2(x_input_full, full_output, 0.99, masking = masking) * 100, 1)
+  R2_95 = round(eval_R2(x_input_full, full_output, 0.95, masking = masking) * 100, 1)
   
   out = list(embedding_dim = n_comp,
              Embedding = intermediate_output,
+             Embedding_Range = paste0(range(intermediate_output) %>% round(2), collapse = ' '),
              AvgAbsInput = AvgAbsInput,
              ReconstErrorRMSE = recRMSE,
              ReconstErrorRMSE_no_mask = recRMSE_no_mask,
@@ -564,5 +547,140 @@ AutoencoderLSTM_PC = function(x_input, n_comp = 2, epochs = 300, batch_size = 40
   }
   
   return(out)
+}
+
+# tuning LSTM Autoencoder
+autoencoderLSTM_tuning = function(x_input, masking_value, max_lstm_neurons = 100, save_RDS_additional_lab = '', epochs = 300,
+                                  temporal_embedding = FALSE, timestep_label = c(), max_iter = 80, design_iter = 15){
   
+  # https://mlrmbo.mlr-org.com/articles/supplementary/mixed_space_optimization.html
+  
+  n_features = lapply(x_input, function(x) dim(x)[2]) %>% unlist() %>% unique()
+  
+  layers_generator = function(layer_scaling, layer_spread, total_layers){
+    return((exp(-layer_scaling * c(1:total_layers) * layer_spread) * max_lstm_neurons) %>% ceiling() + 1)
+  }
+  
+  optimization_results = c()
+  for (layers_number in c(1:4)){   # test different number of layers in the encoder/decoder
+    
+    cat('\n -------------- testing', layers_number, 'layers --------------')
+    
+    fun = function(x) {
+      
+      kernel_reg_alpha = x$kernel_reg_alpha
+      if (kernel_reg_alpha == "NULL"){
+        kernel_reg_alpha = NULL
+      } else {
+        kernel_reg_alpha = as.numeric(kernel_reg_alpha)
+      }
+      RNN_type = x$RNN_type
+      batch_size = x$batch_size
+      layer_scaling = x$layer_scaling   # exp(-layer_scaling * layer_spread) so to evaluate decreasing number of layers
+      layer_spread = x$layer_spread     # with more or less exponential growth (decrease)
+      # layers_number = 1
+      # layer_scaling = 5     # in [0.1, 5]
+      # layer_spread = 0.2    # in [0.001, 1]
+      layer_list = layers_generator(layer_scaling, layer_spread, total_layers = layers_number + 1)
+      n_comp = layer_list[length(layer_list)]
+      layer_list = layer_list[-length(layer_list)]
+      
+      if (n_comp >= round(0.6 * n_features)){
+        perf = 999                                  # force bottleneck not to be too large
+      } else {
+        out_label = paste0(ifelse(save_RDS_additional_lab != '', paste0(save_RDS_additional_lab, '_'), ''),
+                           n_comp, '_', batch_size, '_', RNN_type, '_', kernel_reg_alpha, '_', paste0(layer_list, collapse = '.'), '.rds')
+        reload_err = try(aut <- suppressWarnings(readRDS(paste0('./Distance_to_Default/Stats/Autoencoder_test/', out_label))), silent = T)
+        
+        if (class(reload_err) == "try-error"){
+          aut = AutoencoderLSTM_PC(x_input, n_comp = n_comp, epochs = epochs, batch_size = batch_size, layer_list = layer_list,
+                                   kernel_reg_alpha = kernel_reg_alpha, RNN_type = RNN_type, temporal_embedding = temporal_embedding,
+                                   timestep_label = timestep_label, masking_value = masking_value,
+                                   verbose = 0, save_RDS = T, save_RDS_additional_lab = save_RDS_additional_lab, evaluate_embedding = FALSE)
+        } else {
+          cat('\n Reloaded')
+        }
+        perf = aut$ReconstErrorRMSE ^ 2   # MSE so to be comparable with past evaluations
+      }
+      return(perf)
+    }
+    
+    objfun = makeSingleObjectiveFunction(
+      name = "autoencoderLSTM",
+      fn = fun,
+      par.set = makeParamSet(
+        # makeIntegerVectorParam("layer_list", len=layers_number, lower = 3,upper = ncol(df_emb_input)),
+        makeNumericParam("layer_scaling", 0.1, 5),
+        makeNumericParam("layer_spread", 0.001, 1),
+        makeDiscreteParam("RNN_type", values = c("lstm", "gru")),
+        makeDiscreteParam("kernel_reg_alpha", values = c("NULL", "0", "0.5", "1")),
+        makeDiscreteParam("batch_size", values = c(100, 500, 1000))
+      ),
+      has.simple.signature = FALSE,
+      minimize = TRUE
+    )
+    
+    surr.rf = makeLearner("regr.randomForest", predict.type = "se")
+    
+    control = makeMBOControl()
+    control = setMBOControlInfill(
+      control = control,
+      crit = makeMBOInfillCritAdaCB(cb.lambda.start = 4, cb.lambda.end = 0.1)
+    )
+    
+    control = setMBOControlTermination(
+      control = control,
+      iters = max_iter    # maximum number of iteration, not including the ones used to generate the design
+    )
+    
+    design = generateDesign(n = design_iter, par.set = getParamSet(objfun))
+    
+    start = Sys.time()
+    mlr::configureMlr(show.info = FALSE, show.learner.output = FALSE, on.learner.warning = "quiet")
+    results = mbo(objfun, design = design, learner = surr.rf, control = control, show.info = F)
+    tot_diff=seconds_to_period(difftime(Sys.time(),start, units='secs'))
+    
+    
+    optim_step = as.data.frame(results$opt.path, stringsAsFactors = F)
+    optim_step = optim_step %>%
+      mutate(layers = layers_number) %>%
+      rowwise() %>%
+      mutate(layers_list = layers_generator(layer_scaling, layer_spread, layers) %>% paste0(collapse = '.')) %>%
+      mutate(layers_list = as.character(layers_list)) %>%
+      mutate(n_comp = layers_generator(layer_scaling, layer_spread, layers + 1)[layers + 1]) %>%
+      select(layers, layers_list, n_comp, everything()) %>%
+      select(-layer_scaling, -layer_spread) %>%
+      as.data.frame()
+    optimization_results = optimization_results %>%
+      mutate(layers_list = as.character(layers_list)) %>%
+      bind_rows(
+        optim_step %>%
+          mutate(
+            final_state = results$final.state,
+            total_time = paste0(lubridate::hour(tot_diff), 'h:', lubridate::minute(tot_diff), 'm:', round(lubridate::second(tot_diff))),
+            RDS_path = paste0('./Distance_to_Default/Stats/Autoencoder_test/', save_RDS_additional_lab, '_',
+                              n_comp, '_', batch_size, '_', RNN_type, '_', kernel_reg_alpha, '_', layers_list, '.rds')) %>%
+          rename(MSE = y)
+      )%>%
+      select(layers, starts_with("layer_list"), everything())
+    write.table(optimization_results, paste0('./Distance_to_Default/Stats/Autoencoder_test/00_Optimization_list_', save_RDS_additional_lab, '.csv'), sep = ';', row.names = F, append = F)
+  } # layers_number
+  tuning_add_R2(paste0('./Distance_to_Default/Stats/Autoencoder_test/00_Optimization_list_', save_RDS_additional_lab, '.csv'))
+  
+  return(optimization_results)
+}
+
+# reload rds files and update hyperparameters results csv adding R^2
+tuning_add_R2 = function(result_csv){
+  result = read.csv(result_csv, sep=";", stringsAsFactors=FALSE) %>%
+    mutate(R2 = -99) %>%
+    relocate(R2, .after = MSE)
+  for (i in 1:nrow(result)){
+    if (result$MSE[i] != 999){
+      aut = readRDS(result$RDS_path[i])
+      result$R2[i] = aut$R2
+    }
+  }
+  write.table(result, result_csv, sep = ';', row.names = F, append = F)
+  cat('\nupdated:', result_csv)
 }

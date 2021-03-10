@@ -19,6 +19,7 @@ library(parallelDist)
 library(magick)
 library(mlrMBO)
 library(rpca)
+library(uwot)   # for UMAP
 library(parallelMap)
 library(parallel)
 library(data.table)
@@ -771,12 +772,6 @@ reload_autoencoder = T   # reload autoencoder embedding
       PCA_emb_wide = readRDS('./Distance_to_Default/Checkpoints/PCA_emb_wide.rds')
     }
     
-    cat('\nPCA on abi_ndg+year dataset (long):\n')
-    print(PCA_emb$report)
-    cat('\nPCA on abi_ndg dataset (wide):\n')
-    print(PCA_emb_wide$report)
-    
-    
     # Autoencoder
     
     cat('\n  ==================  Autoencoder  ==================\n')
@@ -788,71 +783,153 @@ reload_autoencoder = T   # reload autoencoder embedding
       
       tune_autoencoder_wide = autoencoder_tuning(dataset = df_emb_input_wide, NA_masking = 0, masking_value = 0, save_RDS_additional_lab = 'AE_emb_wide',
                                                  batch_size = 500, epochs = 300, max_iter = 80, design_iter = 15)
-    }
-
-    
-    
-
-    
-    x_input = create_lstm_input(df = df_emb_input, df_header = df_emb_input_header, ID_col = 'abi_ndg', TIME_col = 'year', NA_masking = 0)
-    
-    
-    
-    oo = AutoencoderLSTM_PC(x_input, n_comp = 50, epochs = 5, batch_size = 400, layer_list = c(100), kernel_reg_alpha = NULL,
-                                       RNN_type = 'lstm', temporal_embedding = FALSE, timestep_label = c(), masking_value = 0, verbose = 1,
-                                       save_RDS = F, save_RDS_additional_lab = '', save_model = F, save_model_name = '', evaluate_embedding = TRUE)
-    
-    
-    
-    
-    
-    
-    
-    
-    
-    
-    
-    
-    
-    
-    
-    
-    
-    
-    
-    # aa = readRDS("./Distance_to_Default/Stats/Autoencoder_test/prova_15_500_sigmoid_selu_50.37.27.20.rds")
-
-    for (e in names(aa)){
-      cat('\n', e, ' size:', round(object.size(aa[e])/(2^20)))
-    }
-    
-    
-    aut = Autoencoder_PC(df_emb_input_wide, n_comp = 2, epochs = 100, batch_size = 4000, layer_list = c(10, 6),
-                              act_fun = 'relu', latent_act_fun = 'selu', NA_masking = 0, masking_value = 0, verbose = 1, save_RDS = F,
-                              save_model = F, save_model_name = '')
-    
-    
-    if (reload_autoencoder == FALSE){
-      for (hidden_neuron in 1:dim_embedding){
-        aut = Autoencoder_PC(df_emb_input, n_comp = hidden_neuron, epochs = 500, batch_size = 1000, act_fun = 'relu',
-                             save_model = T, save_model_name = paste0('./Distance_to_Default/Checkpoints/autoencoder_', hidden_neuron))
-        saveRDS(aut, paste0('./Distance_to_Default/Checkpoints/autoencoder_', hidden_neuron, '.rds'))
-        # plot(aut$history)
-      }
-    }
-    scree_data_AEC = c()
-    for (hidden_neuron in 1:dim_embedding){
-      aut = readRDS(paste0('./Distance_to_Default/Checkpoints/autoencoder_', hidden_neuron, '.rds'))
       
-      scree_data_AEC = scree_data_AEC %>%
-        bind_rows(data.frame(Embedding_Dimension = hidden_neuron, ReconstErrorMSE_AEC = as.numeric(aut$MSE),
-                             AEC_R2 = round(eval_R2(df_emb_input, aut$reconstr_prediction) * 100, 1),
-                             AEC_R2_99 = round(eval_R2(df_emb_input, aut$reconstr_prediction, 0.99) * 100, 1),
-                             AEC_R2_95 = round(eval_R2(df_emb_input, aut$reconstr_prediction, 0.95) * 100, 1),
-                             stringsAsFactors = F))
+      x_input = create_lstm_input(df = df_emb_input, df_header = df_emb_input_header, ID_col = 'abi_ndg', TIME_col = 'year', NA_masking = 0)
+      tune_autoencoderLSTM = autoencoderLSTM_tuning(x_input, masking_value = 0, max_lstm_neurons = 100, save_RDS_additional_lab = 'AE_LSTM_emb', epochs = 250,
+                                        temporal_embedding = FALSE, timestep_label = c(), max_iter = 60, design_iter = 15)
     }
-    cat('\nReconstruction Error:\n')
-    print(scree_data_AEC)
+
+    
+    
+      
+    
+    
+    
+    ######## todo: fai girare quando finisce il tuning dell'LSTM
+    
+    # save_RDS_additional_lab = 'AE_LSTM_emb'
+    # # save observations names
+    # x_input = create_lstm_input(df = df_emb_input, df_header = df_emb_input_header, ID_col = 'abi_ndg', TIME_col = 'year', NA_masking = 0)
+    # names(x_input) = NULL
+    # x_input = np$array(x_input)
+    # x_input_dim = py_to_r(x_input$shape) %>% unlist()
+    # 
+    # # create a copy of x_input, reshaping into a (obs*timestep)x(features) matrix including masked values
+    # x_input_full = array_reshape(x_input, c(prod(x_input_dim[1:2]), x_input_dim[3]))
+    # x_input_full = py_to_r(x_input_full)
+    # 
+    # # save masking index
+    # if (!is.null(masking_value)){
+    #   masking = x_input_full == masking_value
+    # } else {
+    #   masking = matrix(FALSE, ncol = ncol(x_input_full), nrow = nrow(x_input_full))
+    # }
+    # 
+    # result_csv = paste0('./Distance_to_Default/Stats/Autoencoder_test/00_Optimization_list_', save_RDS_additional_lab, '.csv')
+    # result = read.csv(result_csv, sep=";", stringsAsFactors=FALSE) %>%
+    #   mutate(R2 = -99) %>%
+    #   relocate(R2, .after = MSE)
+    # for (i in 1:nrow(result)){
+    #   if (result$MSE[i] != 999){
+    #     aut = readRDS(result$RDS_path[i])
+    #     full_output = aut$reconstr_prediction
+    #     
+    #     R2 = round(eval_R2(x_input_full, full_output, masking = masking) * 100, 1)
+    #     R2_99 = round(eval_R2(x_input_full, full_output, 0.99, masking = masking) * 100, 1)
+    #     R2_95 = round(eval_R2(x_input_full, full_output, 0.95, masking = masking) * 100, 1)
+    #     
+    #     aut$R2 = R2
+    #     aut$R2_99 = R2_99
+    #     aut$R2_95 = R2_95
+    #     
+    #     saveRDS(aut, result$RDS_path[i])
+    #     
+    #     result$R2[i] = aut$R2
+    #   }
+    # }
+    # write.table(result, result_csv, sep = ';', row.names = F, append = F)
+    
+    
+    # res =  read.csv('./Distance_to_Default/Stats/Autoencoder_test/00_Optimization_list_AE_LSTM_emb.csv', sep=";", stringsAsFactors=FALSE) %>%
+    #   mutate(layers_list = as.character(layers_list))
+    # lstm_list = paste0("./Distance_to_Default/Stats/Autoencoder_test/",
+    #                      list.files(path = './Distance_to_Default/Stats/Autoencoder_test/', pattern = "^AE_LSTM_emb*"), sep = "")
+    # for (i in 1:length(lstm_list)){
+    #   aut = readRDS(lstm_list[i])
+    #   opt = aut$options
+    #   add_row = data.frame(layers = length(opt$layer_list),
+    #                        layers_list = paste0(opt$layer_list, collapse = ".") %>% as.character(),
+    #                        n_comp = opt$n_comp,
+    #                        RNN_type = opt$RNN_type,
+    #                        kernel_reg_alpha = ifelse(is.null(opt$kernel_reg_alpha), "", as.character(opt$kernel_reg_alpha)),
+    #                        batch_size = opt$batch_size,
+    #                        MSE = aut$ReconstErrorRMSE ^ 2, 
+    #                        RDS_path = lstm_list[i],
+    #                        R2 = aut$R2, stringsAsFactors = F)
+    #   res = res %>%
+    #     bind_rows(add_row)
+    # }
+    # write.table(res %>% relocate(R2, .after = MSE) %>% filter(!is.na(R2)), './Distance_to_Default/Stats/Autoencoder_test/00_Optimization_list_AE_LSTM_emb.csv', sep = ';', row.names = F, append = F)
+    
+    
+    
+    
+    # fit/reload final embedding
+    if (reload_autoencoder == FALSE){
+      aut_emb = Autoencoder_PC(df_emb_input, n_comp = 10, epochs = 500, batch_size = 500, layer_list = c(20, 16, 14, 12),
+                     act_fun = 'tanh', latent_act_fun = 'relu', verbose = 0, save_RDS = F,
+                     save_model = T, save_model_name = './Distance_to_Default/Checkpoints/AE_emb')
+      saveRDS(aut_emb, './Distance_to_Default/Checkpoints/00_aut_emb.rds')
+
+      aut_emb_wide = Autoencoder_PC(df_emb_input_wide, n_comp = 32, epochs = 500, batch_size = 500, layer_list = c(58, 50, 43, 37),
+                     act_fun = 'tanh', latent_act_fun = 'relu', NA_masking = 0, masking_value = 0, verbose = 0,
+                     save_RDS = F, save_model = T, save_model_name = './Distance_to_Default/Checkpoints/AE_emb_wide')
+      saveRDS(aut_emb_wide, './Distance_to_Default/Checkpoints/00_aut_emb_wide.rds')
+        
+      x_input = create_lstm_input(df = df_emb_input, df_header = df_emb_input_header, ID_col = 'abi_ndg', TIME_col = 'year', NA_masking = 0)
+      aut_emb_LSTM = AutoencoderLSTM_PC(x_input, n_comp = 2, epochs = 500, batch_size = 400, layer_list = c(100, 50), kernel_reg_alpha = NULL,
+                                    RNN_type = 'lstm', temporal_embedding = FALSE, timestep_label = c(), masking_value = 0, verbose = 0,
+                                    save_RDS = F, save_model = T, save_model_name = './Distance_to_Default/Checkpoints/AE_LSTM_emb')
+      saveRDS(aut_emb_LSTM, './Distance_to_Default/Checkpoints/00_aut_emb_LSTM.rds')
+      
+    } else {
+      aut_emb = readRDS('./Distance_to_Default/Checkpoints/00_aut_emb.rds')
+      aut_emb_wide = readRDS('./Distance_to_Default/Checkpoints/00_aut_emb_wide.rds')
+      aut_emb_LSTM = readRDS('./Distance_to_Default/Checkpoints/00_aut_emb_LSTM.rds')
+    }
+    
+    # summary table
+    summary_table = PCA_emb$report %>% mutate(Dataset = 'abi_ndg+year (long)', Method = 'PCA', Obs = nrow(df_emb_input),
+                                              Embedding_Range = PCA_emb$Embedding_Range) %>%
+      bind_rows(PCA_emb_wide$report %>% mutate(Dataset = 'abi_ndg (wide)', Method = 'PCA', Obs = nrow(df_emb_input_wide),
+                                               Embedding_Range = PCA_emb_wide$Embedding_Range),
+                aut_emb$report %>% mutate(Dataset = 'abi_ndg+year (long)', Method = 'AE', Obs = nrow(df_emb_input),
+                                          Embedding_Range = aut_emb$Embedding_Range),
+                aut_emb_wide$report %>% mutate(Dataset = 'abi_ndg (wide)', Method = 'AE', Obs = nrow(df_emb_input_wide),
+                                               Embedding_Range = aut_emb_wide$Embedding_Range),
+                aut_emb_LSTM$report %>% mutate(Dataset = 'abi_ndg (wide)', Method = 'AE LSTM', Obs = nrow(df_emb_input_wide),
+                                               Embedding_Range = aut_emb_LSTM$Embedding_Range)) %>%
+      select(Dataset, Method, Obs, everything()) %>%
+      arrange(desc(Dataset), desc(Method)) %>%
+      replace(is.na(.), "")
+    print(summary_table)
+    write.table(summary_table, './Distance_to_Default/Stats/02a_Embedding_summary.csv', sep = ';', row.names = F, append = F)
+
+    # evaluate PCA on embedding to get 2 dimension to be plotted
+    emb = aut_emb$Embedding
+    
+    
+    set.seed(66)
+    emb_umap <- umap(emb, n_components = 3, n_neighbors = 100, min_dist = 0.001, verbose = TRUE, n_threads = detectCores(), ret_model = T,
+                     fast_sgd = TRUE, approx_pow = TRUE, scale = TRUE, init = "spca")
+    plot(emb_umap$embedding)
+    
+    
+    # predict new data UMAP
+    mnist_train_umap <- umap(mnist_train, verbose = TRUE, ret_model = TRUE)
+    mnist_test_umap <- umap_transform(mnist_test, mnist_train_umap, verbose = TRUE)
+    
+    
+    
+    
+    emb_RPCA_fit = fit_pca(emb %>% as.data.frame(), force_pc_selection = 2)
+    print(emb_RPCA_fit$report)
+    emb_PCA_fit = fit_pca(emb %>% as.data.frame(), force_pc_selection = 2, RobPCA_method = FALSE)
+    print(emb_PCA_fit$report)
+    
+    plot(emb_RPCA_fit$Embedding)
+    plot(emb_PCA_fit$Embedding)
+    plot(emb[,1:2])
     
     # evaluate embedding quality
     {
@@ -867,22 +944,25 @@ reload_autoencoder = T   # reload autoencoder embedding
       #     select(Dim1, Dim2) %>% as.matrix() %>% parDist() %>% as.matrix()
       # 
       #   eval_R2_embedding(ref_dataset_dist, embedding_dist_mat)
-      #   
-      #   
-      #   
-      #   
-      #   
 
         
     }
+
+    rm(summary_table)
+  }
+  
+  # visualize peers with embedding
+  {
     
-    # compare methods
-    scree_data = scree_data_PCA %>%
-      rename(Embedding_Dimension = PC) %>%
-      left_join(scree_data_AEC, by = "Embedding_Dimension")
-    cat('\n  ==================  Summary  ==================\n\n')
-    print(scree_data)
-    write.table(scree_data, './Distance_to_Default/Stats/02a_Embedding_summary.csv', sep = ';', row.names = F, append = F)
+    
+    
+    
+    
+    nn = load_model_hdf5("./Distance_to_Default/Checkpoints/AE_emb.h5")
+    aa=nn(df_emb_input_peers %>% as.matrix()) %>% as.matrix() %>% as.data.frame()
+    
+    
+    
     df_final_embedding = df_score[, 1:dim_embedding] %>%
       as.data.frame() %>%
       setNames(paste0('Dim', c(1:dim_embedding))) %>%
@@ -893,11 +973,8 @@ reload_autoencoder = T   # reload autoencoder embedding
                   setNames(paste0('Dim', c(1:dim_embedding))) %>%
                   mutate(Method = 'AEC',
                          R2 = scree_data %>% filter(Embedding_Dimension == dim_embedding) %>% pull(AEC_R2)))
-    rm(scree_data, scree_data_AEC, scree_data_PCA, pca, aut, summ, df_emb_input, df_score, loadings, rec_score, check_outliers_df)
-  }
-  
-  # visualize peers with embedding
-  {
+    
+    
     # reload encoding
     pca_encoder = readRDS(paste0('./Distance_to_Default/Checkpoints/PCA.rds'))
     ae_encoder = aut = readRDS(paste0('./Distance_to_Default/Checkpoints/autoencoder_', dim_embedding, '.rds'))
