@@ -718,6 +718,10 @@ fviz_eig_mod = function (X, choice = c("variance", "eigenvalue"), geom = c("bar"
 # fit Robust PCA and automatically select optimal number of PC
 fit_pca = function(pca_input, NA_masking = NULL, force_pc_selection = NULL, RobPCA_method = TRUE){
   
+  # NA_masking: value to replace missing in the data
+  # force_pc_selection: if integer, force number of PC
+  
+  # replace missing
   if (!is.null(NA_masking)){
     masking = is.na(pca_input)
     pca_input = pca_input %>%
@@ -726,6 +730,7 @@ fit_pca = function(pca_input, NA_masking = NULL, force_pc_selection = NULL, RobP
     masking = matrix(FALSE, ncol = ncol(pca_input), nrow = nrow(pca_input))
   }
   
+  # run RobPCA
   if (RobPCA_method){
     robpca = rpca(as.matrix(pca_input), trace = F, max.iter = 10000)
     
@@ -752,7 +757,8 @@ fit_pca = function(pca_input, NA_masking = NULL, force_pc_selection = NULL, RobP
     pc_selection = force_pc_selection
   }
   
-  scores_pc = L %*% loadings[, 1:pc_selection]
+  loading_transform = loadings[, 1:pc_selection]
+  scores_pc = L %*% loading_transform
   pca_input_reconstr = scores_pc %*% t(loadings[,1:pc_selection]) + S
   
   recRMSE = mean((as.matrix(pca_input) - pca_input_reconstr)^2) %>% sqrt()
@@ -776,6 +782,7 @@ fit_pca = function(pca_input, NA_masking = NULL, force_pc_selection = NULL, RobP
               R2_95 = R2_95,
               robpca = robpca,
               res_pca = res_pca,
+              loading_transform = loadings[, 1:pc_selection],
               importance_table = res_pca$importance_table,
               options = list(NA_masking = NA_masking,
                              masking = masking),
@@ -815,50 +822,71 @@ eval_R2 = function(original_data, predicted_data, alpha = NULL, masking = NULL){
 
 # aggregate data to plot into grid
 aggregate_points = function(plot_data, label_values, n_cell = 20){
-  # plot_data: data.frame with Dim1, Dim2 and Label columns
-  # label_values: available values to be converted to factor
+  
+  # plot_data: data.frame with Dim1, Dim2, Dim3 (if available) and Label columns.
+  #            Label can contain also a single value (i. e. points will be just aggregated in a single group for each cell)
+  # label_values: available values to be converted to factor for the final output (to be used as groups in ggplot)
   # n_cell: number of cells on shortest dimension
   
-  # return: data.frame with Dim1, Dim2, Label and size columns for evaluated centroid of each Label value
-  #         grid_x, grid_y with grid points
+  # return: data.frame with Dim1, Dim2, Dim3 (if available), Label and size columns for evaluated centroid of each Label value
+  #         grid_x, grid_y, grid_z with grid points used only to plot the grid
+  
+  tot_dim = plot_data %>% select(starts_with("Dim")) %>% ncol()
+  if (tot_dim == 2){plot_data$Dim3 = 0}
   
   max_x = max(plot_data$Dim1)
   min_x = min(plot_data$Dim1)
   max_y = max(plot_data$Dim2)
   min_y = min(plot_data$Dim2)
-  cell_size = min(c((max_x - min_x) / n_cell, (max_y - min_y) / n_cell))
+  max_z = max(plot_data$Dim3)
+  min_z = min(plot_data$Dim3)
+  cell_size = min(c((max_x - min_x) / n_cell, (max_y - min_y) / n_cell, ifelse(tot_dim == 3, (max_z - min_z) / n_cell, 1e16)))
   grid_x = round(sort(unique(c(seq(min_x, max_x, by = cell_size), min_x, max_x))), 4)
   grid_y = round(sort(unique(c(seq(min_y, max_y, by = cell_size), min_y, max_y))), 4)
+  grid_z = round(sort(unique(c(seq(min_z, max_z, by = cell_size), min_z, max_z))), 4)
+  start_k = ifelse(tot_dim == 3, 2, 1)
   
   cell_summary = c()
   for (i in 2:length(grid_x)){
     for (j in 2:length(grid_y)){
-      x_min = grid_x[i-1]
-      x_max = grid_x[i]
-      y_min = grid_y[j-1]
-      y_max = grid_y[j]
-      x_filter = paste0('Dim1 >= ', x_min, ' & Dim1 <', ifelse(i == length(grid_x), '=', ''), ' ', x_max)
-      y_filter = paste0('Dim2 >= ', y_min, ' & Dim2 <', ifelse(j == length(grid_y), '=', ''), ' ', y_max)
-      # cat('\n', i,j, x_filter, '     ', y_filter)
-      cell = plot_data %>%
-        filter(!!quo(eval(parse(text=x_filter)))) %>%
-        filter(!!quo(eval(parse(text=y_filter))))
-      for (val in label_values){
-        centroid = cell %>%
-          filter(Label == val) %>%
-          select(-Label) %>%
-          summarize_all(mean) %>%
-          as.numeric()
-        cell_summary = cell_summary %>%
-          bind_rows(data.frame(cell = paste0('(', i-1, ',', j-1, ')'), Label = val, size = sum(cell$Label == val),
-                               Dim1 = centroid[1], Dim2 = centroid[2],
-                               cell_range = paste0(x_min, ',', x_max, '|', y_min, ',', y_max), stringsAsFactors = F))
-      } # val
+      for (k in start_k:length(grid_z)){
+        x_min = grid_x[i-1]
+        x_max = grid_x[i]
+        y_min = grid_y[j-1]
+        y_max = grid_y[j]
+        x_filter = paste0('Dim1 >= ', x_min, ' & Dim1 <', ifelse(i == length(grid_x), '=', ''), ' ', x_max)
+        y_filter = paste0('Dim2 >= ', y_min, ' & Dim2 <', ifelse(j == length(grid_y), '=', ''), ' ', y_max)
+        if (tot_dim == 3){
+          z_min = grid_z[k-1]
+          z_max = grid_z[k]
+          z_filter = paste0('Dim1 >= ', z_min, ' & Dim1 <', ifelse(k == length(grid_z), '=', ''), ' ', z_max)
+        } else {
+          z_min = z_max = ""
+          z_filter = "Dim3 == 0"
+        }
+        # cat('\n', i,j, x_filter, '     ', y_filter)
+        cell = plot_data %>%
+          filter(!!quo(eval(parse(text=x_filter)))) %>%
+          filter(!!quo(eval(parse(text=y_filter)))) %>%
+          filter(!!quo(eval(parse(text=z_filter))))
+        for (val in label_values){
+          centroid = cell %>%
+            filter(Label == val) %>%
+            select(-Label) %>%
+            summarize_all(mean) %>%
+            as.numeric()
+          cell_summary = cell_summary %>%
+            bind_rows(data.frame(cell = paste0('(', i-1, ',', j-1, ifelse(tot_dim == 3, paste0(',', k-1), ''), ')'), Label = val, size = sum(cell$Label == val),
+                                 Dim1 = centroid[1], Dim2 = centroid[2], Dim3 = centroid[3],
+                                 cell_range = paste0(x_min, ',', x_max, '|', y_min, ',', y_max, '|', z_min, ',', z_max), stringsAsFactors = F))
+        } # val
+      } # z
     } # j
   } # i
+  if (tot_dim == 2){cell_summary = cell_summary %>% select(-Dim3)}
   cell_summary = cell_summary %>%
     filter(is.finite(Dim1))
-  if (sum(cell_summary$size) != nrow(plot_data)){cat('\n\n ###### missing points in cell_summary')}
+  if (nrow(plot_data) - sum(cell_summary$size) >= round(nrow(plot_data)*0.005)){cat('\n\n ###### missing points in cell_summary')}
   
   # reshape centroid to be equally spaced within the cell
   final_points = c()
@@ -866,9 +894,10 @@ aggregate_points = function(plot_data, label_values, n_cell = 20){
     df_cell = cell_summary %>%
       filter(cell == cel)
     if (nrow(df_cell) >= 1){
-      points = generate_points(nrow(df_cell))
+      points = generate_points(n_points = nrow(df_cell), dimension = tot_dim)
       x_min = strsplit(strsplit(df_cell$cell_range[1], '\\|')[[1]][1], ',')[[1]][1] %>% as.numeric()
       y_min = strsplit(strsplit(df_cell$cell_range[1], '\\|')[[1]][2], ',')[[1]][1] %>% as.numeric()
+      z_min = strsplit(strsplit(df_cell$cell_range[1], '\\|')[[1]][3], ',')[[1]][1] %>% as.numeric()
       for (i in 1:nrow(df_cell)){
         df_cell$Dim1[i] = x_min + cell_size * points[i, 1]
         df_cell$Dim2[i] = y_min + cell_size * points[i, 2]
@@ -882,27 +911,33 @@ aggregate_points = function(plot_data, label_values, n_cell = 20){
     mutate(Label = factor(Label, levels = label_values))
   if (sum(cell_summary$size) != sum(final_points$size)){cat('\n\n ###### missing points in final_points')}
   
-  
   return(list(cell_summary = final_points,
               grid_x = grid_x,
-              grid_y = grid_y))
+              grid_y = grid_y,
+              grid_z = grid_z))
 }
 
-# generate "equally spaced" points in [0,1] x [0,1]
-generate_points = function(n){
+# generate "equally spaced" points in [0,1]^dimension
+generate_points = function(n_points, dimension){
   
-  if (n == 2){
-    points = matrix(c(0.25, 0.75, 0.75, 0.25), ncol = 2, byrow = T)
-  } else if (n == 3){
-    points = matrix(c(0.5, 0.75, 0.2, 0.25, 0.8, 0.25), ncol = 2, byrow = T)
-  } else if (n == 4){
-    points = matrix(c(0.2, 0.2, 0.2, 0.8, 0.8, 0.2, 0.8, 0.8), ncol = 2, byrow = T)
-  } else if (n == 5){
-    points = matrix(c(0.2, 0.2, 0.2, 0.8, 0.8, 0.2, 0.8, 0.8, 0.5, 0.5), ncol = 2, byrow = T)
-  } else if (n == 6){
-    points = matrix(c(0.15, 0.4, 0.3, 0.85, 0.5, 0.1, 0.5, 0.5, 0.85, 0.4, 0.7, 0.85), ncol = 2, byrow = T)
+  # if (n_points == 2){
+  #   points = matrix(c(0.25, 0.75, 0.75, 0.25), ncol = 2, byrow = T)
+  # } else if (n_points == 3){
+  #   points = matrix(c(0.5, 0.75, 0.2, 0.25, 0.8, 0.25), ncol = 2, byrow = T)
+  # } else if (n_points == 4){
+  #   points = matrix(c(0.2, 0.2, 0.2, 0.8, 0.8, 0.2, 0.8, 0.8), ncol = 2, byrow = T)
+  # } else if (n_points == 5){
+  #   points = matrix(c(0.2, 0.2, 0.2, 0.8, 0.8, 0.2, 0.8, 0.8, 0.5, 0.5), ncol = 2, byrow = T)
+  # } else if (n_points == 6){
+  #   points = matrix(c(0.15, 0.4, 0.3, 0.85, 0.5, 0.1, 0.5, 0.5, 0.85, 0.4, 0.7, 0.85), ncol = 2, byrow = T)
+  # } else {
+  #   points = sobol(n_points, dim = 2, scrambling = 3)
+  # }
+  
+  if (n_points == 1){
+    points = rep(0.5, dimension) %>% matrix(nrow=1)
   } else {
-    points = sobol(n, dim = 2, scrambling = 3)
+    points = LatticeDesign::RSPD(p = dimension, n = n_points, rotation="magic", w=100)$Design
   }
   
   return(points)
@@ -915,4 +950,324 @@ eval_R2_embedding = function(original_dist_mat, embedding_dist_mat){
   R2emb = cor(d_or, d_em)
   
   return(R2emb)
+}
+
+# robust scaler - removes median and scale by interquartile range
+robust_scaler = function(data, scale_par = NULL, stringsAsFactors = F){
+  
+  # scale_par: if not NULL must be a data.frame(col = variable_name, median = variable_median, IQR = variable_IQR)) and will be used to scale input data.
+  #            otherwise scale_par is evaluated by the function
+  
+  data = data.frame(data, stringsAsFactors = stringsAsFactors)
+  
+  if (is.null(scale_par)){
+    scale_par = c()
+    for (col in colnames(data)){
+      if (is.numeric(data[, col])){
+        scale_par = scale_par %>%
+          bind_rows(data.frame(col = col, median = median(data[, col], na.rm = T),
+                               IQR = diff(quantile(data[, col], c(0.25, 0.75), na.rm = T)), stringsAsFactors = F))
+      }
+    }
+  }
+  
+  data_out = data
+  for (coll in scale_par$col){
+    median = scale_par %>%
+      filter(col == coll) %>%
+      pull(median)
+    IQR = scale_par %>%
+      filter(col == coll) %>%
+      pull(IQR)
+    data_out[, coll] = (data_out[, coll] - median) / IQR
+  }
+  
+  return(list(data_out = data_out,
+              scale_par = scale_par))
+  
+  
+  
+  d1 = data %>%
+    mutate_if(is.numeric, function(x) (x - median(x)) / diff(quantile(x, c(0.25, 0.75))))
+
+}
+
+# fit UMAP or densMAP to visualize data
+evaluate_UMAP = function(input_df, n_components = 3, min_dist_set = c(0, 0.01, 0.05, 0.1, 0.5, 0.99),
+                         n_neighbors_set = c(5, 15, 30, 50, 100, 500), metric = "euclidean", init = "agspectral", n_epochs = 400,
+                         predict_input = NULL, eval_UMAP = T, eval_densMAP = F){
+  
+  # eval_UMAP: evaluate base version of UMAP
+  # eval_densMAP: evaluate densMAP  https://github.com/hhcho/densvis/tree/master/densmap  -  at the moment predict_input is not supported
+  # init: only for UMAP. densMAP will use default = "spectral"
+  
+  # https://cran.r-project.org/web/packages/uwot/uwot.pdf
+  # https://github.com/jlmelville/uwot
+  
+  if (eval_densMAP & !is.null(predict_input)){stop("predict_input is not supported for densMap")}
+  
+  output = list()
+  
+  # scale data
+  scaler = robust_scaler(input_df)
+  input_df = scaler$data_out
+  
+  
+  for (n_neighbors in n_neighbors_set){
+    for (min_dist in min_dist_set){
+      
+      # base UMAP
+      if (eval_UMAP){
+        set.seed(66)
+        emb_umap <- umap(input_df, n_components = n_components, n_neighbors = n_neighbors, min_dist = min_dist,
+                         metric = metric, verbose = FALSE, n_threads = detectCores(), ret_model = T, fast_sgd = TRUE,
+                         approx_pow = TRUE, scale = FALSE, init = init, n_epochs = n_epochs)
+        
+        emb_predict_UMAP = c()
+        if (!is.null(predict_input)){
+          predict_input_UMAP = robust_scaler(predict_input, scale_par = scaler$scale_par)$data_out
+          emb_predict_UMAP = umap_transform(predict_input_UMAP, emb_umap, verbose = F)
+        }
+        
+        output[["UMAP"]][[paste0("n_neig_", n_neighbors, "_min_dist_", min_dist)]] = list(emb_umap_fit = emb_umap,
+                                                                                          emb_visual = emb_umap$embedding,
+                                                                                          emb_predict_visual = emb_predict_UMAP)
+      }
+      
+      # densMAP
+      if (eval_densMAP){
+        densMAP <- dm$densMAP("n_components"=as.integer(n_components),  "n_neighbors"=as.integer(n_neighbors), "min_dist"=min_dist,
+                              "metric"=metric, "verbose"=0, "n_epochs"=as.integer(n_epochs), 
+                              "dens_frac"=.3, "dens_lambda"=2., "final_dens"=FALSE, "var_shift"=.1, "random_state"=as.integer(66))
+        
+        emb_densmap = densMAP$fit(input_df %>% as.matrix())
+        
+        emb_predict_densMAP = c()
+        if (!is.null(predict_input)){
+          predict_input_densMAP = robust_scaler(predict_input, scale_par = scaler$scale_par)$data_out
+          emb_predict_densMAP = emb_densmap$transform(predict_input_densMAP %>% as.matrix())
+        }
+        
+        output[["densMAP"]][[paste0("n_neig_", n_neighbors, "_min_dist_", min_dist)]] = list(emb_umap_fit = emb_densmap,
+                                                                                             emb_visual = emb_densmap$embedding_,
+                                                                                             emb_predict_visual = emb_predict_densMAP)
+        
+      }
+      
+    } # min_dist
+  } # n_neighbors
+  
+  return(output)
+}
+
+# scale range in desired range
+scale_range = function(x, a, b, xmin = NULL, xmax = NULL, mode = 'linear', s = NULL){
+  
+  # Scale input interval into new range
+  # - a, b: new interval range
+  # - xmin, xmax: provided if scaling has to be performed from a different input range [min(x), max(x)]
+  # - mode: 'linear' for linear scaling, 'exponential' for exponential scaling
+  # - s: if mode == 'exponential' s is used for decay in exponential kernel.
+  # The higher s the more spiked the decay (leptokurtic)
+  
+  if (is.null(xmin)){xmin = min(x)}
+  if (is.null(xmax)){xmax = max(x)}
+
+  if (mode == "linear"){
+    # https://stats.stackexchange.com/questions/281162/scale-a-number-between-a-range
+    out = (b - a) * (x - xmin) / (xmax - xmin) + a
+  }
+  
+  if (mode == "exponential"){
+    if (is.null(s)){s = 5}
+    # https://stackoverflow.com/questions/49184033/converting-a-range-of-integers-exponentially-to-another-range
+    r = (x - xmin) / (xmax - xmin)
+    C = s ^ (xmax - xmin)
+    out = ((b - a) * C ^ r + a * C - b) / (C - 1)
+  }
+
+  return(out)
+}
+
+# make a grid plot with 3D interactive plots (works also for 2D plot)
+render_3d_grid = function(plot_list, n_col, show = "point", single_class_size = 1, legend_cex = 1, plot_legend_index = c(1:length(plot_list)),
+                          MIN_SCALE = 1, MAX_SCALE = 5, MODE_SCALE = "linear", MODE_S = NULL){
+  
+  # plot_list: list of data to plot. Each element is a list of:
+  #      - data: data.frame with Label (factor - legend lable for each point),
+  #             size (numeric - size of each point. will be scaled in [MIN_SCALE, MAX_SCALE] according to MODE_SCALE and MODE_S of scale_range()),
+  #             Dim1, Dim2, Dim3 (if any) (numeric - points coordinates)
+  #      - title: title of each plot
+  # n_col: number of columns in the plot
+  # show: "point" for points, no size effect or "sphere" for 3D spheres and size effect
+  # single_class_size: size of point/sphere when data has a single label/class
+  # plot_legend_index: select index of plot to add legend (indices flow column by column, top to bottom)
+  
+  n_row = ceiling(length(plot_list) / n_col)
+  open3d()
+  mat <- matrix(1:(n_col*n_row*2), ncol = n_col)   # add spot for title (text3d())
+  layout3d(mat, height = rep(c(1, 2), n_row), widths = rep(1, n_col), sharedMouse = T)  # (1,10) is the proportion between text3d and plot3d space
+  plot_count = 1
+  for (pl_data in plot_list){
+    
+    plot_data = pl_data$data
+    label_values = levels(plot_data$Label)
+    
+    if(range(plot_data$size) %>% uniqueN() != 1){
+      plot_data$size = scale_range(plot_data$size, MIN_SCALE, MAX_SCALE, mode = MODE_SCALE, s = MODE_S) %>% round(1)
+    } else {
+      plot_data$size = rep(single_class_size, nrow(plot_data))
+    }
+    
+    # define colormap
+    cmap = c('dodgerblue3', 'firebrick2', 'chartreuse3', 'cadetblue2', 'gold1', 'darkorange', 'slategray4', 'violet', 'yellow1')
+    
+    # check if 2D plot must be used
+    plot2d_flag = FALSE
+    if (!"Dim3" %in% colnames(plot_data)){
+      plot_data = plot_data %>% mutate(Dim3 = 0)
+      plot2d_flag = TRUE
+    }
+    
+    # plot title
+    next3d()
+    text3d(0, 0, 0, pl_data$title, cex = 0.8)
+    next3d()
+    
+    if (show == "point"){
+      
+      for (class_i in 1:length(label_values)){
+        
+        class_label = label_values[class_i]
+        class_color = cmap[class_i]
+        class_data = plot_data %>%
+          filter(Label == class_label)
+        
+        for (class_size in unique(class_data$size)){
+          size_data = class_data %>%
+            filter(size == class_size) %>%
+            select(starts_with("Dim")) %>%
+            xyz.coords()
+          points3d(size_data, size = class_size, col = class_color, axes = F, box = T, xlab = "", ylab = "", zlab = "")
+        } # class_size
+      } # class_i
+    }
+    
+    
+    if (show == "sphere"){
+      plot3d(xyz.coords(plot_data %>% select(starts_with("Dim"))), col = cmap[plot_data$Label], type = "s",
+             size = plot_data$size, axes = F, box = T, xlab = "", ylab = "", zlab = "")
+    }
+    
+    # add box and focus on 2D view (if any)
+    box3d(color = "grey")
+    if (plot2d_flag){rgl.viewpoint( theta = 0, phi = 0, fov = 0, interactive = F)}
+    
+    # plot legend for selected plot
+    if (plot_count %in% plot_legend_index){
+      legend3d("bottomright", legend = label_values, pch = 16, col = cmap[1:length(label_values)], cex = legend_cex)
+    }
+    
+    plot_count = plot_count + 1
+  } # pl_data
+}
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+prova_3d = function(plot_list, n_col, show = "point"){
+  
+  # show: "point" for points, no size effect or "sphere" for 3D spheres and size effect
+  
+  n_row = ceiling(length(plot_list) / n_col)
+  open3d()
+  mat <- matrix(1:(n_col*n_row*2), ncol = n_col)   # add spot for title (text3d())
+  layout3d(mat, height = rep(c(1, 2), n_row), widths = rep(1, n_col), sharedMouse = T)  # (1,10) is the proportion between text3d and plot3d space
+  for (pl_data in plot_list){
+    
+    plot_data = pl_data$data
+    
+    # check if 2D plot must be used
+    plot2d_flag = FALSE
+    if (ncol(plot_data) == 2){
+      plot_data = plot_data %>% mutate(Dim3 = 0)
+      plot2d_flag = TRUE
+    }
+    
+    data_coord = xyz.coords(plot_data[301:700,] %>% select(starts_with("Dim")))
+    data_coord_additional = xyz.coords(plot_data[1:300,] %>% select(starts_with("Dim")))
+    
+    next3d()
+    text3d(0, 0, 0, pl_data$title, cex = 0.8)
+    next3d()
+    
+    if (show == "point"){
+      # main_data <- plot3d(data_coord, col = "blue", type = "p", axes = F, box = T, xlab = "", ylab = "", zlab = "")
+      # plot3d(data_coord, col = "white", type = "p", axes = F, box = T, xlab = "", ylab = "", zlab = "", size = 0)
+      main_data <- points3d(data_coord, col = "blue", axes = F, box = T, xlab = "", ylab = "", zlab = "")
+      rglwidget(elementId = "aa")
+      add_data <- points3d(data_coord_additional, col = "red", axes = F, box = T, xlab = "", ylab = "", zlab = "")
+      rglwidget(elementId = "bb")
+
+      toggleWidget(sceneId = "aa", ids = main_data, label = "aa")
+      toggleWidget(sceneId = "bb", ids = add_data, label = "bb")
+      #   toggleWidget(ids = main_data, label = 'aaa') %>%
+      # rglwidget(elementId = "plot3drgl") %>%
+      #   toggleWidget(ids = add_data, label = 'bbb') %>% 
+      #   asRow(last=2)
+    }
+    
+    if (show == "sphere"){
+      if(range(plot_data$size) %>% uniqueN() != 1){
+        size_set = scale_range(plot_data$size, 0.5, 2, mode = 'linear')
+      } else {
+        size_set = rep(1, nrow(plot_data))
+      }
+      main_data <- plot3d(data_coord, col = "blue", type = "s", size = size_set, axes = F, box = T, xlab = "", ylab = "", zlab = "")
+    }
+    box3d(color = "grey")
+    if (plot2d_flag){rgl.viewpoint( theta = 0, phi = 0, fov = 0, interactive = F)}
+  }
 }

@@ -20,6 +20,9 @@ library(magick)
 library(mlrMBO)
 library(rpca)
 library(uwot)   # for UMAP
+library(DescTools)
+library(LatticeDesign)
+library(rgl)
 library(parallelMap)
 library(parallel)
 library(data.table)
@@ -27,7 +30,6 @@ library(dplyr)
 library(tidyverse)
 
 source('./Help.R')
-source('./Help_Autoencoder.R')
 options(scipen=999)  # disable scientific notation
 
 # compile functions
@@ -42,12 +44,16 @@ options(scipen=999)  # disable scientific notation
     assign(funlist[i],comfun)
   }
 }
-library(reticulate)
-np <- import("numpy", convert = FALSE)
-library(keras)
-library(tensorflow)
-gpu <- tf$config$experimental$get_visible_devices('GPU')[[1]]
-tf$config$experimental$set_memory_growth(device = gpu, enable = TRUE)   # allows max memory usage and to run multiple session with GPU
+# only for Keras - it will automatically activate the R_Keras environment. If you want to switch the env you have to restart R session
+{
+  library(reticulate)
+  np <- import("numpy", convert = FALSE)
+  library(keras)
+  library(tensorflow)
+  source('./Help_Autoencoder.R')
+  gpu <- tf$config$experimental$get_visible_devices('GPU')[[1]]
+  tf$config$experimental$set_memory_growth(device = gpu, enable = TRUE)   # allows max memory usage and to run multiple session with GPU
+}
 
 
 # define perimeter and load peers variables
@@ -274,7 +280,7 @@ reload_df = T  # reload df_final
     mutate_at(vars(starts_with('rod_')), function(x) ifelse(is.infinite(x), 1, x))
   write.table(df_peers %>% group_by(Dummy_industry) %>% summarise(Tot_Abi_Ndg = n(), .groups = 'drop'),
               './Distance_to_Default/Stats/01_ORBIS_peers_perimeter_summary.csv', sep = ';', row.names = F, append = F)
-  rm(summary_perimeter, missing_ATECO)
+  rm(summary_perimeter, missing_ATECO, summary_years)
 }
 
 
@@ -483,8 +489,13 @@ df_final_small = df_final %>%
 }
 
 # clustering peers <-> df_final
+reload_embedding_input = T    # reload embedding input (scaled original data)
 reload_PCA = T    # reload Robust PCA embedding
 reload_autoencoder = T   # reload autoencoder embedding
+tune_autoencoder = F    # tune autoencoder parameters
+reload_peers_embedding = T    # reload list of embedding and predicted embedding on peers dataset - requires Keras environment and will conflict with
+                              # densMAP python environment when evaluating visualization data
+reload_embedding_visualization = T    # reload evaluation of UMAP
 {
   # evaluate statistics between ORBIS and CRIF data
   {
@@ -547,60 +558,62 @@ reload_autoencoder = T   # reload autoencoder embedding
         
         mapped = 'YES'
         # for (ind in unique(df_peers$Dummy_industry)){
-          df_values = df_final %>%
-            select(all_of(c(var, 'Dummy_industry'))) %>%
+        df_values = df_final %>%
+          select(all_of(c(var, 'Dummy_industry'))) %>%
+          # filter(Dummy_industry == ind) %>%
+          select(-Dummy_industry) %>%
+          unlist() %>%
+          as.numeric()
+        if (var %in% ORBIS_mapped){
+          ORBIS_values = df_peers %>%
+            select(all_of(c(ORBIS_mapping %>% filter(BILA == var) %>% pull(Year_Variable), 'Dummy_industry'))) %>%
             # filter(Dummy_industry == ind) %>%
             select(-Dummy_industry) %>%
             unlist() %>%
-            as.numeric()
-          if (var %in% ORBIS_mapped){
-            ORBIS_values = df_peers %>%
-              select(all_of(c(ORBIS_mapping %>% filter(BILA == var) %>% pull(Year_Variable), 'Dummy_industry'))) %>%
-              # filter(Dummy_industry == ind) %>%
-              select(-Dummy_industry) %>%
-              unlist() %>%
-              as.numeric() %>%
-              replace(is.infinite(.), NA)
-            
-            boxplot_data = boxplot_data %>% bind_rows(      # different ind will be appended with the same label 'var' -> OK!
-              data.frame(Variable = gsub('BILA_', '', var), Dataset = 'ORBIS', values = ORBIS_values, stringsAsFactors = F),
-              data.frame(Variable = gsub('BILA_', '', var), Dataset = 'CRIF', values = df_values, stringsAsFactors = F))
-          } else {
-            ORBIS_values = df_values
-            mapped = 'NO - Peer=CRIF'
-          }
+            as.numeric() %>%
+            replace(is.infinite(.), NA)
           
-          quant = quantile(ORBIS_values, c(0.33, 0.66), na.rm = T) %>% as.numeric() %>% round(3)
-          ORBIS_label = ORBIS_label %>% bind_rows(
-            data.frame(Variable = var, mapped = mapped, Peer_NAs = sum(is.na(ORBIS_values)),  # Dummy_industry = ind, 
-                       Peer_median = round(median(ORBIS_values, na.rm = T), 3), Peer_33rd = quant[1], Peer_66th = quant[2],
-                       Peer_min = round(min(ORBIS_values, na.rm = T), 3), Peer_max = round(max(ORBIS_values, na.rm = T), 3),
-                       CRIF_median = round(median(df_values, na.rm = T), 3),
-                       CRIF_min = min(df_values, na.rm = T), CRIF_max = max(df_values, na.rm = T), stringsAsFactors = F)
-          )
+          boxplot_data = boxplot_data %>% bind_rows(      # different ind will be appended with the same label 'var' -> OK!
+            data.frame(Variable = gsub('BILA_', '', var), Dataset = 'ORBIS', values = ORBIS_values, stringsAsFactors = F),
+            data.frame(Variable = gsub('BILA_', '', var), Dataset = 'CRIF', values = df_values, stringsAsFactors = F))
+        } else {
+          ORBIS_values = df_values
+          mapped = 'NO - Peer=CRIF'
+        }
+        
+        quant = quantile(ORBIS_values, c(0.33, 0.66), na.rm = T) %>% as.numeric() %>% round(3)
+        ORBIS_label = ORBIS_label %>% bind_rows(
+          data.frame(Variable = var, mapped = mapped, Peer_NAs = sum(is.na(ORBIS_values)),  # Dummy_industry = ind, 
+                     Peer_median = round(median(ORBIS_values, na.rm = T), 3), Peer_33rd = quant[1], Peer_66th = quant[2],
+                     Peer_min = round(min(ORBIS_values, na.rm = T), 3), Peer_max = round(max(ORBIS_values, na.rm = T), 3),
+                     CRIF_median = round(median(df_values, na.rm = T), 3),
+                     CRIF_min = min(df_values, na.rm = T), CRIF_max = max(df_values, na.rm = T), stringsAsFactors = F)
+        )
         # } # ind
       } # var
       
       # plot variable comparison boxplot
-      png('./Distance_to_Default/Stats/02a_Peers_variable_distribution.png', width = 32, height = 32, units = 'in', res=300)
-      plot(ggplot(boxplot_data %>% filter(!is.na(values)), aes(x=Dataset, y=values, fill=Dataset)) + 
-             geom_boxplot() +
-             facet_wrap(.~Variable, scales = 'free_y', ncol = 5) +
-             theme(legend.text = element_text(size = 28),
-                   legend.title = element_text(size = 28),
-                   legend.key = element_rect(fill = "white"),
-                   legend.key.size = unit(2.5, "cm"),
-                   axis.title.x=element_blank(),
-                   axis.text.x=element_blank(),
-                   axis.ticks.x=element_blank(),
-                   axis.title.y=element_blank(),
-                   axis.text.y=element_text(size = 20),
-                   plot.title = element_text(size = 35, margin=margin(15,0,30,0)),
-                   strip.text.x = element_text(size = 28, face = 'bold'),
-                   strip.background = element_rect(color = "black", size = 1)) +
-             ggtitle('ORBIS vs CRIF variable distribution'))
-      dev.off()
-      rm(boxplot_data, summary_nan_inf)
+      if (reload_embedding_input == FALSE){
+        png('./Distance_to_Default/Stats/02a0_Peers_variable_distribution.png', width = 32, height = 32, units = 'in', res=300)
+        plot(ggplot(boxplot_data %>% filter(!is.na(values)), aes(x=Dataset, y=values, fill=Dataset)) + 
+               geom_boxplot() +
+               facet_wrap(.~Variable, scales = 'free_y', ncol = 5) +
+               theme(legend.text = element_text(size = 28),
+                     legend.title = element_text(size = 28),
+                     legend.key = element_rect(fill = "white"),
+                     legend.key.size = unit(2.5, "cm"),
+                     axis.title.x=element_blank(),
+                     axis.text.x=element_blank(),
+                     axis.ticks.x=element_blank(),
+                     axis.title.y=element_blank(),
+                     axis.text.y=element_text(size = 20),
+                     plot.title = element_text(size = 35, margin=margin(15,0,30,0)),
+                     strip.text.x = element_text(size = 28, face = 'bold'),
+                     strip.background = element_rect(color = "black", size = 1)) +
+               ggtitle('ORBIS vs CRIF variable distribution'))
+        dev.off()
+        suppressWarnings(rm(boxplot_data, summary_nan_inf))
+      }
       write.table(ORBIS_label, './Distance_to_Default/Stats/01b_ORBIS_peers_quantile_median.csv', sep = ';', row.names = F, append = F)
     }
     
@@ -630,129 +643,145 @@ reload_autoencoder = T   # reload autoencoder embedding
 
   # create input data for embedding (standardize)
   {
-    # create embedding for CRIF dataset and peers - standardize
-    df_emb_input = df_final_small %>%
-      select(starts_with('BILA_')) %>%
-      mutate_all(~scale(., center=T, scale=T))
-    scaling_df_emb_input = c()
-    for (var in colnames(df_emb_input)){
-      tt = df_emb_input %>% pull(all_of(var)) %>% attributes()
-      scaling_df_emb_input = scaling_df_emb_input %>%
-        bind_rows(data.frame(variable = var, center = tt$`scaled:center`, scale = tt$`scaled:scale`,
-                             min = min(df_final_small %>% pull(var)), max = max(df_final_small %>% pull(var)), stringsAsFactors = F))
-      df_emb_input = df_emb_input %>%
-        mutate_at(vars(all_of(var)), function(x) { attributes(x) <- NULL; x })
-      rm(tt)
-    }
-
-    # evaluate how many peers have outliers, cap extreme values within 1.75*min and 1.75*max of corresponding df_emb_input variable
-    # and standardize with df_emb_input parameters
-    
-    trim_ind = data.frame(matrix(FALSE, nrow = nrow(df_peers_long), ncol = ncol(df_emb_input))) %>% setNames(colnames(df_emb_input))
-    df_emb_input_peers = c()
-    for (var in colnames(df_emb_input)){
-      norm_param = scaling_df_emb_input %>% filter(variable == var)
-      tt = df_peers_long %>% select(all_of(ORBIS_mapping %>% filter(BILA == var) %>% pull(Single_Variable) %>% unique)) %>% `colnames<-`(var)
-      trim_min_ind = which(tt < (norm_param$min - 0.75*abs(norm_param$min)))
-      trim_max_ind = which(tt > (norm_param$max + 0.75*abs(norm_param$max)))
-      tt[trim_min_ind] = norm_param$min
-      tt[trim_max_ind] = norm_param$max
-      trim_ind[c(trim_min_ind, trim_max_ind), var] = TRUE
-      df_emb_input_peers = df_emb_input_peers %>% bind_cols((tt - norm_param$center) / norm_param$scale)
-      rm(norm_param)
-    }
-    
-    check_outliers_df = df_peers_long %>%
-      select(Company_name_Latin_alphabet, year) %>%
-      bind_cols(
-        trim_ind %>%
-          mutate(total_capped = rowSums(.),
-                 capped_variables = apply(., 1, function(x) paste0(colnames(df_emb_input)[which(x != 0)], collapse = ' | '))) %>%
-          select(total_capped, capped_variables)) %>%
-      filter(total_capped != 0) %>%
-      group_by(Company_name_Latin_alphabet) %>%
-      summarize(total_capped = sum(total_capped),
-                capped_variables = strsplit(paste0(capped_variables, collapse = " | "), " \\| ")[[1]] %>% unique() %>% setdiff("") %>% paste0(collapse = " | "),
-                .groups = "drop")
-    cat('\n ---', nrow(check_outliers_df), '/', nrow(df_peers), 'peers have been trimmed for outliers when standardizing the input for embedding for a maximum of',
-        max(check_outliers_df$total_capped), 'values for each peer')
-    write.table(check_outliers_df, './Distance_to_Default/Stats/02a_Peers_quantile_trimming.csv', sep = ';', row.names = F, append = F)
-    
-    # todo: rimuovi   - non dovrebbero esserci più problemi con i missing e inf
-    # df_emb_input_peers = df_emb_input_peers %>%
-    #   replace(is.na(.), 0)
-    # df_emb_input_peers[sapply(df_emb_input_peers, is.infinite)] <- 0
-    
-    cat('\n--- range of df_emb_input:', range(df_emb_input, na.rm = T), '    missing values:', sum(is.na(df_emb_input)))
-    cat('\n--- range of df_emb_input_peers:', range(df_emb_input_peers, na.rm = T), '    missing values:', sum(is.na(df_emb_input_peers)), '\n\n')
-    
-    # shape embedding input with single abi+ndg per line and save headers
-    {
-      df_emb_input = df_emb_input %>%
-        as.data.frame() %>%
-        `rownames<-`(paste0('row_', 1:nrow(df_emb_input)))
+    if (reload_embedding_input == FALSE){
       
-      df_emb_input_header = df_final %>%
-        select(abi, ndg, year) %>%
-        mutate(abi_ndg = paste0(abi, '_', ndg),
-               row_names = paste0("row_", 1:n())) %>%
-        left_join(df_final %>%
-                    group_by(abi, ndg) %>%
-                    summarise(Avail_years = n(), .groups = "drop"), by = c("abi", "ndg"))
-      
-      df_emb_input_peers = df_emb_input_peers %>%
-        as.data.frame() %>%
-        `rownames<-`(paste0('row_', 1:nrow(df_emb_input_peers)))
-      
-      df_emb_input_peers_header = df_peers_long %>%
-        select(Company_name_Latin_alphabet, European_VAT_number, year) %>%
-        mutate(row_names = paste0("row_", 1:n())) %>%
-        left_join(df_peers_long %>%
-                    group_by(Company_name_Latin_alphabet, European_VAT_number) %>%
-                    summarise(Avail_years = n(), .groups = "drop"), by = c("Company_name_Latin_alphabet", "European_VAT_number"))
-      
-      df_emb_input_wide = df_emb_input_header %>%
-        bind_cols(df_emb_input) %>%
-        setDT() %>%
-        dcast(abi + ndg + abi_ndg + Avail_years ~ year, value.var = colnames(df_emb_input), sep = "___", fill = NA) %>%
-        as.data.frame() %>%
-        mutate(row_names = paste0("row_", 1:n()))
-      
-      col_order = c()
-      for (yr in unique(df_emb_input_header$year) %>% sort()){
-        for (col in colnames(df_emb_input)){
-          df_emb_input_wide = df_emb_input_wide %>%
-            rename(!!sym(paste0(yr, "_", col)) := !!sym(paste0(col, "___", yr)))
-          col_order = c(col_order, paste0(yr, "_", col))
-        }
+      # create embedding for CRIF dataset and peers - standardize
+      df_emb_input = df_final_small %>%
+        select(starts_with('BILA_')) %>%
+        mutate_all(~scale(., center=T, scale=T))
+      scaling_df_emb_input = c()
+      for (var in colnames(df_emb_input)){
+        tt = df_emb_input %>% pull(all_of(var)) %>% attributes()
+        scaling_df_emb_input = scaling_df_emb_input %>%
+          bind_rows(data.frame(variable = var, center = tt$`scaled:center`, scale = tt$`scaled:scale`,
+                               min = min(df_final_small %>% pull(var)), max = max(df_final_small %>% pull(var)), stringsAsFactors = F))
+        df_emb_input = df_emb_input %>%
+          mutate_at(vars(all_of(var)), function(x) { attributes(x) <- NULL; x })
+        rm(tt)
       }
-      df_emb_input_wide = df_emb_input_wide %>%
-        select(abi, ndg, abi_ndg, row_names, Avail_years, all_of(col_order))
-      df_emb_input_wide_header = df_emb_input_wide %>% select(abi, ndg, abi_ndg, row_names, Avail_years)
-      df_emb_input_wide = df_emb_input_wide %>% select(-abi, -ndg, -abi_ndg, -Avail_years) %>%
-        column_to_rownames(var = "row_names")
       
-      df_emb_input_peers_wide = df_emb_input_peers_header %>%
-        bind_cols(df_emb_input_peers) %>%
-        setDT() %>%
-        dcast(Company_name_Latin_alphabet + European_VAT_number + Avail_years ~ year, value.var = colnames(df_emb_input), sep = "___", fill = NA) %>%
-        as.data.frame() %>%
-        mutate(row_names = paste0("row_", 1:n()))
+      # evaluate how many peers have outliers, cap extreme values within 1.75*min and 1.75*max of corresponding df_emb_input variable
+      # and standardize with df_emb_input parameters
       
-      col_order = c()
-      for (yr in unique(df_emb_input_peers_header$year) %>% sort()){
-        for (col in colnames(df_emb_input_peers)){
-          df_emb_input_peers_wide = df_emb_input_peers_wide %>%
-            rename(!!sym(paste0(yr, "_", col)) := !!sym(paste0(col, "___", yr)))
-          col_order = c(col_order, paste0(yr, "_", col))
-        }
+      trim_ind = data.frame(matrix(FALSE, nrow = nrow(df_peers_long), ncol = ncol(df_emb_input))) %>% setNames(colnames(df_emb_input))
+      df_emb_input_peers = c()
+      for (var in colnames(df_emb_input)){
+        norm_param = scaling_df_emb_input %>% filter(variable == var)
+        tt = df_peers_long %>% select(all_of(ORBIS_mapping %>% filter(BILA == var) %>% pull(Single_Variable) %>% unique)) %>% `colnames<-`(var)
+        trim_min_ind = which(tt < (norm_param$min - 0.75*abs(norm_param$min)))
+        trim_max_ind = which(tt > (norm_param$max + 0.75*abs(norm_param$max)))
+        tt[trim_min_ind] = norm_param$min
+        tt[trim_max_ind] = norm_param$max
+        trim_ind[c(trim_min_ind, trim_max_ind), var] = TRUE
+        df_emb_input_peers = df_emb_input_peers %>% bind_cols((tt - norm_param$center) / norm_param$scale)
+        rm(norm_param)
       }
-      df_emb_input_peers_wide = df_emb_input_peers_wide %>%
-        select(Company_name_Latin_alphabet, European_VAT_number, row_names, Avail_years, all_of(col_order))
-      df_emb_input_peers_wide_header = df_emb_input_peers_wide %>% select(Company_name_Latin_alphabet, European_VAT_number, row_names, Avail_years)
-      df_emb_input_peers_wide = df_emb_input_peers_wide %>% select(-Company_name_Latin_alphabet, -European_VAT_number, -Avail_years) %>%
-        column_to_rownames(var = "row_names")
       
+      check_outliers_df = df_peers_long %>%
+        select(Company_name_Latin_alphabet, year) %>%
+        bind_cols(
+          trim_ind %>%
+            mutate(total_capped = rowSums(.),
+                   capped_variables = apply(., 1, function(x) paste0(colnames(df_emb_input)[which(x != 0)], collapse = ' | '))) %>%
+            select(total_capped, capped_variables)) %>%
+        filter(total_capped != 0) %>%
+        group_by(Company_name_Latin_alphabet) %>%
+        summarize(total_capped = sum(total_capped),
+                  capped_variables = strsplit(paste0(capped_variables, collapse = " | "), " \\| ")[[1]] %>% unique() %>% setdiff("") %>% paste0(collapse = " | "),
+                  .groups = "drop")
+      cat('\n ---', nrow(check_outliers_df), '/', nrow(df_peers), 'peers have been trimmed for outliers when standardizing the input for embedding for a maximum of',
+          max(check_outliers_df$total_capped), 'values for each peer')
+      write.table(check_outliers_df, './Distance_to_Default/Stats/02a0_Peers_quantile_trimming.csv', sep = ';', row.names = F, append = F)
+      
+      # todo: rimuovi   - non dovrebbero esserci più problemi con i missing e inf
+      # df_emb_input_peers = df_emb_input_peers %>%
+      #   replace(is.na(.), 0)
+      # df_emb_input_peers[sapply(df_emb_input_peers, is.infinite)] <- 0
+      
+      cat('\n--- range of df_emb_input:', range(df_emb_input, na.rm = T), '    missing values:', sum(is.na(df_emb_input)))
+      cat('\n--- range of df_emb_input_peers:', range(df_emb_input_peers, na.rm = T), '    missing values:', sum(is.na(df_emb_input_peers)), '\n\n')
+      
+      # shape embedding input with single abi+ndg per line and save headers
+      {
+        df_emb_input = df_emb_input %>%
+          as.data.frame() %>%
+          `rownames<-`(paste0('row_', 1:nrow(df_emb_input)))
+        
+        df_emb_input_header = df_final %>%
+          select(abi, ndg, year) %>%
+          mutate(abi_ndg = paste0(abi, '_', ndg),
+                 row_names = paste0("row_", 1:n())) %>%
+          left_join(df_final %>%
+                      group_by(abi, ndg) %>%
+                      summarise(Avail_years = n(), .groups = "drop"), by = c("abi", "ndg"))
+        
+        df_emb_input_peers = df_emb_input_peers %>%
+          as.data.frame() %>%
+          `rownames<-`(paste0('row_', 1:nrow(df_emb_input_peers)))
+        
+        df_emb_input_peers_header = df_peers_long %>%
+          select(Company_name_Latin_alphabet, European_VAT_number, year) %>%
+          mutate(row_names = paste0("row_", 1:n())) %>%
+          left_join(df_peers_long %>%
+                      group_by(Company_name_Latin_alphabet, European_VAT_number) %>%
+                      summarise(Avail_years = n(), .groups = "drop"), by = c("Company_name_Latin_alphabet", "European_VAT_number"))
+        
+        df_emb_input_wide = df_emb_input_header %>%
+          bind_cols(df_emb_input) %>%
+          setDT() %>%
+          dcast(abi + ndg + abi_ndg + Avail_years ~ year, value.var = colnames(df_emb_input), sep = "___", fill = NA) %>%
+          as.data.frame() %>%
+          mutate(row_names = paste0("row_", 1:n()))
+        
+        col_order = c()
+        for (yr in unique(df_emb_input_header$year) %>% sort()){
+          for (col in colnames(df_emb_input)){
+            df_emb_input_wide = df_emb_input_wide %>%
+              rename(!!sym(paste0(yr, "_", col)) := !!sym(paste0(col, "___", yr)))
+            col_order = c(col_order, paste0(yr, "_", col))
+          }
+        }
+        df_emb_input_wide = df_emb_input_wide %>%
+          select(abi, ndg, abi_ndg, row_names, Avail_years, all_of(col_order))
+        df_emb_input_wide_header = df_emb_input_wide %>% select(abi, ndg, abi_ndg, row_names, Avail_years)
+        df_emb_input_wide = df_emb_input_wide %>% select(-abi, -ndg, -abi_ndg, -Avail_years) %>%
+          column_to_rownames(var = "row_names")
+        
+        df_emb_input_peers_wide = df_emb_input_peers_header %>%
+          bind_cols(df_emb_input_peers) %>%
+          setDT() %>%
+          dcast(Company_name_Latin_alphabet + European_VAT_number + Avail_years ~ year, value.var = colnames(df_emb_input), sep = "___", fill = NA) %>%
+          as.data.frame() %>%
+          mutate(row_names = paste0("row_", 1:n()))
+        
+        col_order = c()
+        for (yr in unique(df_emb_input_peers_header$year) %>% sort()){
+          for (col in colnames(df_emb_input_peers)){
+            df_emb_input_peers_wide = df_emb_input_peers_wide %>%
+              rename(!!sym(paste0(yr, "_", col)) := !!sym(paste0(col, "___", yr)))
+            col_order = c(col_order, paste0(yr, "_", col))
+          }
+        }
+        df_emb_input_peers_wide = df_emb_input_peers_wide %>%
+          select(Company_name_Latin_alphabet, European_VAT_number, row_names, Avail_years, all_of(col_order))
+        df_emb_input_peers_wide_header = df_emb_input_peers_wide %>% select(Company_name_Latin_alphabet, European_VAT_number, row_names, Avail_years)
+        df_emb_input_peers_wide = df_emb_input_peers_wide %>% select(-Company_name_Latin_alphabet, -European_VAT_number, -Avail_years) %>%
+          column_to_rownames(var = "row_names")
+        
+      }
+      
+      list_emb_input = list(df_emb_input = df_emb_input,
+                            df_emb_input_header = df_emb_input_header,
+                            df_emb_input_peers = df_emb_input_peers,
+                            df_emb_input_peers_header = df_emb_input_peers_header,
+                            df_emb_input_wide = df_emb_input_wide,
+                            df_emb_input_wide_header = df_emb_input_wide_header,
+                            df_emb_input_peers_wide = df_emb_input_peers_wide,
+                            df_emb_input_peers_wide_header = df_emb_input_peers_wide_header)
+      saveRDS(list_emb_input, './Distance_to_Default/Checkpoints/list_emb_input.rds')
+      rm(trim_ind, tt, scaling_df_emb_input, check_outliers_df)
+    } else {
+      list_emb_input = readRDS('./Distance_to_Default/Checkpoints/list_emb_input.rds')
     }
   }
   
@@ -778,92 +807,19 @@ reload_autoencoder = T   # reload autoencoder embedding
     
     # test different activation function and architectures
     {
-      tune_autoencoder = autoencoder_tuning(dataset = df_emb_input, NA_masking = 0, masking_value = 0, save_RDS_additional_lab = 'AE_emb',
-                                            batch_size = 500, epochs = 300, max_iter = 80, design_iter = 15)
-      
-      tune_autoencoder_wide = autoencoder_tuning(dataset = df_emb_input_wide, NA_masking = 0, masking_value = 0, save_RDS_additional_lab = 'AE_emb_wide',
-                                                 batch_size = 500, epochs = 300, max_iter = 80, design_iter = 15)
-      
-      x_input = create_lstm_input(df = df_emb_input, df_header = df_emb_input_header, ID_col = 'abi_ndg', TIME_col = 'year', NA_masking = 0)
-      tune_autoencoderLSTM = autoencoderLSTM_tuning(x_input, masking_value = 0, max_lstm_neurons = 100, save_RDS_additional_lab = 'AE_LSTM_emb', epochs = 250,
-                                        temporal_embedding = FALSE, timestep_label = c(), max_iter = 60, design_iter = 15)
+      if (tune_autoencoder){
+        tune_autoencoder = autoencoder_tuning(dataset = df_emb_input, NA_masking = 0, masking_value = 0, save_RDS_additional_lab = 'AE_emb',
+                                              batch_size = 500, epochs = 300, max_iter = 80, design_iter = 15)
+        
+        tune_autoencoder_wide = autoencoder_tuning(dataset = df_emb_input_wide, NA_masking = 0, masking_value = 0, save_RDS_additional_lab = 'AE_emb_wide',
+                                                   batch_size = 500, epochs = 300, max_iter = 80, design_iter = 15)
+        
+        x_input = create_lstm_input(df = df_emb_input, df_header = df_emb_input_header, ID_col = 'abi_ndg', TIME_col = 'year', NA_masking = 0)
+        tune_autoencoderLSTM = autoencoderLSTM_tuning(x_input, masking_value = 0, max_lstm_neurons = 100, save_RDS_additional_lab = 'AE_LSTM_emb', epochs = 250,
+                                                      temporal_embedding = FALSE, timestep_label = c(), max_iter = 60, design_iter = 15)
+      }
     }
 
-    
-    
-      
-    
-    
-    
-    ######## todo: fai girare quando finisce il tuning dell'LSTM
-    
-    # save_RDS_additional_lab = 'AE_LSTM_emb'
-    # # save observations names
-    # x_input = create_lstm_input(df = df_emb_input, df_header = df_emb_input_header, ID_col = 'abi_ndg', TIME_col = 'year', NA_masking = 0)
-    # names(x_input) = NULL
-    # x_input = np$array(x_input)
-    # x_input_dim = py_to_r(x_input$shape) %>% unlist()
-    # 
-    # # create a copy of x_input, reshaping into a (obs*timestep)x(features) matrix including masked values
-    # x_input_full = array_reshape(x_input, c(prod(x_input_dim[1:2]), x_input_dim[3]))
-    # x_input_full = py_to_r(x_input_full)
-    # 
-    # # save masking index
-    # if (!is.null(masking_value)){
-    #   masking = x_input_full == masking_value
-    # } else {
-    #   masking = matrix(FALSE, ncol = ncol(x_input_full), nrow = nrow(x_input_full))
-    # }
-    # 
-    # result_csv = paste0('./Distance_to_Default/Stats/Autoencoder_test/00_Optimization_list_', save_RDS_additional_lab, '.csv')
-    # result = read.csv(result_csv, sep=";", stringsAsFactors=FALSE) %>%
-    #   mutate(R2 = -99) %>%
-    #   relocate(R2, .after = MSE)
-    # for (i in 1:nrow(result)){
-    #   if (result$MSE[i] != 999){
-    #     aut = readRDS(result$RDS_path[i])
-    #     full_output = aut$reconstr_prediction
-    #     
-    #     R2 = round(eval_R2(x_input_full, full_output, masking = masking) * 100, 1)
-    #     R2_99 = round(eval_R2(x_input_full, full_output, 0.99, masking = masking) * 100, 1)
-    #     R2_95 = round(eval_R2(x_input_full, full_output, 0.95, masking = masking) * 100, 1)
-    #     
-    #     aut$R2 = R2
-    #     aut$R2_99 = R2_99
-    #     aut$R2_95 = R2_95
-    #     
-    #     saveRDS(aut, result$RDS_path[i])
-    #     
-    #     result$R2[i] = aut$R2
-    #   }
-    # }
-    # write.table(result, result_csv, sep = ';', row.names = F, append = F)
-    
-    
-    # res =  read.csv('./Distance_to_Default/Stats/Autoencoder_test/00_Optimization_list_AE_LSTM_emb.csv', sep=";", stringsAsFactors=FALSE) %>%
-    #   mutate(layers_list = as.character(layers_list))
-    # lstm_list = paste0("./Distance_to_Default/Stats/Autoencoder_test/",
-    #                      list.files(path = './Distance_to_Default/Stats/Autoencoder_test/', pattern = "^AE_LSTM_emb*"), sep = "")
-    # for (i in 1:length(lstm_list)){
-    #   aut = readRDS(lstm_list[i])
-    #   opt = aut$options
-    #   add_row = data.frame(layers = length(opt$layer_list),
-    #                        layers_list = paste0(opt$layer_list, collapse = ".") %>% as.character(),
-    #                        n_comp = opt$n_comp,
-    #                        RNN_type = opt$RNN_type,
-    #                        kernel_reg_alpha = ifelse(is.null(opt$kernel_reg_alpha), "", as.character(opt$kernel_reg_alpha)),
-    #                        batch_size = opt$batch_size,
-    #                        MSE = aut$ReconstErrorRMSE ^ 2, 
-    #                        RDS_path = lstm_list[i],
-    #                        R2 = aut$R2, stringsAsFactors = F)
-    #   res = res %>%
-    #     bind_rows(add_row)
-    # }
-    # write.table(res %>% relocate(R2, .after = MSE) %>% filter(!is.na(R2)), './Distance_to_Default/Stats/Autoencoder_test/00_Optimization_list_AE_LSTM_emb.csv', sep = ';', row.names = F, append = F)
-    
-    
-    
-    
     # fit/reload final embedding
     if (reload_autoencoder == FALSE){
       aut_emb = Autoencoder_PC(df_emb_input, n_comp = 10, epochs = 500, batch_size = 500, layer_list = c(20, 16, 14, 12),
@@ -877,11 +833,10 @@ reload_autoencoder = T   # reload autoencoder embedding
       saveRDS(aut_emb_wide, './Distance_to_Default/Checkpoints/00_aut_emb_wide.rds')
         
       x_input = create_lstm_input(df = df_emb_input, df_header = df_emb_input_header, ID_col = 'abi_ndg', TIME_col = 'year', NA_masking = 0)
-      aut_emb_LSTM = AutoencoderLSTM_PC(x_input, n_comp = 2, epochs = 500, batch_size = 400, layer_list = c(100, 50), kernel_reg_alpha = NULL,
-                                    RNN_type = 'lstm', temporal_embedding = FALSE, timestep_label = c(), masking_value = 0, verbose = 0,
+      aut_emb_LSTM = AutoencoderLSTM_PC(x_input, n_comp = 10, epochs = 500, batch_size = 100, layer_list = c(55, 31, 17), kernel_reg_alpha = NULL,
+                                    RNN_type = 'gru', temporal_embedding = FALSE, timestep_label = c(), masking_value = 0, verbose = 0,
                                     save_RDS = F, save_model = T, save_model_name = './Distance_to_Default/Checkpoints/AE_LSTM_emb')
       saveRDS(aut_emb_LSTM, './Distance_to_Default/Checkpoints/00_aut_emb_LSTM.rds')
-      
     } else {
       aut_emb = readRDS('./Distance_to_Default/Checkpoints/00_aut_emb.rds')
       aut_emb_wide = readRDS('./Distance_to_Default/Checkpoints/00_aut_emb_wide.rds')
@@ -889,47 +844,171 @@ reload_autoencoder = T   # reload autoencoder embedding
     }
     
     # summary table
-    summary_table = PCA_emb$report %>% mutate(Dataset = 'abi_ndg+year (long)', Method = 'PCA', Obs = nrow(df_emb_input),
+    summary_table = PCA_emb$report %>% mutate(Dataset = 'abi_ndg+year (long)', Method = 'PCA', Obs = nrow(list_emb_input$df_emb_input),
                                               Embedding_Range = PCA_emb$Embedding_Range) %>%
-      bind_rows(PCA_emb_wide$report %>% mutate(Dataset = 'abi_ndg (wide)', Method = 'PCA', Obs = nrow(df_emb_input_wide),
+      bind_rows(PCA_emb_wide$report %>% mutate(Dataset = 'abi_ndg (wide)', Method = 'PCA', Obs = nrow(list_emb_input$df_emb_input_wide),
                                                Embedding_Range = PCA_emb_wide$Embedding_Range),
-                aut_emb$report %>% mutate(Dataset = 'abi_ndg+year (long)', Method = 'AE', Obs = nrow(df_emb_input),
+                aut_emb$report %>% mutate(Dataset = 'abi_ndg+year (long)', Method = 'AE', Obs = nrow(list_emb_input$df_emb_input),
                                           Embedding_Range = aut_emb$Embedding_Range),
-                aut_emb_wide$report %>% mutate(Dataset = 'abi_ndg (wide)', Method = 'AE', Obs = nrow(df_emb_input_wide),
+                aut_emb_wide$report %>% mutate(Dataset = 'abi_ndg (wide)', Method = 'AE', Obs = nrow(list_emb_input$df_emb_input_wide),
                                                Embedding_Range = aut_emb_wide$Embedding_Range),
-                aut_emb_LSTM$report %>% mutate(Dataset = 'abi_ndg (wide)', Method = 'AE LSTM', Obs = nrow(df_emb_input_wide),
+                aut_emb_LSTM$report %>% mutate(Dataset = 'abi_ndg (wide)', Method = 'AE LSTM', Obs = nrow(list_emb_input$df_emb_input_wide),
                                                Embedding_Range = aut_emb_LSTM$Embedding_Range)) %>%
       select(Dataset, Method, Obs, everything()) %>%
       arrange(desc(Dataset), desc(Method)) %>%
       replace(is.na(.), "")
     print(summary_table)
-    write.table(summary_table, './Distance_to_Default/Stats/02a_Embedding_summary.csv', sep = ';', row.names = F, append = F)
+    write.table(summary_table, './Distance_to_Default/Stats/02a1_Embedding_summary.csv', sep = ';', row.names = F, append = F)
 
-    # evaluate PCA on embedding to get 2 dimension to be plotted
-    emb = aut_emb$Embedding
+    # load embedding and evaluate embedding on peers dataset
+    {
+      if (reload_peers_embedding == FALSE){
+        embedding_list = list()
+        embedding_range = c()
+        for (emb_type in c("PCA", "PCA_wide", "AE", "AE_wide", "AE_LSTM_wide")){
+          
+          if (emb_type %in% c("PCA_wide", "AE_wide")){
+            emb_header = df_emb_input_wide_header
+            emb_input_peers = df_emb_input_peers_wide %>% select(all_of(colnames(df_emb_input_wide)))
+            emb_peers_header = df_emb_input_peers_wide_header
+          } else {
+            emb_header = df_emb_input_header
+            emb_peers_header = df_emb_input_peers_header %>% filter(year != "2011")
+            emb_input_peers = emb_peers_header %>% left_join(
+              df_emb_input_peers %>% select(all_of(colnames(df_emb_input))) %>% rownames_to_column("row_names"), by = "row_names") %>%
+              column_to_rownames("row_names") %>%
+              select(-all_of(setdiff(colnames(emb_peers_header), "row_names")))
+          }
+          
+          if (emb_type %in% c("PCA", "PCA_wide")){
+            if (emb_type == "PCA"){
+              emb_file = PCA_emb
+            } else if (emb_type == "PCA_wide"){
+              emb_file = PCA_emb_wide
+            }
+            
+            # predict peers embedding
+            emb_peers = as.matrix(emb_input_peers) %*% emb_file$loading_transform
+          }
+          
+          if (emb_type %in% c("AE", "AE_wide", "AE_LSTM_wide")){
+            if (emb_type == "AE"){
+              emb_file = aut_emb
+              emb_model = keras::load_model_hdf5("./Distance_to_Default/Checkpoints/AE_emb.h5")
+            } else if (emb_type == "AE_wide"){
+              emb_file = aut_emb_wide
+              emb_model = keras::load_model_hdf5("./Distance_to_Default/Checkpoints/AE_emb_wide.h5")
+            } else if (emb_type == "AE_LSTM_wide"){
+              emb_file = aut_emb_LSTM
+            }
+            
+            # predict peers embedding
+            if (emb_type == "AE_LSTM_wide"){
+              emb_peers = predict_AutoencoderLSTM(aut_emb_LSTM, "./Distance_to_Default/Checkpoints/AE_LSTM_emb_weights.h5",
+                                                  create_lstm_input(df = emb_input_peers, df_header = emb_peers_header,
+                                                                    ID_col = 'European_VAT_number', TIME_col = 'year', NA_masking = 0))
+            } else {
+              emb_peers = emb_model(emb_input_peers %>% as.matrix()) %>% as.matrix() %>% as.data.frame() %>% `rownames<-`(rownames(emb_input_peers))
+            }
+          }
+          
+          emb = emb_file$Embedding
+          
+          embedding_range = embedding_range %>%
+            bind_rows(data.frame(Embedding = emb_type, Data = 'CRIF', t(range(emb)), stringsAsFactors = F),
+                      data.frame(Embedding = emb_type, Data = 'PEERS', t(range(emb_peers)), stringsAsFactors = F))
+          
+          join_col_emb = ifelse(emb_type == "AE_LSTM_wide", "abi_ndg", "row_names")
+          join_col_emb_peers = ifelse(emb_type == "AE_LSTM_wide", "European_VAT_number", "row_names")
+          
+          embedding_list[[emb_type]] = list(emb = emb_header %>%
+                                              left_join(as.data.frame(emb) %>%
+                                                          rownames_to_column(join_col_emb) %>%
+                                                          setNames(c(join_col_emb, paste0("V", c(1:(ncol(.)-1))))), by = join_col_emb),
+                                            emb_peers = emb_peers_header %>%
+                                              left_join(as.data.frame(emb_peers) %>% rownames_to_column(join_col_emb_peers) %>%
+                                                          setNames(c(join_col_emb_peers, paste0("V", c(1:(ncol(.)-1))))), by = join_col_emb_peers))
+          
+        } # emb_type
+        
+        saveRDS(embedding_list, './Distance_to_Default/Checkpoints/embedding_list_pre_UMAP.rds')
+        
+        png('./Distance_to_Default/Stats/02a1_Embedding_Range.png', width = 10, height = 10, units = 'in', res=300)
+        plot(
+          ggplot(data = embedding_range %>% mutate(label = paste0(Embedding, " - ", Data)))+
+            geom_segment(aes(x = label, xend = label, y = X1, yend = X2, color = Embedding), size = 10, alpha = 0.6) +
+            coord_flip() +
+            ggtitle("Comparison of Embeddings range") +
+            ylab("Embedding Range") +
+            xlab("Embedding") +
+            theme(legend.position = "none",
+                  axis.text=element_text(size = 17),
+                  axis.title=element_text(size = 25),
+                  plot.title=element_text(size = 25))
+        )
+        dev.off()
+        
+        # check for embedding_list
+        check_embedding_list = c()
+        for (nn in names(embedding_list)){
+          vv = embedding_list[[nn]]
+          check_embedding_list = check_embedding_list %>%
+            bind_rows(data.frame(Embedding = nn, NA_emb = sum(is.na(vv$emb)), NA_emb_peers = sum(is.na(vv$emb_peers)),
+                                 Emb_columns = vv$emb %>% select(starts_with("V")) %>% ncol(),
+                                 Emb_peers_columns = vv$emb_peers %>% select(starts_with("V")) %>% ncol(),
+                                 Emb_rows = nrow(vv$emb), Emb_peers_rows = nrow(vv$emb_peers), stringsAsFactors = F))
+        }
+        if (max(check_embedding_list %>% select(NA_emb, NA_emb_peers) %>% unlist()) > 0){cat('\n\n######## warning: missing in some embedding_list')}
+        if (sum(check_embedding_list$Emb_columns != check_embedding_list$Emb_peers_columns) > 0){cat('\n\n######## warning: embeddding/peers columns don\'t match in some embedding_list')}
+        
+        rm(emb, emb_peers, emb_file, emb_header, emb_input_peers, emb_peers_header, emb_model, embedding_range, check_embedding_list, vv)
+      } else {
+        embedding_list = readRDS('./Distance_to_Default/Checkpoints/embedding_list_pre_UMAP.rds')
+      }
+    }
+
+    # evaluate UMAP to get 3 dimension to be plotted
+    {
+      n_components = 3
+      min_dist_set = c(0, 0.01)#, 0.05, 0.1, 0.5, 0.99)
+      n_neighbors_set = c(5, 15)#, 30, 50, 100, 500)
+      metric = "euclidean"
+      init = "agspectral"
+      n_epochs = 4     # todo: rimetti 400
+      eval_UMAP = T
+      eval_densMAP = F
+      # reticulate::use_condaenv("denseMAP", required = TRUE)     # activate conda env for densMAP
+      # dm <- reticulate::import('densmap')
+      
+      if (reload_embedding_visualization == FALSE){
+        emb_visual_list = list()
+        for (emb_type in names(embedding_list)){
+          
+          cat('\nFitting', emb_type, end = '...')
+          start_time = Sys.time()
+          
+          input_df = embedding_list[[emb_type]][['emb']] %>% select(starts_with("V"))
+          predict_input = embedding_list[[emb_type]][['emb_peers']] %>% select(starts_with("V"))
+
+          emb_visual_list[[emb_type]] = evaluate_UMAP(input_df, n_components = n_components, min_dist_set = min_dist_set, n_neighbors_set = n_neighbors_set,
+                                                      metric = metric, init = init, n_epochs = n_epochs, predict_input = predict_input,
+                                                      eval_UMAP = eval_UMAP, eval_densMAP = eval_densMAP)
+
+          saveRDS(emb_visual_list, './Distance_to_Default/Checkpoints/emb_visual_list.rds')
+          tot_diff=seconds_to_period(difftime(Sys.time(), start_time, units='secs'))
+          cat(' Done in', paste0(lubridate::hour(tot_diff), 'h:', lubridate::minute(tot_diff), 'm:', round(lubridate::second(tot_diff))))
+        }
+      } else {
+        emb_visual_list = readRDS('./Distance_to_Default/Checkpoints/emb_visual_list.rds')
+      }
+    }
+
+    # create a report of fitted UMAP to choose which combination of n_neighbors and min_dist to keep
     
     
-    set.seed(66)
-    emb_umap <- umap(emb, n_components = 3, n_neighbors = 100, min_dist = 0.001, verbose = TRUE, n_threads = detectCores(), ret_model = T,
-                     fast_sgd = TRUE, approx_pow = TRUE, scale = TRUE, init = "spca")
-    plot(emb_umap$embedding)
-    
-    
-    # predict new data UMAP
-    mnist_train_umap <- umap(mnist_train, verbose = TRUE, ret_model = TRUE)
-    mnist_test_umap <- umap_transform(mnist_test, mnist_train_umap, verbose = TRUE)
     
     
     
-    
-    emb_RPCA_fit = fit_pca(emb %>% as.data.frame(), force_pc_selection = 2)
-    print(emb_RPCA_fit$report)
-    emb_PCA_fit = fit_pca(emb %>% as.data.frame(), force_pc_selection = 2, RobPCA_method = FALSE)
-    print(emb_PCA_fit$report)
-    
-    plot(emb_RPCA_fit$Embedding)
-    plot(emb_PCA_fit$Embedding)
-    plot(emb[,1:2])
     
     # evaluate embedding quality
     {
@@ -1418,3 +1497,73 @@ reload_autoencoder = T   # reload autoencoder embedding
 
 
 #### clustering oggettivo!!!
+
+
+
+
+
+# rilegge i file creati nel tuning
+
+# save_RDS_additional_lab = 'AE_LSTM_emb'
+# # save observations names
+# x_input = create_lstm_input(df = df_emb_input, df_header = df_emb_input_header, ID_col = 'abi_ndg', TIME_col = 'year', NA_masking = 0)
+# names(x_input) = NULL
+# x_input = np$array(x_input)
+# x_input_dim = py_to_r(x_input$shape) %>% unlist()
+# 
+# # create a copy of x_input, reshaping into a (obs*timestep)x(features) matrix including masked values
+# x_input_full = array_reshape(x_input, c(prod(x_input_dim[1:2]), x_input_dim[3]))
+# x_input_full = py_to_r(x_input_full)
+# 
+# # save masking index
+# if (!is.null(masking_value)){
+#   masking = x_input_full == masking_value
+# } else {
+#   masking = matrix(FALSE, ncol = ncol(x_input_full), nrow = nrow(x_input_full))
+# }
+# 
+# result_csv = paste0('./Distance_to_Default/Stats/Autoencoder_test/00_Optimization_list_', save_RDS_additional_lab, '.csv')
+# result = read.csv(result_csv, sep=";", stringsAsFactors=FALSE) %>%
+#   mutate(R2 = -99) %>%
+#   relocate(R2, .after = MSE)
+# for (i in 1:nrow(result)){
+#   if (result$MSE[i] != 999){
+#     aut = readRDS(result$RDS_path[i])
+#     full_output = aut$reconstr_prediction
+#     
+#     R2 = round(eval_R2(x_input_full, full_output, masking = masking) * 100, 1)
+#     R2_99 = round(eval_R2(x_input_full, full_output, 0.99, masking = masking) * 100, 1)
+#     R2_95 = round(eval_R2(x_input_full, full_output, 0.95, masking = masking) * 100, 1)
+#     
+#     aut$R2 = R2
+#     aut$R2_99 = R2_99
+#     aut$R2_95 = R2_95
+#     
+#     saveRDS(aut, result$RDS_path[i])
+#     
+#     result$R2[i] = aut$R2
+#   }
+# }
+# write.table(result, result_csv, sep = ';', row.names = F, append = F)
+
+
+# res =  read.csv('./Distance_to_Default/Stats/Autoencoder_test/00_Optimization_list_AE_LSTM_emb.csv', sep=";", stringsAsFactors=FALSE) %>%
+#   mutate(layers_list = as.character(layers_list))
+# lstm_list = paste0("./Distance_to_Default/Stats/Autoencoder_test/",
+#                      list.files(path = './Distance_to_Default/Stats/Autoencoder_test/', pattern = "^AE_LSTM_emb*"), sep = "")
+# for (i in 1:length(lstm_list)){
+#   aut = readRDS(lstm_list[i])
+#   opt = aut$options
+#   add_row = data.frame(layers = length(opt$layer_list),
+#                        layers_list = paste0(opt$layer_list, collapse = ".") %>% as.character(),
+#                        n_comp = opt$n_comp,
+#                        RNN_type = opt$RNN_type,
+#                        kernel_reg_alpha = ifelse(is.null(opt$kernel_reg_alpha), "", as.character(opt$kernel_reg_alpha)),
+#                        batch_size = opt$batch_size,
+#                        MSE = aut$ReconstErrorRMSE ^ 2,
+#                        RDS_path = lstm_list[i],
+#                        R2 = aut$R2, stringsAsFactors = F)
+#   res = res %>%
+#     bind_rows(add_row)
+# }
+# write.table(res %>% relocate(R2, .after = MSE) %>% filter(!is.na(R2)), './Distance_to_Default/Stats/Autoencoder_test/00_Optimization_list_AE_LSTM_emb.csv', sep = ';', row.names = F, append = F)

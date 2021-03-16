@@ -20,6 +20,7 @@ Autoencoder_PC = function(x_train, n_comp = 2, epochs = 300, batch_size = 400, l
   if (save_model & save_model_name == ''){stop('Please provide a name for hdf5 file: save_model_name')}
   
   original_vars_name = colnames(x_train)
+  x_train_obs_name = rownames(x_train)
   
   # set training data
   x_train <- as.matrix(x_train)
@@ -108,6 +109,8 @@ Autoencoder_PC = function(x_train, n_comp = 2, epochs = 300, batch_size = 400, l
   R2 = round(eval_R2(x_train, full_output, masking = masking) * 100, 1)
   R2_99 = round(eval_R2(x_train, full_output, 0.99, masking = masking) * 100, 1)
   R2_95 = round(eval_R2(x_train, full_output, 0.95, masking = masking) * 100, 1)
+  rownames(intermediate_output) = x_train_obs_name
+  rownames(full_output) = x_train_obs_name
   
   out = list(embedding_dim = n_comp,
              Embedding = intermediate_output,
@@ -527,7 +530,11 @@ AutoencoderLSTM_PC = function(x_input, n_comp = 2, epochs = 300, batch_size = 40
                             timestep_label = timestep_label,
                             temporal_embedding = temporal_embedding,
                             layer_list = layer_list,
-                            masking_value = masking_value),
+                            masking_value = masking_value,
+                            input_dim = input_dim
+                            # intermediate_layer_model = intermediate_layer_model,
+                            # intermediate_layer_model_config = get_config(intermediate_layer_model)
+                            ),
              report = data.frame(Embedding_Dimension = n_comp,
                                  rr = paste0(round(recRMSE, 4), ' (', round(recRMSE / AvgAbsInput * 100, 1), '%)'),
                                  Reconst_RMSE_no_mask = round(recRMSE_no_mask, 4),
@@ -544,6 +551,7 @@ AutoencoderLSTM_PC = function(x_input, n_comp = 2, epochs = 300, batch_size = 40
   
   if (save_model){
     intermediate_layer_model %>% save_model_hdf5(paste0(save_model_name, '.h5'))
+    save_model_weights_hdf5(intermediate_layer_model, paste0(save_model_name, '_weights.h5'))
   }
   
   return(out)
@@ -683,4 +691,69 @@ tuning_add_R2 = function(result_csv){
   }
   write.table(result, result_csv, sep = ';', row.names = F, append = F)
   cat('\nupdated:', result_csv)
+}
+
+# predict new data for AutoencoderLSTM
+predict_AutoencoderLSTM = function(aut_emb_LSTM, weight_path, x_input){
+  # aut_emb_LSTM: output of AutoencoderLSTM_PC()
+  # weight_path: hdf5 path of weights
+  # x_input: should be formatted with create_lstm_input
+  
+  temporal_embedding = aut_emb_LSTM$options$temporal_embedding
+  timestep_label = aut_emb_LSTM$options$timestep_label
+  # mod = aut_emb_LSTM$options$intermediate_layer_model
+  # mod = from_config(aut_emb_LSTM$options$intermediate_layer_model_config)
+  input_dim = aut_emb_LSTM$options$input_dim
+  masking_value = aut_emb_LSTM$options$masking_value
+  layer_list = aut_emb_LSTM$options$layer_list
+  kern_reg = aut_emb_LSTM$options$kern_reg
+  RNN_type = aut_emb_LSTM$options$RNN_type
+  n_comp = aut_emb_LSTM$options$n_comp
+
+  # redefine model
+  cc = 1
+  eval_text = "model"
+  if (!is.null(masking_value)){eval_text = paste0(eval_text, " %>% layer_masking(mask_value = ", masking_value, ", input_shape = c(",
+                                                  paste0(input_dim, collapse = ","), "))")}
+  for (l in c(layer_list, -1, rev(layer_list))){   # -1 is the bottleneck
+    if (l != -1){
+      eval_text = paste0(eval_text, ifelse(RNN_type == 'lstm', " %>% layer_lstm(", " %>% layer_gru(reset_after = TRUE, "), "units = ", l,
+                         ", return_sequences = TRUE, kernel_regularizer = ", kern_reg, ", activation=\"tanh\", recurrent_activation = \"sigmoid\")")
+    } else {
+      eval_text = paste0(eval_text, " %>% lstm_with_mask(lstm_units = ", n_comp, ", in_shp = c(", paste0(input_dim, collapse = ","), "), return_sequences = ",
+                         temporal_embedding, ", kernel_regularizer = ", kern_reg, ", RNN_type = \"", RNN_type, "\")",
+                         ifelse(RNN_type == 'lstm', " %>% layer_lstm(", " %>% layer_gru(reset_after = TRUE, "), "units = ", n_comp,
+                         ", return_sequences = TRUE, kernel_regularizer = ", kern_reg, ", activation=\"tanh\", recurrent_activation = \"sigmoid\")")
+    }
+    cc = cc + 1
+  }
+  eval_text = paste0(eval_text, "%>% time_distributed(layer_dense(units = ", input_dim[2], "))")
+  model <- keras_model_sequential() 
+  eval(parse(text = eval_text))
+  bottleneck_layer = which(grepl('lstm_with_mask', lapply(model$layers, function(x) x$name) %>% unlist()))
+  bottleneck_layer = (lapply(model$layers, function(x) x$name) %>% unlist())[bottleneck_layer]
+  intermediate_layer_model <- keras_model(inputs = model$input, outputs = get_layer(model, bottleneck_layer)$output)
+  load_model_weights_hdf5(intermediate_layer_model, weight_path)
+  
+  x_input_obs_names = names(x_input) 
+  names(x_input) = NULL
+  x_input = np$array(x_input)
+  
+  output <- predict(intermediate_layer_model, x_input)
+  if (temporal_embedding == FALSE){
+    output = output[, 1, ]      # lstm_with_mask has layer_repeat_vector, so the embedding is repeated timesteps times
+    rownames(output) = x_input_obs_names
+  } else {
+    tt_list = list()
+    for (temp_dim in 1:(dim(output)[2])){  #  output is obs x timestep x embedding_dimension
+      tt = output[, temp_dim, ]
+      rownames(tt) = x_input_obs_names
+      tt_list = c(tt_list, list(tt))
+    }
+    names(tt_list) = timestep_label
+    output = tt_list
+    rm(tt_list, tt)
+  }
+  
+  return(output)
 }
