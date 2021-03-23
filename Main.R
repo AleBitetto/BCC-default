@@ -1,5 +1,5 @@
 
-memory.limit(size=1000000000000000000)
+utils::memory.limit(64000)
 library(readxl)
 library(haven)
 library(lubridate)
@@ -1791,7 +1791,7 @@ reload_final_combination = T   # reload df_final_reference_combination before jo
         cat('Done')
       }
       
-      # Tot_Attivo and Tot_Valore_Produzione from additional bilanci CRIF
+      # Tot_Attivo, Tot_Equity and Tot_Valore_Produzione from additional bilanci CRIF
       {
         # abi+ndg+year with both variable available only
         # Value available for 1 year only  are repeated for all year
@@ -1810,10 +1810,12 @@ reload_final_combination = T   # reload df_final_reference_combination before jo
           rename(ndg = cod_nag,
                  year = anno,
                  Tot_Valore_Produzione = varT051,
-                 Tot_Attivo = varT012) %>%
+                 Tot_Attivo = varT012,
+                 Tot_Equity = varT021) %>%
           mutate(Tot_Attivo = Tot_Attivo * 1000,
+                 Tot_Equity = Tot_Equity * 1000,
                  Tot_Valore_Produzione = Tot_Valore_Produzione * 1000) %>%
-          select(abi, ndg, year, Tot_Attivo, Tot_Valore_Produzione, tipo_bil, data_chiusura) %>%
+          select(abi, ndg, year, Tot_Attivo, Tot_Equity, Tot_Valore_Produzione, tipo_bil, data_chiusura) %>%
           group_by(abi, ndg, year) %>%
           mutate(dup = n()) %>%
           ungroup()
@@ -1847,10 +1849,12 @@ reload_final_combination = T   # reload df_final_reference_combination before jo
         df_bilanci_CEBI = df_bilanci_CEBI %>%
           group_by(abi, ndg) %>%
           mutate(avail_Tot_Attivo = sum(!is.na(Tot_Attivo)),
+                 avail_Tot_Equity = sum(!is.na(Tot_Equity)),
                  avail_Tot_Valore_Produzione = sum(!is.na(Tot_Valore_Produzione))) %>%
           filter(avail_Tot_Attivo != 0) %>%
+          filter(avail_Tot_Equity != 0) %>%
           filter(avail_Tot_Valore_Produzione != 0) %>%
-          select(-avail_Tot_Attivo, -avail_Tot_Valore_Produzione)
+          select(-avail_Tot_Attivo, -avail_Tot_Equity, -avail_Tot_Valore_Produzione)
         if (df_bilanci_CEBI %>% select(abi, ndg, year) %>% uniqueN() != nrow(df_bilanci_CEBI)){cat('\n\n ###### duplicates in df_bilanci_CEBI')}
         
         # take values for NON-CEBI from bildati_noncebi.dta
@@ -1863,9 +1867,9 @@ reload_final_combination = T   # reload df_final_reference_combination before jo
           rename(ndg = cod_nag,
                  year = anno) %>%
           filter(cod_de %in% c('CIBA', 'TANA', 'TSEM', 'TSEA', 'TSES')) %>%
-          select(abi, ndg, year, attributo, cod_de, k007, k283, d205, d044, s200, s012, d206, d019) %>%
+          select(abi, ndg, year, attributo, cod_de, k007, k283, d205, d044, s200, s012, d206, d019, k293, d053, s013, d047) %>%
           mutate(tot_na = apply(., 1, function(x) sum(is.na(x)))) %>%
-          filter(tot_na < 8) %>%
+          filter(tot_na < 12) %>%   # should be the same number of variable above k007, k283, etc.
           group_by(abi, ndg, year) %>%
           mutate(dup = n()) %>%
           ungroup()
@@ -1874,31 +1878,37 @@ reload_final_combination = T   # reload df_final_reference_combination before jo
         
         variable_mapping = read.csv('./Coding_tables/bilanci_NonCEBI.csv', sep=';', stringsAsFactors = F)
         df_bilanci_NONCEBI = c()
-        Tot_Attivo_check = Tot_Prod_check = 0
+        Tot_Attivo_check = Tot_Equity_check = Tot_Prod_check = 0
         for (ind in 1:nrow(variable_mapping)){
           var_attivo = variable_mapping$Tot_Attivo[ind]
+          var_equity = variable_mapping$Tot_Equity[ind]
           var_prod = variable_mapping$Tot_Valore_Produzione[ind]
           df_bilanci_NONCEBI = df_bilanci_NONCEBI %>% bind_rows(
             df_bilanci_NONCEBI_ref %>%
               filter(cod_de == variable_mapping$cod_de[ind]) %>%
               group_by(abi, ndg, year, cod_de) %>%
               summarize(Tot_Attivo = ifelse(length((!!sym(var_attivo))[!is.na(!!sym(var_attivo))]) > 0, (!!sym(var_attivo))[!is.na(!!sym(var_attivo))], NA),
+                        Tot_Equity = ifelse(length((!!sym(var_equity))[!is.na(!!sym(var_equity))]) > 0, (!!sym(var_equity))[!is.na(!!sym(var_equity))], NA),
                         Tot_Valore_Produzione = ifelse(length((!!sym(var_prod))[!is.na(!!sym(var_prod))]) > 0, (!!sym(var_prod))[!is.na(!!sym(var_prod))], NA), .groups = 'drop')
           )
           Tot_Attivo_check = Tot_Attivo_check + df_bilanci_NONCEBI_ref %>% filter(cod_de == variable_mapping$cod_de[ind]) %>% select(all_of(var_attivo)) %>% sum(na.rm = T)
+          Tot_Equity_check = Tot_Equity_check + df_bilanci_NONCEBI_ref %>% filter(cod_de == variable_mapping$cod_de[ind]) %>% select(all_of(var_equity)) %>% sum(na.rm = T)
           Tot_Prod_check = Tot_Prod_check + df_bilanci_NONCEBI_ref %>% filter(cod_de == variable_mapping$cod_de[ind]) %>% select(all_of(var_prod)) %>% sum(na.rm = T)
         }
         if (df_bilanci_NONCEBI %>% select(abi, ndg, year) %>% uniqueN() != df_bilanci_NONCEBI_ref %>% select(abi, ndg, year) %>% uniqueN()){
           cat('\n\n ###### mismatch in df_bilanci_NONCEBI')}
         if (Tot_Attivo_check != sum(df_bilanci_NONCEBI$Tot_Attivo, na.rm=T)){cat('\n\n ###### Tot_Attivo mismatch in df_bilanci_NONCEBI')}
+        if (Tot_Equity_check != sum(df_bilanci_NONCEBI$Tot_Equity, na.rm=T)){cat('\n\n ###### Tot_Equity mismatch in df_bilanci_NONCEBI')}
         if (Tot_Prod_check != sum(df_bilanci_NONCEBI$Tot_Valore_Produzione, na.rm=T)){cat('\n\n ###### Tot_Valore_Produzione mismatch in df_bilanci_NONCEBI')}
         df_bilanci_NONCEBI = df_bilanci_NONCEBI %>%
           group_by(abi, ndg) %>%
           mutate(avail_Tot_Attivo = sum(!is.na(Tot_Attivo)),
+                 avail_Tot_Equity = sum(!is.na(Tot_Equity)),
                  avail_Tot_Valore_Produzione = sum(!is.na(Tot_Valore_Produzione))) %>%
           filter(avail_Tot_Attivo != 0) %>%
+          filter(avail_Tot_Equity != 0) %>%
           filter(avail_Tot_Valore_Produzione != 0) %>%
-          select(-avail_Tot_Attivo, -avail_Tot_Valore_Produzione, -cod_de)
+          select(-avail_Tot_Attivo, -avail_Tot_Equity, -avail_Tot_Valore_Produzione, -cod_de)
         
         # merge CEBI and NONCEBI
         df_bilanci_merge = df_bilanci_CEBI %>%
@@ -1929,11 +1939,17 @@ reload_final_combination = T   # reload df_final_reference_combination before jo
           left_join(df_bilanci_merge, by = c("abi", "ndg", "year")) %>%
           group_by(abi, ndg) %>%
           mutate(avail_Tot_Attivo = sum(!is.na(Tot_Attivo)),
+                 avail_Tot_Equity = sum(!is.na(Tot_Equity)),
                  avail_Tot_Valore_Produzione = sum(!is.na(Tot_Valore_Produzione))) %>%
           group_by(abi, ndg) %>%
           mutate(Tot_Attivo_2 = case_when(
             avail_Tot_Attivo == 1 ~ max(Tot_Attivo, na.rm = T),
             TRUE ~ Tot_Attivo
+          )) %>%
+          group_by(abi, ndg) %>%
+          mutate(Tot_Equity_2 = case_when(
+            avail_Tot_Equity == 1 ~ max(Tot_Equity, na.rm = T),
+            TRUE ~ Tot_Equity
           )) %>%
           group_by(abi, ndg) %>%
           mutate(Tot_Valore_Produzione_2 = case_when(
@@ -1943,9 +1959,11 @@ reload_final_combination = T   # reload df_final_reference_combination before jo
           
           group_by(abi, ndg) %>%
           mutate(Tot_Attivo_avg = mean(Tot_Attivo, na.rm = T),
+                 Tot_Equity_avg = mean(Tot_Equity, na.rm = T),
                  Tot_Valore_Produzione_avg = mean(Tot_Valore_Produzione, na.rm = T)) %>%
           ungroup() %>%
           mutate(Tot_Attivo_avg = ifelse(is.na(Tot_Attivo), Tot_Attivo_avg, Tot_Attivo),
+                 Tot_Equity_avg = ifelse(is.na(Tot_Equity), Tot_Equity_avg, Tot_Equity),
                  Tot_Valore_Produzione_avg = ifelse(is.na(Tot_Valore_Produzione), Tot_Valore_Produzione_avg, Tot_Valore_Produzione)) %>%
           
           group_by(abi, ndg) %>%
@@ -1954,13 +1972,17 @@ reload_final_combination = T   # reload df_final_reference_combination before jo
                                                          y=Tot_Attivo_2[!is.na(Tot_Attivo_2)], xout=year)$y) %>%
           group_by(abi, ndg) %>%
           arrange(year) %>%
+          mutate(Tot_Equity_interp = Hmisc::approxExtrap(x=year[!is.na(Tot_Equity_2)],
+                                                         y=Tot_Equity_2[!is.na(Tot_Equity_2)], xout=year)$y) %>%
+          group_by(abi, ndg) %>%
+          arrange(year) %>%
           mutate(Tot_Valore_Produzione_interp = Hmisc::approxExtrap(x=year[!is.na(Tot_Valore_Produzione_2)],
                                                                     y=Tot_Valore_Produzione_2[!is.na(Tot_Valore_Produzione_2)], xout=year)$y) %>%
           ungroup()
         
         df_CRIF_bilanci_Attivo_Produzione = interp_data %>%
           filter(year >= 2012) %>%
-          select(abi, ndg, year, Tot_Attivo_avg, Tot_Valore_Produzione_avg, Tot_Attivo_interp, Tot_Valore_Produzione_interp)
+          select(abi, ndg, year, Tot_Attivo_avg, Tot_Equity_avg, Tot_Valore_Produzione_avg, Tot_Attivo_interp, Tot_Equity_interp, Tot_Valore_Produzione_interp)
         
         # check differences between average and interpolation approach
         plot_tot_diff = df_CRIF_bilanci_Attivo_Produzione %>%
@@ -1968,6 +1990,10 @@ reload_final_combination = T   # reload df_final_reference_combination before jo
                  Variable = 'Tot_Attivo') %>%
           select(year, Variable, perc_diff) %>%
           bind_rows(
+            df_CRIF_bilanci_Attivo_Produzione %>%
+              mutate(perc_diff = (Tot_Equity_interp - Tot_Equity_avg) / abs(Tot_Equity_avg),
+                     Variable = 'Tot_Equity') %>%
+              select(year, Variable, perc_diff),
             df_CRIF_bilanci_Attivo_Produzione %>%
               mutate(perc_diff = (Tot_Valore_Produzione_interp - Tot_Valore_Produzione_avg) / abs(Tot_Valore_Produzione_avg),
                      Variable = 'Tot_Valore_Produzione') %>%
@@ -1993,6 +2019,7 @@ reload_final_combination = T   # reload df_final_reference_combination before jo
           select(-ends_with('_interp')) %>%
           setNames(gsub('_avg', '', names(.))) %>%
           mutate(Tot_Attivo = round(Tot_Attivo),
+                 Tot_Equity = round(Tot_Equity),
                  Tot_Valore_Produzione = round(Tot_Valore_Produzione))
         
         # add log10(Tot_Attivo) and Dimensione_Impresa
@@ -2295,7 +2322,7 @@ reload_final_combination = T   # reload df_final_reference_combination before jo
         cat('Done in:', paste0(lubridate::hour(tot_diff), 'h:', lubridate::minute(tot_diff), 'm:', round(lubridate::second(tot_diff))))
       }
       
-      # add Tot_Attivo and Tot_Valore_Produzione
+      # add Tot_Attivo, Tot_Equity and Tot_Valore_Produzione
       compact_CRIF_bilanci_Attivo_Produzione = readRDS('./Checkpoints/compact_data/compact_CRIF_bilanci_Attivo_Produzione.rds')
       df_final = df_final %>%
         left_join(compact_CRIF_bilanci_Attivo_Produzione, by = c("abi", "ndg", "year"))
@@ -2303,7 +2330,7 @@ reload_final_combination = T   # reload df_final_reference_combination before jo
       rm(compact_CRIF_bilanci_Attivo_Produzione)
       if (total_rowS != nrow(df_final)){cat('\n\n ###### wrong number of rows:', nrow(df_final), '- expected:', total_rowS);save_flag = F}
       
-      # check percentage of matching abi+ndg for Tot_Attivo and Tot_Valore_Produzione
+      # check percentage of matching abi+ndg for Tot_Attivo, Tot_Equity and Tot_Valore_Produzione
       summary_df_bilanci = df_final %>%
         select(abi, ndg, year, segmento_CRIF) %>%
         left_join(
@@ -2338,7 +2365,7 @@ reload_final_combination = T   # reload df_final_reference_combination before jo
         replace(. == "    NA" | . == "NA%", '')
       write.table(summary_df_bilanci, './Stats/09_df_bilanci_matching_by_year.csv', sep = ';', row.names = F, append = F)
       
-      # remove abi+ndg with missing Tot_Attivo and Tot_Valore_Produzione
+      # remove abi+ndg with missing Tot_Attivo, Tot_Equity and Tot_Valore_Produzione
       cat('\n\nRemoving missing Tot_Attivo and Tot_Valore_Produzione')
       final_rows = nrow(df_final)
       final_abi_ndg = df_final %>% select(abi, ndg) %>% uniqueN()
@@ -2359,6 +2386,7 @@ reload_final_combination = T   # reload df_final_reference_combination before jo
       df_final = df_final %>%
         filter(!is.na(Tot_Attivo))
       if (sum(is.na(df_final$Tot_Attivo)) > 0){cat('\n\n ###### missing Tot_Attivo still present')}
+      if (sum(is.na(df_final$Tot_Equity)) > 0){cat('\n\n ###### missing Tot_Equity still present')}
       if (sum(is.na(df_final$Tot_Valore_Produzione)) > 0){cat('\n\n ###### missing Tot_Valore_Produzione still present')}
       rm(abi_ndg_to_remove, abi_ndg_to_keep)
       

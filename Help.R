@@ -204,7 +204,7 @@ data_aggregate_MURA = function(data){
   
   col_sum = c('MURA000', 'MURA001',	'MURA002', 'MURA003',	'MURA004', 'MURA005',	'MURA006', 'MURA007',	'MURA008', 'MURA009')
   FT = data.frame(COD_FT_RAPPORTO = c('99ML04', '99ML03', '99MM02', '99ML02', '99MM01', '99ML01',
-                         '99MC51', '99MC50', '99MB01', '99MB02', '99MC99', '99MM04', '99MM03', '99MB03', '99MB04'),
+                                      '99MC51', '99MC50', '99MB01', '99MB02', '99MC99', '99MM04', '99MM03', '99MB03', '99MB04'),
                   MACRO_FT = c(rep('IPO', 2), rep('CHIRO', 4), rep('OTHER', 9)), stringsAsFactors = F)
   
   data = data %>%
@@ -264,7 +264,7 @@ data_aggregate_CR = function(data){
     # bind_rows(data.frame(abi='8542', ndg = '0000000000000030', COD_DATO = 'RAW_CR9513', VALORE = -11, stringsAsFactors = )) %>%
     setDT() %>%
     dcast(abi + ndg ~ COD_DATO, value.var='VALORE')
-
+  
   return(data_compact)
 }
 
@@ -276,7 +276,7 @@ create_aggregated_data = function(df_final_reference, file_type, save_report = F
   summary_file_rows = readRDS('./Checkpoints/summary_file_rows.rds')
   forme_tecniche = read.csv2('./Coding_tables/Forme_tecniche.csv', stringsAsFactors=FALSE) %>%
     mutate(COD_FT_RAPPORTO = paste0('\'', COD_FT_RAPPORTO))
-
+  
   file_to_load = summary_file_rows %>%
     filter(unique_file_name == paste0(file_type, '.CSV')) %>%
     filter(matched_folder == 'YES') %>%
@@ -319,7 +319,7 @@ create_aggregated_data = function(df_final_reference, file_type, save_report = F
     path = file_to_load$path[i]
     bank_abi = file_to_load$Abi[i]
     file = file_to_load$file[i]
-
+    
     # read and format data
     data = df_final_reference %>%
       select(abi, ndg) %>%
@@ -387,7 +387,7 @@ create_aggregated_data = function(df_final_reference, file_type, save_report = F
     cat('\n\n ###### error in unique records in data_compact_out')
   }
   saveRDS(data_compact_out, paste0('./Checkpoints/compact_data/compact_', file_type, '.rds'))
-
+  
   # save report data
   if (save_report){
     report_out = report_out %>%
@@ -410,9 +410,9 @@ create_aggregated_data = function(df_final_reference, file_type, save_report = F
 
 # Statistical analysis: numerical, data and character columns
 basicStatistics = function(data){
-
+  
   data=as.data.frame(data, stringsAsFactors = F)
-
+  
   # Get numerical columns
   nums <- names(which(sapply(data, is.numeric)))
   if (length(nums)>0){
@@ -553,14 +553,14 @@ pca_fun = function(slice, k_fold, cv, method_title){
   scree_plot = fviz_eig_mod(pca, addlabels = T, pc_to_highlight = min(PC_opt))
   scree_plot$labels$title = paste0(method_title, ' - ', scree_plot$labels$title)
   load_plot = factoextra::fviz_pca_var(pca,
-                           col.var = "contrib", # Color by contributions to the PC
-                           gradient.cols = c("#00AFBB", "#E7B800", "#FC4E07"),
-                           repel = TRUE     # Avoid text overlapping
+                                       col.var = "contrib", # Color by contributions to the PC
+                                       gradient.cols = c("#00AFBB", "#E7B800", "#FC4E07"),
+                                       repel = TRUE     # Avoid text overlapping
   )
   load_plot$labels$title = paste0(method_title, ' - ', load_plot$labels$title)
   bi_plot = factoextra::fviz_pca_biplot(pca, repel = TRUE,
-                            col.var = "#2E9FDF", # Variables color
-                            col.ind = "#696969"  # Individuals color
+                                        col.var = "#2E9FDF", # Variables color
+                                        col.ind = "#696969"  # Individuals color
   )
   bi_plot$labels$title = paste0(method_title, ' - ', bi_plot$labels$title)
   load_table = data.frame(variable = rep(rownames(load), ncol(load)),
@@ -821,12 +821,13 @@ eval_R2 = function(original_data, predicted_data, alpha = NULL, masking = NULL){
 }
 
 # aggregate data to plot into grid
-aggregate_points = function(plot_data, label_values, n_cell = 20){
+aggregate_points = function(plot_data, label_values, n_cell = 20, err_lab = ""){
   
   # plot_data: data.frame with Dim1, Dim2, Dim3 (if available) and Label columns.
   #            Label can contain also a single value (i. e. points will be just aggregated in a single group for each cell)
   # label_values: available values to be converted to factor for the final output (to be used as groups in ggplot)
   # n_cell: number of cells on shortest dimension
+  # err_lab: additional label to be plotted in case of raised warnings
   
   # return: data.frame with Dim1, Dim2, Dim3 (if available), Label and size columns for evaluated centroid of each Label value
   #         grid_x, grid_y, grid_z with grid points used only to plot the grid
@@ -841,12 +842,13 @@ aggregate_points = function(plot_data, label_values, n_cell = 20){
   max_z = max(plot_data$Dim3)
   min_z = min(plot_data$Dim3)
   cell_size = min(c((max_x - min_x) / n_cell, (max_y - min_y) / n_cell, ifelse(tot_dim == 3, (max_z - min_z) / n_cell, 1e16)))
-  grid_x = round(sort(unique(c(seq(min_x, max_x, by = cell_size), min_x, max_x))), 4)
-  grid_y = round(sort(unique(c(seq(min_y, max_y, by = cell_size), min_y, max_y))), 4)
-  grid_z = round(sort(unique(c(seq(min_z, max_z, by = cell_size), min_z, max_z))), 4)
+  grid_x = sort(unique(c(seq(min_x, max_x, by = cell_size), min_x, max_x)))
+  grid_y = sort(unique(c(seq(min_y, max_y, by = cell_size), min_y, max_y)))
+  grid_z = sort(unique(c(seq(min_z, max_z, by = cell_size), min_z, max_z)))
   start_k = ifelse(tot_dim == 3, 2, 1)
   
-  cell_summary = c()
+  cell_range = matrix("", nrow = (length(grid_x)-1)*(length(grid_y)-1)*(ifelse(tot_dim == 3, length(grid_z)-1, length(grid_z))), ncol = 2)
+  cc = 1
   for (i in 2:length(grid_x)){
     for (j in 2:length(grid_y)){
       for (k in start_k:length(grid_z)){
@@ -854,67 +856,70 @@ aggregate_points = function(plot_data, label_values, n_cell = 20){
         x_max = grid_x[i]
         y_min = grid_y[j-1]
         y_max = grid_y[j]
-        x_filter = paste0('Dim1 >= ', x_min, ' & Dim1 <', ifelse(i == length(grid_x), '=', ''), ' ', x_max)
-        y_filter = paste0('Dim2 >= ', y_min, ' & Dim2 <', ifelse(j == length(grid_y), '=', ''), ' ', y_max)
         if (tot_dim == 3){
           z_min = grid_z[k-1]
           z_max = grid_z[k]
-          z_filter = paste0('Dim1 >= ', z_min, ' & Dim1 <', ifelse(k == length(grid_z), '=', ''), ' ', z_max)
         } else {
           z_min = z_max = ""
-          z_filter = "Dim3 == 0"
         }
-        # cat('\n', i,j, x_filter, '     ', y_filter)
-        cell = plot_data %>%
-          filter(!!quo(eval(parse(text=x_filter)))) %>%
-          filter(!!quo(eval(parse(text=y_filter)))) %>%
-          filter(!!quo(eval(parse(text=z_filter))))
-        for (val in label_values){
-          centroid = cell %>%
-            filter(Label == val) %>%
-            select(-Label) %>%
-            summarize_all(mean) %>%
-            as.numeric()
-          cell_summary = cell_summary %>%
-            bind_rows(data.frame(cell = paste0('(', i-1, ',', j-1, ifelse(tot_dim == 3, paste0(',', k-1), ''), ')'), Label = val, size = sum(cell$Label == val),
-                                 Dim1 = centroid[1], Dim2 = centroid[2], Dim3 = centroid[3],
-                                 cell_range = paste0(x_min, ',', x_max, '|', y_min, ',', y_max, '|', z_min, ',', z_max), stringsAsFactors = F))
-        } # val
+        cell_range[cc,] = c(cell = paste0('(', i-1, ',', j-1, ifelse(tot_dim == 3, paste0(',', k-1), ''), ')'),
+                            cell_range = paste0(x_min, ',', x_max, '|', y_min, ',', y_max, '|', z_min, ',', z_max))
+        cc = cc + 1
       } # z
     } # j
   } # i
-  if (tot_dim == 2){cell_summary = cell_summary %>% select(-Dim3)}
-  cell_summary = cell_summary %>%
-    filter(is.finite(Dim1))
-  if (nrow(plot_data) - sum(cell_summary$size) >= round(nrow(plot_data)*0.005)){cat('\n\n ###### missing points in cell_summary')}
+  cell_range = data.frame(cell_range, stringsAsFactors = F) %>% setNames(c("cell", "cell_range"))
+  
+  cell_summary = plot_data %>%
+    mutate(Dim1_cell = set_bins(Dim1, breaks = grid_x),
+           Dim2_cell = set_bins(Dim2, breaks = grid_y),
+           Dim3_cell = set_bins(Dim3, breaks = grid_z)) %>%
+    mutate(cell = paste0("(", Dim1_cell, ",", Dim2_cell, ",", Dim3_cell, ")")) %>%
+    group_by(cell, Label) %>%
+    summarize(size = n(), .groups = "drop") %>%
+    mutate(Dim1 = 0, Dim2 = 0, Dim3 = 0)
+  if (tot_dim == 2){
+    cell_summary = cell_summary %>%
+      mutate(cell = gsub(",1\\)", ")", cell)) %>%
+      select(-Dim3)
+  }
+  cell_summary = cell_summary  %>%
+    left_join(cell_range, by = "cell")
+  if (nrow(plot_data) - sum(cell_summary$size) >= round(nrow(plot_data)*0.005)){cat('\n\n ###### missing points in cell_summary', err_lab)}
+  if (sum(is.na(cell_summary$cell_range)) > 0){cat('\n\n ###### missing range in cell_summary', err_lab)}
   
   # reshape centroid to be equally spaced within the cell
-  final_points = c()
+  final_points = matrix("", ncol=ncol(cell_summary), nrow=nrow(cell_summary))
+  start = 1
+  end = 0
   for (cel in unique(cell_summary$cell)){
     df_cell = cell_summary %>%
       filter(cell == cel)
-    if (nrow(df_cell) >= 1){
-      points = generate_points(n_points = nrow(df_cell), dimension = tot_dim)
-      x_min = strsplit(strsplit(df_cell$cell_range[1], '\\|')[[1]][1], ',')[[1]][1] %>% as.numeric()
-      y_min = strsplit(strsplit(df_cell$cell_range[1], '\\|')[[1]][2], ',')[[1]][1] %>% as.numeric()
-      z_min = strsplit(strsplit(df_cell$cell_range[1], '\\|')[[1]][3], ',')[[1]][1] %>% as.numeric()
-      for (i in 1:nrow(df_cell)){
-        df_cell$Dim1[i] = x_min + cell_size * points[i, 1]
-        df_cell$Dim2[i] = y_min + cell_size * points[i, 2]
+    
+    points = generate_points(n_points = nrow(df_cell), dimension = tot_dim)
+    x_min = strsplit(strsplit(df_cell$cell_range[1], '\\|')[[1]][1], ',')[[1]][1] %>% as.numeric()
+    y_min = strsplit(strsplit(df_cell$cell_range[1], '\\|')[[1]][2], ',')[[1]][1] %>% as.numeric()
+    z_min = strsplit(strsplit(df_cell$cell_range[1], '\\|')[[1]][3], ',')[[1]][1] %>% as.numeric()
+    for (i in 1:nrow(df_cell)){
+      df_cell$Dim1[i] = x_min + cell_size * points[i, 1]
+      df_cell$Dim2[i] = y_min + cell_size * points[i, 2]
+      if (tot_dim == 3){
+        df_cell$Dim3[i] = z_min + cell_size * points[i, 3]
       }
-      # plot(df_cell %>% select(Dim1, Dim2), xlim = c(x_min, x_min+cell_size), ylim = c(y_min, y_min+cell_size))
     }
-    final_points = final_points %>%
-      bind_rows(df_cell)
+    end = start + nrow(df_cell) - 1
+    final_points[start:end, ] = df_cell %>% as.matrix()
+    start = end + 1
   }
-  final_points = final_points %>%
+  final_points = data.frame(final_points, stringsAsFactors = F) %>% setNames(colnames(cell_summary)) %>%
+    mutate_at(vars(starts_with("Dim"), "size"), as.numeric) %>%
     mutate(Label = factor(Label, levels = label_values))
-  if (sum(cell_summary$size) != sum(final_points$size)){cat('\n\n ###### missing points in final_points')}
+  if (sum(cell_summary$size) != sum(final_points$size)){cat('\n\n ###### missing points in final_points', err_lab)}
   
   return(list(cell_summary = final_points,
-              grid_x = grid_x,
-              grid_y = grid_y,
-              grid_z = grid_z))
+              grid_x = grid_x %>% round(4),
+              grid_y = grid_y %>% round(4),
+              grid_z = grid_z %>% round(4)))
 }
 
 # generate "equally spaced" points in [0,1]^dimension
@@ -989,7 +994,7 @@ robust_scaler = function(data, scale_par = NULL, stringsAsFactors = F){
   
   d1 = data %>%
     mutate_if(is.numeric, function(x) (x - median(x)) / diff(quantile(x, c(0.25, 0.75))))
-
+  
 }
 
 # fit UMAP or densMAP to visualize data
@@ -1072,7 +1077,7 @@ scale_range = function(x, a, b, xmin = NULL, xmax = NULL, mode = 'linear', s = N
   
   if (is.null(xmin)){xmin = min(x)}
   if (is.null(xmax)){xmax = max(x)}
-
+  
   if (mode == "linear"){
     # https://stats.stackexchange.com/questions/281162/scale-a-number-between-a-range
     out = (b - a) * (x - xmin) / (xmax - xmin) + a
@@ -1085,42 +1090,205 @@ scale_range = function(x, a, b, xmin = NULL, xmax = NULL, mode = 'linear', s = N
     C = s ^ (xmax - xmin)
     out = ((b - a) * C ^ r + a * C - b) / (C - 1)
   }
-
+  
   return(out)
 }
 
 # make a grid plot with 3D interactive plots (works also for 2D plot)
+# render_3d_grid = function(plot_list, n_col, show = "point", single_class_size = 1, legend_cex = 1, plot_legend_index = c(1:length(plot_list)),
+#                           point_alpha = 1, additional_points_size = 10, show_additional = "sphere", title_cex = 1,
+#                           MIN_SCALE = 1, MAX_SCALE = 5, MODE_SCALE = "linear", MODE_S = NULL){
+#   
+#   # plot_list: list of data to plot. Each element is a list of:
+#   #      - data: data.frame with Label (factor - legend label for each point),
+#   #             size (numeric - size of each point. will be scaled in [MIN_SCALE, MAX_SCALE] according to MODE_SCALE and MODE_S of scale_range()),
+#   #             Dim1, Dim2, Dim3 (if any) (numeric - points coordinates)
+#   #      - show: "point" or "sphere" for data - if not provided is set to show - will override show of the function
+#   #      - title: title of each plot
+#   #      - title_cex: cex for the title - if not provided is set to title_cex - will override title_cex of the function
+#   #      - point_alpha: alpha for points when show = "point" - if not provided is set to point_alpha - will override point_alpha of the function
+#   #      - cmap: colormap for data - if not provided is set default (see in the code) - will override default one
+#   #      - additional_data: data.frame with Dim1, Dim2, Dim3 (if any) and Label. Additional point to plot. Only single label and single size is allowed.
+#   #      - additional_color: color for additional points
+#   #      - show_additional: "point" or "sphere" for additional data - if not provided is set to show_additional - will override show_additional of the function
+#   # n_col: number of columns in the plot
+#   # show: "point" for points or "sphere" for 3D spheres
+#   # show_additional: "point" for points or "sphere" for 3D spheres for additional data
+#   # single_class_size: size of point/sphere when data has a single label/class
+#   # plot_legend_index: select index of plot to add legend (indices flow column by column, top to bottom)
+#   # additional_points_size: size of additional points
+# 
+#   # define colormap
+#   cmap = c('dodgerblue3', 'firebrick2', 'chartreuse3', 'cadetblue2', 'gold1', 'darkorange', 'slategray4', 'violet', 'yellow1')
+#   
+#   n_row = ceiling(length(plot_list) / n_col)
+#   open3d()
+#   mat <- matrix(1:(n_col*n_row*2), ncol = n_col)   # add spot for title (text3d())
+#   layout3d(mat, height = rep(c(1, 2), n_row), widths = rep(1, n_col), sharedMouse = T)  # (1,10) is the proportion between text3d and plot3d space
+#   plot_count = 1
+#   for (pl_data in plot_list){
+#     
+#     plot_data = pl_data$data
+#     label_values = levels(plot_data$Label)
+#     plot_data_add = pl_data$additional_data
+#     plot_data_add_color = pl_data$additional_color
+#     point_alpha_work = pl_data$point_alpha
+#     title_cex_work = pl_data$title_cex
+#     show_additional_work = pl_data$show_additional
+#     show_work = pl_data$show
+#     cmap_work = pl_data$cmap
+#     
+#     if (is.null(point_alpha_work)){point_alpha_work = point_alpha}
+#     if (is.null(title_cex_work)){title_cex_work = title_cex}
+#     if (is.null(show_additional_work)){show_additional_work = show_additional}
+#     if (is.null(show_work)){show_work = show}
+#     if (is.null(cmap_work)){cmap_work = cmap}
+#     
+#     if (range(plot_data$size) %>% uniqueN() != 1){
+#       plot_data$size = scale_range(plot_data$size, MIN_SCALE, MAX_SCALE, mode = MODE_SCALE, s = MODE_S) %>% round(1)
+#     } else {
+#       plot_data$size = rep(single_class_size, nrow(plot_data))
+#     }
+#     
+#     # check if 2D plot must be used
+#     plot2d_flag = FALSE
+#     if (!"Dim3" %in% colnames(plot_data)){
+#       plot_data = plot_data %>% mutate(Dim3 = 0)
+#       plot2d_flag = TRUE
+#     }
+#     
+#     # plot title
+#     next3d()
+#     empty = ""
+#     text3d(0, 0, 0,bquote(.(pl_data$title) ~ .(empty)), cex = title_cex_work)  # didn't find a better workaroud for empty
+#     next3d()
+#     
+# 
+#     if (show_work == "point"){
+#       for (class_i in 1:length(label_values)){
+#         
+#         class_label = label_values[class_i]
+#         class_color = cmap_work[class_i]
+#         class_data = plot_data %>%
+#           filter(Label == class_label)
+#         
+#         for (class_size in unique(class_data$size)){
+#           size_data = class_data %>%
+#             filter(size == class_size) %>%
+#             select(starts_with("Dim")) %>%
+#             xyz.coords()
+#           points3d(size_data, size = class_size, col = class_color, axes = F, box = T, xlab = "", ylab = "", zlab = "",
+#                    alpha = point_alpha_work, point_antialias = TRUE)
+#         } # class_size
+#       } # class_i
+#     }
+#     
+#     if (show_work == "sphere"){
+#       plot3d(xyz.coords(plot_data %>% select(starts_with("Dim"))), col = cmap_work[plot_data$Label], type = "s",
+#              size = plot_data$size, axes = F, box = T, xlab = "", ylab = "", zlab = "", point_antialias = TRUE)
+#     }
+#     
+#     # plot additional data (if any)
+#     if (!is.null(plot_data_add)){
+#       if (show_additional_work == "point"){
+#       points3d(xyz.coords(plot_data_add %>% select(starts_with("Dim"))), size = additional_points_size,
+#                col = plot_data_add_color, axes = F, box = T, xlab = "", ylab = "", zlab = "", point_antialias = TRUE)
+#       }
+#       if (show_additional_work == "sphere"){
+#         spheres3d(xyz.coords(plot_data_add %>% select(starts_with("Dim"))),  radius = additional_points_size/5,
+#                col = plot_data_add_color, axes = F, box = T, xlab = "", ylab = "", zlab = "", point_antialias = TRUE)
+#       }
+#     }
+#     
+#     # add box and focus on 2D view (if any)
+#     box3d(color = "grey")
+#     if (plot2d_flag){
+#       rgl.viewpoint( theta = 0, phi = 0, fov = 0, interactive = F)
+#     } else {
+#       rgl.viewpoint(zoom = 0.6)
+#     }
+#     
+#     # plot legend for selected plot
+#     additional_point_legend = ifelse(!is.null(plot_data_add), unique(plot_data_add$Label) %>% as.character(), "")
+#     if (plot_count %in% plot_legend_index){
+#       legend3d("bottomright", legend = c(label_values, additional_point_legend), cex = legend_cex, pch = 16,
+#                col = c(cmap_work[1:length(label_values)], plot_data_add_color))
+#     }
+# 
+#     plot_count = plot_count + 1
+#   } # pl_data
+#   
+#   rglwidget(reuse = FALSE)
+# }
 render_3d_grid = function(plot_list, n_col, show = "point", single_class_size = 1, legend_cex = 1, plot_legend_index = c(1:length(plot_list)),
-                          MIN_SCALE = 1, MAX_SCALE = 5, MODE_SCALE = "linear", MODE_S = NULL){
+                          legend_resize = c(512, 512), point_alpha = 1, additional_points_size = 10, show_additional = "sphere", title_cex = 1,
+                          MIN_SCALE = 1, MAX_SCALE = 5, MODE_SCALE = "linear", MODE_S = NULL, add_shared_slider = FALSE){
   
-  # plot_list: list of data to plot. Each element is a list of:
-  #      - data: data.frame with Label (factor - legend lable for each point),
+  # plot_list: list of data to plot. Elements are plotted column by column, top to bottom. Each element is a list of:
+  #      - data: data.frame with Label (factor - legend label for each point),
   #             size (numeric - size of each point. will be scaled in [MIN_SCALE, MAX_SCALE] according to MODE_SCALE and MODE_S of scale_range()),
   #             Dim1, Dim2, Dim3 (if any) (numeric - points coordinates)
+  #      - show: "point" or "sphere" for data - if not provided is set to show - will override show of the function
   #      - title: title of each plot
+  #      - title_cex: cex for the title - if not provided is set to title_cex - will override title_cex of the function
+  #      - point_alpha: alpha for points when show = "point" - if not provided is set to point_alpha - will override point_alpha of the function
+  #      - cmap: colormap for data - if not provided is set default (see in the code) - will override default one
+  #      - additional_data: data.frame with Dim1, Dim2, Dim3 (if any) and Label. Additional point to plot. Only single label and single size is allowed.
+  #      - additional_color: colormap for additional points - if not provided is set to cmap
+  #      - show_additional: "point" or "sphere" for additional data - if not provided is set to show_additional - will override show_additional of the function
   # n_col: number of columns in the plot
-  # show: "point" for points, no size effect or "sphere" for 3D spheres and size effect
+  # show: "point" for points or "sphere" for 3D spheres
+  # show_additional: "point" for points or "sphere" for 3D spheres for additional data
   # single_class_size: size of point/sphere when data has a single label/class
+  # legend_cex: cex for legend
   # plot_legend_index: select index of plot to add legend (indices flow column by column, top to bottom)
+  # legend_resize: in order to avoid legend low resolution play with (x,y) resize value and legend_cex
+  # additional_points_size: size of additional points
+  # add_shared_slider: if TRUE add a shared slider to show all points (both data and additional data) together and class label by class label
+  
+  # define colormap
+  cmap = c('dodgerblue3', 'firebrick2', 'chartreuse3', 'cadetblue2', 'gold1', 'darkorange', 'slategray4', 'violet', 'yellow1')
   
   n_row = ceiling(length(plot_list) / n_col)
   open3d()
   mat <- matrix(1:(n_col*n_row*2), ncol = n_col)   # add spot for title (text3d())
   layout3d(mat, height = rep(c(1, 2), n_row), widths = rep(1, n_col), sharedMouse = T)  # (1,10) is the proportion between text3d and plot3d space
+  scene_list = subsceneList()
+  plot_scene_list = scene_list[seq(1, length(scene_list), by = 2) + 1] # even scenes are text3d titles
   plot_count = 1
   for (pl_data in plot_list){
     
     plot_data = pl_data$data
-    label_values = levels(plot_data$Label)
+    label_values = levels(plot_data$Label) %>% sort()
+    plot_data_add = pl_data$additional_data
+    label_values_add = levels(plot_data_add$Label) %>% sort()
+    plot_data_add_color = pl_data$additional_color
+    point_alpha_work = pl_data$point_alpha
+    title_cex_work = pl_data$title_cex
+    show_additional_work = pl_data$show_additional
+    show_work = pl_data$show
+    cmap_work = pl_data$cmap
     
-    if(range(plot_data$size) %>% uniqueN() != 1){
+    if (is.null(point_alpha_work)){point_alpha_work = point_alpha}
+    if (is.null(title_cex_work)){title_cex_work = title_cex}
+    if (is.null(show_additional_work)){show_additional_work = show_additional}
+    if (is.null(show_work)){show_work = show}
+    if (is.null(cmap_work)){cmap_work = cmap}
+    if (is.null(plot_data_add_color)){plot_data_add_color = cmap_work}
+    
+    # set points size and scale if multiple size values are provided
+    if (range(plot_data$size) %>% uniqueN() != 1){
       plot_data$size = scale_range(plot_data$size, MIN_SCALE, MAX_SCALE, mode = MODE_SCALE, s = MODE_S) %>% round(1)
     } else {
       plot_data$size = rep(single_class_size, nrow(plot_data))
     }
-    
-    # define colormap
-    cmap = c('dodgerblue3', 'firebrick2', 'chartreuse3', 'cadetblue2', 'gold1', 'darkorange', 'slategray4', 'violet', 'yellow1')
+    if (!is.null(plot_data_add)){
+      if (range(plot_data_add$size) %>% uniqueN() != 1){
+        plot_data_add$size = scale_range(plot_data_add$size, MIN_SCALE, MAX_SCALE, mode = MODE_SCALE, s = MODE_S) %>% round(1)
+      } else {
+        plot_data_add$size = rep(additional_points_size, nrow(plot_data_add))
+      }
+    }
     
     # check if 2D plot must be used
     plot2d_flag = FALSE
@@ -1131,143 +1299,346 @@ render_3d_grid = function(plot_list, n_col, show = "point", single_class_size = 
     
     # plot title
     next3d()
-    text3d(0, 0, 0, pl_data$title, cex = 0.8)
+    empty = ""
+    text3d(0, 0, 0,bquote(.(pl_data$title) ~ .(empty)), cex = title_cex_work)  # didn't find a better workaroud for empty
     next3d()
     
-    if (show == "point"){
+    # plot data by class label
+    plot_list_work = c()
+    for (class_i in 1:length(label_values)){
       
-      for (class_i in 1:length(label_values)){
+      class_label = label_values[class_i]
+      class_color = cmap_work[class_i]
+      class_data = plot_data %>%
+        filter(Label == class_label)
+      
+      add_plot = c()
+      for (class_size in unique(class_data$size)){
+        size_data = class_data %>%
+          filter(size == class_size) %>%
+          select(starts_with("Dim")) %>%
+          xyz.coords()
         
-        class_label = label_values[class_i]
-        class_color = cmap[class_i]
-        class_data = plot_data %>%
+        if (show_work == "point"){   
+          add_plot = c(add_plot,
+                       points3d(size_data, size = class_size, col = class_color, axes = F, box = T, xlab = "", ylab = "", zlab = "",
+                                alpha = point_alpha_work, point_antialias = TRUE))
+        } else if (show_work == "sphere"){
+          add_plot = c(add_plot,
+                       spheres3d(size_data,  radius = class_size/5, col = class_color, axes = F, box = T, xlab = "", ylab = "", zlab = "",
+                                 point_antialias = TRUE))
+        }
+      } # class_size
+      plot_list_work = c(plot_list_work, list(add_plot))
+    } # class_i
+    names(plot_list_work) = label_values
+    
+    # plot additional data (if any) by class label
+    plot_list_work_add = list()
+    if (!is.null(plot_data_add)){
+      for (class_i in 1:length(label_values_add)){
+        
+        class_label = label_values_add[class_i]
+        class_color = plot_data_add_color[class_i]
+        class_data = plot_data_add %>%
           filter(Label == class_label)
         
+        add_plot = c()
         for (class_size in unique(class_data$size)){
           size_data = class_data %>%
             filter(size == class_size) %>%
             select(starts_with("Dim")) %>%
             xyz.coords()
-          points3d(size_data, size = class_size, col = class_color, axes = F, box = T, xlab = "", ylab = "", zlab = "")
+          
+          if (show_additional_work == "point"){   
+            add_plot = c(add_plot,
+                         points3d(size_data, size = class_size, col = class_color, axes = F, box = T, xlab = "", ylab = "", zlab = "",
+                                  point_antialias = TRUE))
+          } else if (show_additional_work == "sphere"){
+            add_plot = c(add_plot,
+                         spheres3d(size_data,  radius = class_size/5, col = class_color, axes = F, box = T, xlab = "", ylab = "", zlab = "",
+                                   point_antialias = TRUE))
+          }
         } # class_size
+        plot_list_work_add = c(plot_list_work_add, list(add_plot))
       } # class_i
-    }
-    
-    
-    if (show == "sphere"){
-      plot3d(xyz.coords(plot_data %>% select(starts_with("Dim"))), col = cmap[plot_data$Label], type = "s",
-             size = plot_data$size, axes = F, box = T, xlab = "", ylab = "", zlab = "")
+      names(plot_list_work_add) = label_values_add
     }
     
     # add box and focus on 2D view (if any)
     box3d(color = "grey")
-    if (plot2d_flag){rgl.viewpoint( theta = 0, phi = 0, fov = 0, interactive = F)}
+    if (plot2d_flag){
+      rgl.viewpoint( theta = 0, phi = 0, fov = 0, interactive = F)
+    } else {
+      rgl.viewpoint(zoom = 0.6)
+    }
     
     # plot legend for selected plot
+    if (!is.null(plot_data_add)){
+      additional_point_legend = setdiff(label_values, label_values_add)
+      additional_point_legend_color = plot_data_add_color[match(additional_point_legend, label_values_add)]
+    } else {
+      additional_point_legend = additional_point_legend_color = c()
+    }
     if (plot_count %in% plot_legend_index){
-      legend3d("bottomright", legend = label_values, pch = 16, col = cmap[1:length(label_values)], cex = legend_cex)
+      par3d(windowRect = c(0, 0, legend_resize[1], legend_resize[1]))  # used to avoid low resolution for legend
+      legend3d("bottomright", legend = c(label_values, additional_point_legend), cex = legend_cex, pch = 16,
+               col = c(cmap_work[1:length(label_values)], additional_point_legend_color))
     }
     
     plot_count = plot_count + 1
   } # pl_data
-}
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-prova_3d = function(plot_list, n_col, show = "point"){
   
-  # show: "point" for points, no size effect or "sphere" for 3D spheres and size effect
-  
-  n_row = ceiling(length(plot_list) / n_col)
-  open3d()
-  mat <- matrix(1:(n_col*n_row*2), ncol = n_col)   # add spot for title (text3d())
-  layout3d(mat, height = rep(c(1, 2), n_row), widths = rep(1, n_col), sharedMouse = T)  # (1,10) is the proportion between text3d and plot3d space
-  for (pl_data in plot_list){
-    
-    plot_data = pl_data$data
-    
-    # check if 2D plot must be used
-    plot2d_flag = FALSE
-    if (ncol(plot_data) == 2){
-      plot_data = plot_data %>% mutate(Dim3 = 0)
-      plot2d_flag = TRUE
+  if (add_shared_slider){
+    plot_list_work_slider = list()
+    for (pl_name in names(plot_list_work)){
+      plot_list_work_slider[[pl_name]] = c(plot_list_work[[pl_name]], plot_list_work_add[[pl_name]])
     }
+    plot_list_work_slider = c(list(All = plot_list_work_slider %>% unlist()), plot_list_work_slider)
     
-    data_coord = xyz.coords(plot_data[301:700,] %>% select(starts_with("Dim")))
-    data_coord_additional = xyz.coords(plot_data[1:300,] %>% select(starts_with("Dim")))
     
-    next3d()
-    text3d(0, 0, 0, pl_data$title, cex = 0.8)
-    next3d()
+    output = rglwidget(reuse = FALSE) %>%
+      playwidget(start = 0, stop = length(plot_list_work_slider)-1, interval = 1, #height = widget_height,
+                 components = c("Play", "Slider", "Label"),
+                 labels = names(plot_list_work_slider),
+                 subsetControl(1, subscenes = plot_scene_list, subsets = plot_list_work_slider))
     
-    if (show == "point"){
-      # main_data <- plot3d(data_coord, col = "blue", type = "p", axes = F, box = T, xlab = "", ylab = "", zlab = "")
-      # plot3d(data_coord, col = "white", type = "p", axes = F, box = T, xlab = "", ylab = "", zlab = "", size = 0)
-      main_data <- points3d(data_coord, col = "blue", axes = F, box = T, xlab = "", ylab = "", zlab = "")
-      rglwidget(elementId = "aa")
-      add_data <- points3d(data_coord_additional, col = "red", axes = F, box = T, xlab = "", ylab = "", zlab = "")
-      rglwidget(elementId = "bb")
-
-      toggleWidget(sceneId = "aa", ids = main_data, label = "aa")
-      toggleWidget(sceneId = "bb", ids = add_data, label = "bb")
-      #   toggleWidget(ids = main_data, label = 'aaa') %>%
-      # rglwidget(elementId = "plot3drgl") %>%
-      #   toggleWidget(ids = add_data, label = 'bbb') %>% 
-      #   asRow(last=2)
-    }
-    
-    if (show == "sphere"){
-      if(range(plot_data$size) %>% uniqueN() != 1){
-        size_set = scale_range(plot_data$size, 0.5, 2, mode = 'linear')
-      } else {
-        size_set = rep(1, nrow(plot_data))
-      }
-      main_data <- plot3d(data_coord, col = "blue", type = "s", size = size_set, axes = F, box = T, xlab = "", ylab = "", zlab = "")
-    }
-    box3d(color = "grey")
-    if (plot2d_flag){rgl.viewpoint( theta = 0, phi = 0, fov = 0, interactive = F)}
+    return(output)
+  } else {
+    rglwidget(reuse = FALSE)
   }
 }
+
+# make a 3D interactive plot with a slider to show first all points and then subsets (works also for 2D plot)
+render_3d_slider = function(data, show = "sphere", point_size = 2, text_hor_just = 0,
+                            text_ver_just = 1.2, text_cex = 1, widget_height = 500, zoom_val = 1){
+  
+  # data: data.frame with Label (factor - legend label for each subset of the slider),
+  #                       text_annotation (optional - string to be plotted close to points)
+  #                       Dim1, Dim2, Dim3 (if any) (numeric - points coordinates)
+  # show: "point" for points "sphere" for 3D spheres
+  # point_size: size of point/sphere
+  # text_hor_just, text_ver_just: horizontal and vertical spacing for text annotation
+  # text_cex: text cex for annotation
+  # widget_height: height of the widget in pixels
+  # zoom_val: percentage of zoom. The smaller the closer
+  
+  label_values = levels(data$Label)
+  
+  # check if 2D plot must be used
+  plot2d_flag = FALSE
+  if (!"Dim3" %in% colnames(data)){
+    data = data %>% mutate(Dim3 = 0)
+    plot2d_flag = TRUE
+  }
+  
+  open3d()
+  subset_labels = c("All")
+  subset_plot_list = list(data %>%
+                            mutate(color = rainbow(length(label_values))[Label]))
+  for (label_class in label_values){
+    subset_plot_list = c(subset_plot_list,
+                         list(subset_plot_list[[1]] %>%
+                                filter(Label == label_class)))
+    subset_labels = c(subset_labels, label_class)
+  }
+  names(subset_plot_list) = subset_labels
+  
+  # plot
+  plot_list = list()
+  for (pl_name in names(subset_plot_list)){
+    
+    pl_data = subset_plot_list[[pl_name]]
+    
+    if (show == "point"){
+      add_plot = points3d(xyz.coords(pl_data %>% select(starts_with("Dim"))), col=pl_data$color, size = point_size, point_antialias = TRUE)
+    } else if (show == "sphere"){
+      add_plot = spheres3d(xyz.coords(pl_data %>% select(starts_with("Dim"))), col=pl_data$color, radius = point_size/5, point_antialias = TRUE)
+    }
+    
+    # add text annotation
+    if (pl_name != "All" & !is.null(pl_data$text_annotation)){
+      # check too close points and invert vertical spacing
+      points_dist = dist(pl_data %>% select(starts_with("Dim"))) %>% as.matrix()
+      points_dist[upper.tri(points_dist, diag = T)] = NA
+      close_points = points_dist <= 0.5 * max(points_dist, na.rm = T)  # matrix TRUE/FALSE
+      close_column = which.max(colSums(close_points, na.rm = T))   # find column with most TRUE
+      close_points_index = which(close_points[, close_column])    # find point with TRUE in the selected column
+      if (length(close_points_index) == 0){close_points_index = 0}
+      
+      sub_data = pl_data %>% filter(!row_number() %in% close_points_index)
+      add_plot = c(add_plot,
+                   text3d(xyz.coords(sub_data %>% select(starts_with("Dim"))), texts = sub_data$text_annotation,
+                          adj = c(text_hor_just, text_ver_just), cex = text_cex))
+      if (length(close_points_index) > 0){  # use -text_ver_just
+        sub_data = pl_data %>% filter(row_number() %in% close_points_index)
+        add_plot = c(add_plot,
+                     text3d(xyz.coords(sub_data%>% select(starts_with("Dim"))), texts = sub_data$text_annotation,
+                            adj = c(text_hor_just, -text_ver_just), cex = text_cex))
+      }
+    }
+    plot_list = c(plot_list, list(add_plot))
+    box3d(color = "grey")
+  }
+  names(plot_list) = subset_labels
+  
+  output = rglwidget(reuse = FALSE) %>%
+    playwidget(start = 0, stop = length(plot_list)-1, interval = 1, height = widget_height,
+               components = c("Play", "Slider", "Label"),
+               labels = subset_labels,
+               subsetControl(1, subsets = plot_list))
+  
+  # add box and focus on 2D view (if any)
+  if (plot2d_flag){
+    rgl.viewpoint( theta = 0, phi = 0, fov = 0, interactive = F, zoom = zoom_val)
+  } else {
+    rgl.viewpoint(zoom = zoom_val)
+  }
+  
+  return(output)
+}
+
+
+# generate string of settings for Rmarkdown .Rmd file
+RMarkdown_settings = function(title, help_path){
+  
+  out = paste0(
+    "---
+title: ", title, "
+output:
+  html_document:
+    toc: true
+    toc_depth: 2
+    df_print: paged
+    css: C:/Users/Alessandro Bitetto/Downloads/UniPV/BCC-default/Distance_to_Default/Stats/styles.css
+---
+
+<style type=\"text/css\">
+.main-container {
+  max-width: 1800px;
+  margin-left: auto;
+  margin-right: auto;
+}
+</style>
+
+```{r, echo=FALSE, include=FALSE}
+suppressMessages(suppressWarnings(library(knitr)))
+suppressMessages(suppressWarnings(library(kableExtra)))
+suppressMessages(suppressWarnings(library(rgl)))
+suppressMessages(suppressWarnings(library(data.table)))
+suppressMessages(suppressWarnings(library(dplyr)))
+suppressMessages(suppressWarnings(library(tidyverse)))
+options(rgl.useNULL = TRUE) # Suppress the separate window.
+render_3d_grid = function(x){0}
+suppressMessages(insertSource('", help_path, "', functions='render_3d_grid'))
+scale_range = function(x){0}
+suppressMessages(insertSource('", help_path, "', functions='scale_range'))
+render_3d_slider = function(x){0}
+suppressMessages(insertSource('", help_path, "', functions='render_3d_slider'))
+```
+")
+  
+  return(out)
+}
+
+# generate string of render_3d_grid for Rmarkdown .Rmd file
+RMarkdow_render_3d_grid = function(plot_list_rds, emb_type, n_col, show = "point", single_class_size = 1, legend_cex = 1, plot_legend_index = NULL,
+                                   legend_resize = c(512, 512), point_alpha = 1, additional_points_size = 5, show_additional = "sphere", title_cex = 1,
+                                   MIN_SCALE = 1, MAX_SCALE = 5, MODE_SCALE = "linear", MODE_S = NULL, add_shared_slider = FALSE,
+                                   HTML_fig.height = 5, HTML_fig.width = 5, add_section = TRUE){
+  out = ""
+  if (add_section){
+    out = paste0(out, "\n\n## Embedding: ", emb_type, "\n\n")
+  }
+  out = paste0(out, "\n",
+               "
+```{r, echo=FALSE, include=TRUE, fig.height = ", HTML_fig.height, ", fig.width = ", HTML_fig.width, "}
+plot_list = readRDS('", plot_list_rds, "')
+render_3d_grid(plot_list, n_col = ", n_col, ", show = '", show, "', single_class_size = ", single_class_size, ", legend_cex = ", legend_cex,
+               ", plot_legend_index = c(", ifelse(is.null(plot_legend_index), "NULL", paste0(plot_legend_index, collapse = ",")),
+               "), legend_resize = c(", paste0(legend_resize, collapse = ","), "), point_alpha = ", point_alpha,
+               ", additional_points_size = ", additional_points_size, ", show_additional = '", show_additional, "', title_cex = ", title_cex,
+               ", MIN_SCALE = ", MIN_SCALE, ", MAX_SCALE = ", MAX_SCALE,
+               ", MODE_SCALE = '", MODE_SCALE, "', MODE_S = ", ifelse(is.null(MODE_S), "NULL", MODE_S), ", add_shared_slider = ", add_shared_slider, ")
+```
+")
+  
+  return(out)
+}
+
+# generate string of render_3d_grid for Rmarkdown .Rmd file
+RMarkdow_render_3d_slider = function(data_rds, emb_type, show = "sphere", point_size = 1, text_hor_just = 0, text_ver_just = 1.2,
+                                     text_cex = 1, widget_height = 500, zoom_val = 1, HTML_fig.height = 5, HTML_fig.width = 5, add_section = TRUE){
+  out = ""
+  if (add_section){
+    out = paste0(out, "\n\n## Embedding: ", emb_type, "\n\n")
+  }
+  out = paste0(out, "\n",
+               "
+```{r, echo=FALSE, include=TRUE, fig.height = ", HTML_fig.height, ", fig.width = ", HTML_fig.width, "}
+data = readRDS('", data_rds, "')
+render_3d_slider(data, show = '", show, "', point_size = ", point_size , ", text_hor_just = ", text_hor_just,
+               ", text_ver_just = ", text_ver_just, ", text_cex = ", text_cex, ", widget_height = ", widget_height, ", zoom_val = ", zoom_val, ")
+```
+")
+  
+  return(out)
+}
+
+# function used to map label_type  on peers dataset
+map_cluster_on_peers = function(label_type, categorical_variables, df_peers_long, ORBIS_mapping, ORBIS_label){
+  
+  # function used to map label_type  on peers dataset
+  # - label_type: "Regione_Macro" or "roa_Median" or "oneri_ricavi_LowMedHig"
+  # - categorical_variables: vector of categorical_variables ("Regione_Macro", "Dummy_inddustry", etc.)
+  
+  if (label_type %in% categorical_variables){
+    label_values = df_peers_long %>% select(all_of(label_type)) %>% unique() %>% pull(label_type) %>%
+      lapply(function(x) substr(x,1,15)) %>% unlist()
+    df_label = df_peers_long %>%
+      filter(year != "2011") %>%
+      mutate(Label = substr(!!sym(label_type), 1, 15)) %>%
+      mutate(Label = factor(Label, levels = label_values)) %>%
+      select(Company_name_Latin_alphabet, Label)
+  } else {
+    match_label = gsub("_LowMedHig|_Median", "", label_type)
+    match_label_fix = ifelse(sum(paste0("BILA_", match_label) %in% ORBIS_mapping$BILA) == 0, match_label, paste0("BILA_", match_label))
+    label_version = gsub(match_label, "", label_type) %>% gsub("_", "", .)  # Median or LowMedHig
+    peers_label = ORBIS_mapping %>%
+      filter(BILA == match_label_fix) %>%
+      pull(Single_Variable) %>%
+      unique()
+    if (label_version == 'Median'){
+      df_label = df_peers_long %>%
+        # filter(year != "2011") %>%
+        mutate(Variable = match_label_fix) %>%
+        left_join(ORBIS_label %>% filter(Variable == match_label_fix) %>% select(Variable, Peer_median), by = "Variable") %>%
+        mutate(Label = ifelse(!!sym(peers_label) <= Peer_median, 'Down', 'Up')) %>%
+        select(Company_name_Latin_alphabet, Variable, Peer_median, Label, all_of(peers_label))
+    } else if (label_version == 'LowMedHig'){
+      df_label = df_peers_long %>%
+        # filter(year != "2011") %>%
+        mutate(Variable = match_label_fix) %>%
+        left_join(ORBIS_label %>% filter(Variable == match_label_fix) %>% select(Variable, Peer_33rd, Peer_66th), by = "Variable") %>%
+        select(Company_name_Latin_alphabet, Variable, Peer_33rd, Peer_66th, all_of(peers_label)) %>%
+        mutate(Label = 'Low') %>%
+        mutate(Label = ifelse(!!sym(peers_label) > Peer_33rd, 'Medium', Label)) %>%
+        mutate(Label = ifelse(!!sym(peers_label) > Peer_66th, 'High', Label))
+    }
+    df_label = df_label %>%
+      mutate(Label = factor(Label, levels = unique(df_label$Label))) %>%
+      select(Company_name_Latin_alphabet, Label)
+  }
+  
+  # take median value for multiple label for each
+  label_values = levels(df_label$Label)
+  df_label = df_label %>%
+    mutate(Label = as.numeric(Label)) %>%
+    group_by(Company_name_Latin_alphabet) %>%
+    summarise(Label = round(median(Label))) %>%
+    mutate(Label = label_values[Label]) %>%
+    mutate(Label = factor(Label, levels = label_values))
+  
+  return(df_label)
+}
+
