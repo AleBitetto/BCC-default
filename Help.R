@@ -1245,6 +1245,7 @@ render_3d_grid = function(plot_list, n_col, show = "point", single_class_size = 
   # legend_resize: in order to avoid legend low resolution play with (x,y) resize value and legend_cex
   # additional_points_size: size of additional points
   # add_shared_slider: if TRUE add a shared slider to show all points (both data and additional data) together and class label by class label
+  #                    https://stackoverflow.com/questions/66731751/r-rgl-link-multiple-plots-to-a-single-widget
   
   # define colormap
   cmap = c('dodgerblue3', 'firebrick2', 'chartreuse3', 'cadetblue2', 'gold1', 'darkorange', 'slategray4', 'violet', 'yellow1')
@@ -1253,8 +1254,7 @@ render_3d_grid = function(plot_list, n_col, show = "point", single_class_size = 
   open3d()
   mat <- matrix(1:(n_col*n_row*2), ncol = n_col)   # add spot for title (text3d())
   layout3d(mat, height = rep(c(1, 2), n_row), widths = rep(1, n_col), sharedMouse = T)  # (1,10) is the proportion between text3d and plot3d space
-  scene_list = subsceneList()
-  plot_scene_list = scene_list[seq(1, length(scene_list), by = 2) + 1] # even scenes are text3d titles
+  subset_control_list = list()  # only if add_shared_slider == T
   plot_count = 1
   for (pl_data in plot_list){
     
@@ -1386,22 +1386,31 @@ render_3d_grid = function(plot_list, n_col, show = "point", single_class_size = 
                col = c(cmap_work[1:length(label_values)], additional_point_legend_color))
     }
     
+    # save single subscene list (each element is a single subscene to be matched with the movement of the other)
+    if (add_shared_slider){
+      # concatenate data plot and additional data plot by label names
+      merge_list = list()
+      for (pl_name in names(plot_list_work)){
+        merge_list[[pl_name]] = c(plot_list_work[[pl_name]], plot_list_work_add[[pl_name]])
+      }
+      merge_list = c(list(All = merge_list %>% unlist()), merge_list)
+      
+      subset_control_list = c(subset_control_list, list(
+        subsetControl(1, subscenes = subsceneInfo()$id, subsets = merge_list)
+      ))
+    }
+    
     plot_count = plot_count + 1
   } # pl_data
   
   if (add_shared_slider){
-    plot_list_work_slider = list()
-    for (pl_name in names(plot_list_work)){
-      plot_list_work_slider[[pl_name]] = c(plot_list_work[[pl_name]], plot_list_work_add[[pl_name]])
-    }
-    plot_list_work_slider = c(list(All = plot_list_work_slider %>% unlist()), plot_list_work_slider)
     
-    
+    control_labels = subset_control_list[[1]]$labels
     output = rglwidget(reuse = FALSE) %>%
-      playwidget(start = 0, stop = length(plot_list_work_slider)-1, interval = 1, #height = widget_height,
+      playwidget(start = 0, stop = length(control_labels)-1, interval = 1, #height = widget_height,
                  components = c("Play", "Slider", "Label"),
-                 labels = names(plot_list_work_slider),
-                 subsetControl(1, subscenes = plot_scene_list, subsets = plot_list_work_slider))
+                 labels = control_labels,
+                 subset_control_list)
     
     return(output)
   } else {
@@ -1642,3 +1651,951 @@ map_cluster_on_peers = function(label_type, categorical_variables, df_peers_long
   return(df_label)
 }
 
+# clever standardization
+clever_scale = function(input_df, exclude_var = c()){
+  # if variable is constant or included in 'exclude_var', no transformation
+  
+  output_matrix = c()
+  
+  for (col in colnames(input_df)){
+    val = input_df %>% pull(col)
+    if (col %in% exclude_var){
+      std_val = val
+    } else if (uniqueN(val) == 1){
+      std_val = scale(val, center = T, scale = F) %>% as.numeric
+    }else {
+      std_val = scale(val, center = T, scale = T) %>% as.numeric
+    }
+    output_matrix = output_matrix %>%
+      cbind(std_val)
+  }
+  output_matrix = output_matrix %>%
+    as.data.frame() %>%
+    setNames(colnames(input_df)) %>%
+    `rownames<-`(rownames(input_df)) %>%
+    as.matrix()
+  
+  return(output_matrix)
+}
+
+# create fold for outer and inner Cross-Validation with stratification
+create_stratified_fold = function(df_work, inn_cross_val_fold, out_cross_val_fold, out_stratify_columns = NULL, inn_stratify_columns = NULL, 
+                                  out_stratify_target = F, inn_stratify_target = F){
+  
+  # to get only outer folds set inn_cross_val_fold <= 1
+  
+  if (!is.null(out_stratify_columns)){out_stratify_target = F}   # stratify and stratify.cols are mutually exclusive
+  if (!is.null(inn_stratify_columns)){inn_stratify_target = F}
+  
+  # create mock classification problem to speed up evaluation
+  df_fold = df_work %>%
+    mutate(TARGET = as.factor(round(runif(nrow(df_work))))) %>%
+    select(c('TARGET', unique(c(out_stratify_columns, inn_stratify_columns))))
+  
+  task = makeClassifTask(data = df_fold,
+                         target = 'TARGET')
+  learner = makeLearner("classif.lda")
+  learner$config = list(on.learner.error = 'warn')
+  
+  # outer folds - used also in case of non-nested CV
+  outer = makeResampleDesc(method = "CV",
+                           iters = out_cross_val_fold,
+                           predict = "test",
+                           stratify.cols = out_stratify_columns,
+                           stratify = out_stratify_target)
+  set.seed(1, "L'Ecuyer-CMRG")
+  res_outer = resample(learner = learner,
+                       task = task,
+                       resampling = outer,
+                       show.info = F,
+                       models = F)
+  outer_ind = getResamplingIndices(res_outer)
+  
+  # for each outer test set, perform inner folding according to inn_cross_val_fold (if > 1)
+  outer_blocking = data.frame(index = as.character(1:nrow(df_fold)), stringsAsFactors = F)
+  inner_blocking = data.frame(index = as.character(1:nrow(df_fold)), stringsAsFactors = F)
+  cc = 1
+  for (ou in 1:length(outer_ind$test.inds)){
+    
+    # outer
+    out_test = outer_ind$test.inds[[ou]]
+    outer_blocking = outer_blocking %>%
+      left_join(
+        data.frame(index = as.character(out_test), group = ou, stringsAsFactors = F),
+        by = 'index'
+      )
+    
+    if (inn_cross_val_fold > 1){
+      # inner
+      inner_task = makeClassifTask(data = df_fold %>%
+                                     filter(row_number() %in% out_test),
+                                   target = 'TARGET')
+      inner = makeResampleDesc(method = "CV",
+                               iters = inn_cross_val_fold,
+                               predict = "test",
+                               stratify.cols = inn_stratify_columns,
+                               stratify = inn_stratify_target)
+      set.seed(1, "L'Ecuyer-CMRG")
+      res_inner = resample(learner = learner,
+                           task = inner_task,
+                           resampling = inner,
+                           show.info = F,
+                           models = F)
+      inner_ind = getResamplingIndices(res_inner)
+      
+      for (inn in 1:length(inner_ind$test.inds)){
+        
+        inn_test = inner_ind$test.inds[[inn]]
+        inner_blocking = inner_blocking %>%
+          left_join(
+            data.frame(index = as.character(out_test[inn_test]), group = cc, stringsAsFactors = F),
+            by = 'index'
+          )
+        cc = cc + 1
+      } # inn
+    } else {
+      inner_blocking$group = 99
+    }
+  } # ou
+  
+  outer_blocking = outer_blocking %>%
+    gather('group', 'block', -index) %>%
+    filter(!is.na(block)) %>%
+    select(-group) %>%
+    mutate(index = as.integer(index)) %>%
+    arrange(index)
+  if (uniqueN(outer_blocking$index) != nrow(df_fold)){cat('\n\n####### duplicates in outer_blocking\n\n')}
+  
+  inner_blocking = inner_blocking %>%
+    gather('group', 'block', -index) %>%
+    filter(!is.na(block)) %>%
+    select(-group) %>%
+    mutate(index = as.integer(index)) %>%
+    arrange(index)
+  if (uniqueN(inner_blocking$index) != nrow(df_fold)){cat('\n\n####### duplicates in inner_blocking\n\n')}
+  
+  if (inn_cross_val_fold > 1){
+    final_blocking = inner_blocking
+  } else {
+    final_blocking = outer_blocking
+  }
+  
+  # cat('\nSize of each of the', uniqueN(final_blocking$block), 'blocking subsets:')
+  # print(table(final_blocking$block))
+  # cat('\n')
+  
+  # final distribution
+  final_distr_data = df_work %>%
+    bind_cols(final_blocking %>% arrange(index)) %>%
+    select(block, all_of(colnames(df_fold))) %>%
+    group_by_all() %>%
+    summarise(Count = n(), .groups = "drop") %>%
+    group_by(block) %>%
+    mutate(perc = round(Count/ sum(Count) * 100, 1)) %>%
+    ungroup() %>%
+    arrange(block)
+  
+  final_distr = c()
+  for (i in 1:uniqueN(final_distr_data$block)){
+    final_distr = final_distr %>%
+      bind_rows(final_distr_data %>%
+                  filter(block == i) %>%
+                  unite("comb", all_of(colnames(df_fold)), remove = T) %>%
+                  column_to_rownames("comb") %>%
+                  select(-block, -Count) %>%
+                  t() %>%
+                  as.data.frame() %>%
+                  mutate(block = i))
+  }
+  
+  return(list(final_blocking = final_blocking,
+              final_distr = final_distr %>% select(block, everything()),
+              final_distr_data = final_distr_data %>% unite("Combination", all_of(colnames(df_fold)), remove = F))
+  )
+}
+
+# fit glmnet and select optimal lambda with cross-validation
+fit_cv_glmnet = function(x, y, alpha = 1, standardize = F, intercept = T, parallel = T,
+                         type.measure = "auc", lambda_final = "lambda.1se", family = "binomial",
+                         fixed_variables = c(), n_fold_cvgmlnet = 10, x_test_predict = NULL){
+  
+  # x: must have rownames
+  # alpha: 1 = LASSO, 0 = RIDGE
+  # lambda_final: how to select best lambda. "lambda.1se" or "lambda.min"
+  # n_fold_cvgmlnet: number of folds in cv.glmnet. Stratified folds are evaluated by y.
+  # x_test_predict: additional data to be predicted (same shape of x)
+  
+  # create stratified sampling for target variable only for cv.glmnet
+  cv_gmlnet_ind_gen = stratified.cv.data.single.class(1:nrow(x), which(y == 1), kk=n_fold_cvgmlnet, seed=23)
+  cv_gmlnet_ind = rep(NA, nrow(x))
+  for (kk in 1:n_fold_cvgmlnet){
+    cv_gmlnet_ind[c(cv_gmlnet_ind_gen$fold.positives[[kk]], cv_gmlnet_ind_gen$fold.negatives[[kk]])] = kk
+  }
+  if (sum(is.na(cv_gmlnet_ind)) > 0){cat('\n#### missing values in cv_gmlnet_ind')}
+  
+  # fit glmnet and take best lambda coefficients and predictions
+  # penalization factor
+  pen_factors = rep(1, ncol(x)) # 0 for variable to always keep, 1 for other
+  pen_factors[which(colnames(x) %in% fixed_variables)] = 0
+  
+  # weights
+  fraction_0 <- rep(1 - sum(y == 0) / nrow(x), sum(y == 0))
+  fraction_1 <- rep(1 - sum(y == 1) / nrow(x), sum(y == 1))
+  weights <- numeric(nrow(x))
+  weights[y == 0] <- fraction_0
+  weights[y == 1] <- fraction_1
+  
+  if (parallel){
+    cl <- parallel::makeCluster(detectCores() - 2)
+    doParallel::registerDoParallel(cl)
+  }
+  cvfit <- cv.glmnet(x %>% as.matrix(), y, weights = weights, parallel = parallel, nfolds = n_fold_cvgmlnet, family = family, alpha = alpha,
+                     standardize = standardize, intercept = intercept, penalty.factor = pen_factors,  
+                     alignment = "lambda", type.measure = type.measure, foldid = cv_gmlnet_ind)
+  if (parallel){parallel::stopCluster(cl)}
+  
+  lambda_opt = cvfit[[lambda_final]]
+  # "response" for probab., "link" for pre-sigmoid (i.e. the predicted logit), "coefficients" for coefficients, "class" for final class (with thresh=0.5)
+  coeff = predict(cvfit, newx = x, s = lambda_opt, family = family, type="coefficients") %>%
+    as.matrix() %>%
+    data.frame() %>%
+    setNames("Coeff") %>%
+    rownames_to_column("Variable")
+  pred_prob_train = predict(cvfit, newx = x %>% as.matrix(), s = lambda_opt, family = family, type="response") %>%
+    data.frame() %>%
+    setNames("Prob") %>%
+    `rownames<-`(rownames(x))
+  
+  if (!is.null(x_test_predict)){
+    pred_prob_test = predict(cvfit, newx = x_test_predict %>% as.matrix(), s = lambda_opt, family = family, type="response") %>%
+      data.frame() %>%
+      setNames("Prob") %>%
+      `rownames<-`(rownames(x_test_predict))
+  } else {
+    pred_prob_test = NULL
+  }
+  
+  return(list(fit = cvfit,
+              lambda_opt = lambda_opt,
+              coeff = coeff,
+              pred_prob_train = pred_prob_train,
+              pred_prob_test = pred_prob_test,
+              options = list(weights = weights,
+                             pen_factors = pen_factors,
+                             alpha = alpha,
+                             type.measure = type.measure,
+                             foldid = cv_gmlnet_ind,
+                             lambda_final = lambda_final,
+                             family = family,
+                             standardize = standardize)))
+}
+
+
+# find optimal threshold for classification task
+find_best_threshold = function(df_pred, prob_thresh_perf = "F1", prob_thresh_perf_minimize = F, thresh_set = NULL){
+  
+  # pf_pred: data.frame with "Prob" and "y_true" [character] columns
+  # prob_thresh_perf: performance metric to be used to tune threshold if prob_thresh = "best". Only "F1", "Precision" or "Recall"
+  # prob_thresh_perf_minimize: whether to minimize prob_thresh_perf
+  # thresh_set: set of threshold to be evaluated. If NULL seq(0.01, 0.99, length.out = 200)
+  
+  if (is.null(thresh_set)){
+    thresh_set = seq(0.01, 0.99, length.out = 200)
+  }
+  
+  if (prob_thresh_perf == "F1"){
+    perf_metr = MLmetrics::F1_Score
+  }
+  if (prob_thresh_perf == "Precision"){
+    perf_metr = MLmetrics::Precision
+  }
+  if (prob_thresh_perf == "Recall"){
+    perf_metr = MLmetrics::Recall
+  }
+  
+  thresh_results = c()
+  for (thr in thresh_set){
+    df_thr = df_pred %>%
+      mutate(y_pred = ifelse(Prob >= thr, 1, 0) %>% as.character())
+    if (uniqueN(df_thr$y_pred) != 1){
+      thresh_results = thresh_results %>%
+        bind_rows(data.frame(threshold = thr, perf = perf_metr(y_true = df_thr$y_true, y_pred = df_thr$y_pred, positive = "1")))
+    }
+  }
+  thresh_results = thresh_results %>%
+    filter(is.finite(perf)) %>%
+    arrange(desc(perf))
+  if (prob_thresh_perf_minimize){
+    thresh_results = thresh_results %>%
+      arrange(perf)
+  }
+  
+  return(list(best_threshold = thresh_results$threshold[1],
+              threshold_results = thresh_results))
+}
+
+# fit and evaluates performance metrics for glmnet
+get_glmnet_performance = function(data_train, data_test = NULL, alpha = 1, standardize = F, intercept = T, parallel = T,
+                                  type.measure = "auc", lambda_final = "lambda.1se", family = "binomial",
+                                  fixed_variables = c(), n_fold_cvgmlnet = 10,
+                                  prob_thresh = 0.5, prob_thresh_perf = "F1", prob_thresh_perf_minimize = F, prob_thresh_set = "test",
+                                  train_subset = NULL, test_subset = NULL){
+  
+  # fit glmnet with fit_cv_glmnet and evaluates performance metrics for train and test (if any) set
+  # prob_thresh: threshold to convert probabilities to class. If "best" optimal value is evaluated according to prob_thresh_perf on prob_thresh_set
+  # prob_thresh_perf: performance metric to be used to tune threshold if prob_thresh = "best". Only "F1", "Precision" or "Recall"
+  # prob_thresh_perf_minimize: whether to minimize prob_thresh_perf 
+  # prob_thresh_set: "train" or "test" set to be used to assess prob_thresh_perf
+  # train_subset, test_subset: indices of subset on which evaluate performance
+  
+  if (!is.null(data_test)){
+    x_test_predict = data_test %>% select(-y)
+  } else {
+    x_test_predict = NULL
+  }
+  
+  fit_train = fit_cv_glmnet(x = data_train %>% select(-y), y = data_train$y, alpha = alpha, standardize = standardize, intercept = intercept, parallel = parallel,
+                            type.measure = type.measure, lambda_final = lambda_final, family = family,
+                            fixed_variables = fixed_variables, n_fold_cvgmlnet = n_fold_cvgmlnet, x_test_predict = x_test_predict)
+  
+  # get prediction for train set
+  pred_train_orig = fit_train$pred_prob_train %>%
+    rownames_to_column("rows") %>%
+    left_join(data_train %>%
+                select(y) %>%
+                rownames_to_column("rows"), by = "rows") %>%
+    mutate(y = as.character(y)) %>%
+    rename(y_true = y)
+  
+  # get prediction for test set
+  if (!is.null(fit_train$pred_prob_test)){
+    pred_test_orig = fit_train$pred_prob_test %>%
+      rownames_to_column("rows") %>%
+      left_join(data_test %>%
+                  select(y) %>%
+                  rownames_to_column("rows"), by = "rows") %>%
+      mutate(y = as.character(y)) %>%
+      rename(y_true = y)
+  } else {
+    pred_test_orig = pred_test = NULL
+  }
+  
+  # evaluate class labels with fixed threshold
+  if (prob_thresh != "best"){
+    pred_train_orig = pred_train_orig %>%
+      mutate(y_pred = ifelse(Prob >= prob_thresh, 1, 0) %>% as.character(),
+             threshold = prob_thresh)
+    
+    if (!is.null(pred_test_orig)){
+      pred_test_orig = pred_test_orig %>%
+        mutate(y_pred = ifelse(Prob >= prob_thresh, 1, 0) %>% as.character(),
+               threshold = prob_thresh)
+    }
+    best_thr = prob_thresh
+  }
+  
+  # evaluate class labels with best threshold
+  best_thr_res = NULL
+  if (prob_thresh == "best"){
+    best_out_train = find_best_threshold(df_pred = pred_train_orig, prob_thresh_perf = prob_thresh_perf, prob_thresh_perf_minimize = prob_thresh_perf_minimize)
+    if (!is.null(fit_train$pred_prob_test)){
+      best_out_test = find_best_threshold(df_pred = pred_test_orig, prob_thresh_perf = prob_thresh_perf, prob_thresh_perf_minimize = prob_thresh_perf_minimize)
+    }
+    
+    if (prob_thresh_set == "train"){
+      best_thr = best_out_train$best_threshold
+      best_thr_res = best_out_train$threshold_results
+    } else if (prob_thresh_set == "test"){
+      best_thr = best_out_test$best_threshold
+      best_thr_res = best_out_test$threshold_results
+    }
+    
+    pred_train_orig = pred_train_orig %>%
+      mutate(y_pred = ifelse(Prob >= best_thr, 1, 0) %>% as.character(),
+             threshold = best_thr)
+    if (!is.null(pred_test_orig)){
+      pred_test_orig = pred_test_orig %>%
+        mutate(y_pred = ifelse(Prob >= best_thr, 1, 0) %>% as.character(),
+               threshold = best_thr)
+    }
+  }
+  
+  # subset predictions
+  if (!is.null(train_subset)){
+    pred_train = pred_train_orig[train_subset, ]
+  } else {
+    pred_train = pred_train_orig
+  }
+  if (!is.null(pred_test_orig) & !is.null(test_subset)){
+    pred_test = pred_test_orig[test_subset, ]
+  } else {
+    pred_test = pred_test_orig
+  }
+  
+  perf_metrics = data.frame(AUC_train = MLmetrics::AUC(y_pred = pred_train$Prob, y_true = pred_train$y_true),
+                            AUC_test = ifelse(!is.null(pred_test), MLmetrics::AUC(y_pred = pred_test$Prob, y_true = pred_test$y_true), NA),
+                            F1_train = MLmetrics::F1_Score(y_true = pred_train$y_true, y_pred = pred_train$y_pred, positive = "1"),
+                            F1_test = ifelse(!is.null(pred_test), MLmetrics::F1_Score(y_true = pred_test$y_true, y_pred = pred_test$y_pred, positive = "1"), NA),
+                            Precision_train = MLmetrics::Precision(y_true = pred_train$y_true, y_pred = pred_train$y_pred, positive = "1"),
+                            Precision_test = ifelse(!is.null(pred_test), MLmetrics::Precision(y_true = pred_test$y_true, y_pred = pred_test$y_pred, positive = "1"), NA),
+                            Recall_train = MLmetrics::Recall(y_true = pred_train$y_true, y_pred = pred_train$y_pred, positive = "1"),
+                            Recall_test = ifelse(!is.null(pred_test), MLmetrics::Recall(y_true = pred_test$y_true, y_pred = pred_test$y_pred, positive = "1"), NA),
+                            Accuracy_train = MLmetrics::Accuracy(y_true = pred_train$y_true, y_pred = pred_train$y_pred),
+                            Accuracy_test = ifelse(!is.null(pred_test), MLmetrics::Accuracy(y_true = pred_test$y_true, y_pred = pred_test$y_pred), NA))
+  
+  ROC_train = rocit(score= pred_train$Prob, class=pred_train$y_true)
+  ROC_train = data.frame(x = ROC_train$FPR, y = ROC_train$TPR)
+  if (!is.null(pred_test)){
+    ROC_test = rocit(score= pred_test$Prob, class=pred_test$y_true)
+    ROC_test = data.frame(x = ROC_test$FPR, y = ROC_test$TPR)
+  } else {
+    ROC_test = NULL
+  }
+  
+  return(list(pred_train = pred_train,
+              pred_test = pred_test,
+              perf_metrics = perf_metrics,
+              ROC_train = ROC_train,
+              ROC_test = ROC_test,
+              fit_train = fit_train,
+              pred_train_orig = pred_train_orig,
+              pred_test_orig = pred_test_orig,
+              prob_threshold = best_thr,
+              best_thr_res = best_thr_res)
+  )
+}
+
+# oversample dataset with SMOTE
+dataset_oversample = function(data, target_var, oversample_perc, categorical_regressor){
+  
+  set.seed(666)
+  if (length(categorical_regressor) == 0){
+    data_over <- suppressMessages(SMOTE(data = data %>%
+                                          mutate(!!sym(target_var) := as.factor(!!sym(target_var))) %>%
+                                          as.data.frame(),
+                                        outcome = target_var, perc_maj = oversample_perc))
+  } else {
+    # it takes too much, we use SMOTE for dummies and round the results
+    # data_over <- suppressMessages(SMOTE_NC(data = data %>%
+    #                                          mutate(!!sym(target_var) := as.factor(!!sym(target_var))) %>%
+    #                                          mutate_at(all_of(categorical_regressor), as.character) %>%
+    #                                          as.data.frame(),
+    #                                        outcome = target_var, perc_maj = oversample_perc))
+    data_over <- suppressMessages(SMOTE(data = data %>%
+                                          mutate(!!sym(target_var) := as.factor(!!sym(target_var))) %>%
+                                          as.data.frame(),
+                                        outcome = target_var, perc_maj = oversample_perc)) %>%
+      mutate_at(all_of(categorical_regressor), function(x) round(x) %>% as.integer)
+  }
+  
+  return(data_over)
+}
+
+# fit Random Forest with ranger
+fit_RandomForest = function(data_train, data_test, num.trees, mtry, min.node.size){
+  
+  # data_train: must contain target variable as "y" and factor
+  # data_test: same columns of data_train ("y" not required)
+  
+  # class weights
+  fraction_0 <- 1 - sum(data_train$y == 0) / nrow(data_train)
+  fraction_1 <- 1 - sum(data_train$y == 1) / nrow(data_train)
+  weights = c("0" = fraction_0, "1" = fraction_1)    # names are useless, class order matters
+  
+  # fit model
+  fit <- ranger(y ~ ., data = data_train, num.trees = num.trees, mtry = mtry, min.node.size = min.node.size,
+                probability = T, replace = F, class.weights = weights,
+                seed = 66, save.memory = FALSE)
+  
+  # predict on train and test
+  pred_prob_train = predict(fit, data=data_train, type = "response")$predictions[, 2] %>%
+    data.frame() %>%
+    setNames("Prob") %>%
+    `rownames<-`(rownames(data_train))
+  if (!is.null(data_test)){
+    pred_prob_test = predict(fit, data=data_test, type = "response")$predictions[, 2] %>%
+      data.frame() %>%
+      setNames("Prob") %>%
+      `rownames<-`(rownames(data_test))
+  } else {
+    pred_prob_test = NULL
+  }
+  
+  return(list(fit = fit,
+              pred_prob_train = pred_prob_train,
+              pred_prob_test = pred_prob_test,
+              options = list(weights = weights,
+                             num.trees = num.trees,
+                             mtry = mtry,
+                             min.node.size = min.node.size)))
+}
+
+# fit MARS
+fit_MARS = function(data_train, data_test, degree){
+  
+  # http://www.milbo.org/doc/earth-notes.pdf
+  # data_train: must contain target variable as "y" and factor
+  # data_test: same columns of data_train ("y" not required)
+  
+  # fit model
+  fit <- earth(y ~ ., data = data_train, degree = degree, glm=list(family=binomial))
+  
+  # predict on train and test
+  pred_prob_train = predict(fit, newdata=data_train, type = "response") %>%
+    data.frame() %>%
+    setNames("Prob") %>%
+    `rownames<-`(rownames(data_train))
+  if (!is.null(data_test)){
+    pred_prob_test = predict(fit, newdata=data_test, type = "response") %>%
+      data.frame() %>%
+      setNames("Prob") %>%
+      `rownames<-`(rownames(data_test))
+  } else {
+    pred_prob_test = NULL
+  }
+  
+  # save coefficients
+  coeff = fit$glm.coefficients %>%
+    as.data.frame() %>%
+    setNames("Coeff") %>%
+    rownames_to_column("Variable")
+  
+  # save feature importance
+  features_importance = evimp(fit, trim=FALSE) %>%
+    unclass() %>%
+    data.frame()
+  
+  # used variables
+  used_variables = (fit$dirs %>% colnames())[features_importance %>% filter(used == 1) %>% pull(col)]
+  
+  # termination condition
+  oo = capture.output(print(fit))
+  term_cond = oo[which(sapply(oo, function(x) grepl("Termination condition", x), USE.NAMES = F))]
+  
+  return(list(fit = fit,
+              pred_prob_train = pred_prob_train,
+              pred_prob_test = pred_prob_test,
+              coeff = coeff,
+              features_importance = features_importance,
+              used_variables = used_variables,
+              term_cond = term_cond,
+              options = list(degree = degree)))
+}
+
+# fit model with or without cross-validation
+fit_model_with_cv = function(df_work, cv_ind, algo_type, parameter_set, non_tunable_param = NULL, no_cv_train_ind = NULL, no_cv_test_ind = NULL,
+                             prob_thresh_cv = 0.5, tuning_crit = "F1_test", tuning_crit_minimize = F){
+  
+  # fit model on each fold, evaluate class based on threshold prob_thresh_cv and return final performance tuning_crit
+  
+  # df_work: full dataset to sample fold from
+  # cv_ind: dataframe ["ind", "fold"] of index for each fold. Unused if no_cv_train_ind != NULL or no_cv_test_ind != NULL
+  # no_cv_train_ind: index for train set for fitting without cross-validation
+  # no_cv_test_ind: index for test set for fitting without cross-validation
+  # algo_type: algorithm to be fitted. "Elastic-net", "Random_Forest", "MARS"
+  # parameter_set: named list of parameters for algo_type
+  # non_tunable_param: list of additional parameters not to be tuned
+  # prob_thresh_cv: threshold to convert probabilities into class. If "best" optimal value is evaluated according to tuning_crit
+  # tuning_crit: criterion to be optimized - "AUC" or "Precision" or "Recall" or "Accuracy" for "_test" or "_train"
+  # tuning_crit_minimize: whether to minimize or maximize tuning_crit
+  
+  tuned_param = parameter_set
+  parameter_set = c(parameter_set, non_tunable_param)
+  tuning_crit_set = strsplit(tuning_crit, "_")[[1]][2]   # "train" or "test"
+  tuning_crit_perf = strsplit(tuning_crit, "_")[[1]][1]   # "F1", "Accuracy", etc
+  
+  # check cross-validation or single fold fitting
+  if (!is.null(no_cv_train_ind) | !is.null(no_cv_test_ind)){
+    cv_ind = data.frame(fold = 2, ind = no_cv_train_ind) %>% # test will always have fold == fold_i
+      bind_rows(data.frame(fold = rep(1,length(no_cv_test_ind)), ind = no_cv_test_ind))
+    total_folds = 1
+  } else {
+    total_folds = unique(cv_ind$fold) %>% sort()
+  }
+  
+  fold_prediction = c()
+  fold_model_fit = list()
+  start_time = Sys.time()
+  for (fold_i in total_folds){
+    test_ind = cv_ind %>%
+      filter(fold == fold_i) %>%
+      pull(ind)
+    train_ind = cv_ind %>%
+      filter(fold != fold_i) %>%
+      pull(ind)
+    data_test = df_work[test_ind, ]
+    data_train = df_work[train_ind, ]# %>%
+    # group_by(y) %>%
+    # filter(row_number() <= 1500) %>%   # todo: rimuovi
+    # ungroup()
+    if (nrow(data_test) == 0){data_test = NULL}
+    
+    # return column data.frame "Prob" of predicted probabilities for train and test set
+    if (algo_type == "Elastic-net"){
+      
+      alpha = parameter_set$alpha
+      standardize = parameter_set$standardize
+      intercept = parameter_set$intercept
+      parallel = parameter_set$parallel
+      type.measure = parameter_set$type.measure
+      lambda_final = parameter_set$lambda_final
+      family = parameter_set$family
+      n_fold_cvgmlnet = parameter_set$n_fold_cvgmlnet
+      fixed_variables = parameter_set$fixed_variables
+      
+      if (is.null(data_test)){
+        data_test_glmnet = NULL
+      } else {
+        data_test_glmnet = data_test %>% select(-y)
+      }
+      fit_train = fit_cv_glmnet(x = data_train %>% select(-y), y = data_train$y, alpha = alpha, standardize = standardize, intercept = intercept, parallel = parallel,
+                                type.measure = type.measure, lambda_final = lambda_final, family = family,
+                                fixed_variables = fixed_variables, n_fold_cvgmlnet = n_fold_cvgmlnet, x_test_predict = data_test_glmnet)
+      
+    } else if (algo_type == "Random_Forest"){
+      
+      num.trees = parameter_set$num.trees
+      mtry = parameter_set$mtry
+      min.node.size = parameter_set$min.node.size
+      
+      fit_train = fit_RandomForest(data_train = data_train %>% mutate(y = as.factor(y)), data_test = data_test,
+                                   num.trees = num.trees, mtry = mtry, min.node.size = min.node.size)
+      
+    } else if (algo_type == "MARS"){
+      
+      degree = parameter_set$degree
+      
+      fit_train = fit_MARS(data_train = data_train %>% mutate(y = as.factor(y)), data_test = data_test, degree = degree)
+      
+    }
+    prob_train = fit_train$pred_prob_train
+    prob_test = fit_train$pred_prob_test
+    fold_model_fit[[paste0("fold_", fold_i)]] = fit_train
+    
+    # save fold prediction for both train and test - df with "set" = "train"/"test" and "Prob" and "y_true"
+    pred_to_bind = prob_train %>%
+      rownames_to_column("rows") %>%
+      left_join(data_train %>%
+                  select(y) %>%
+                  rownames_to_column("rows"), by = "rows") %>%
+      mutate(set = "train")
+    
+    if (!is.null(data_test)){
+      pred_to_bind = pred_to_bind %>%
+        bind_rows(
+          prob_test %>%
+            rownames_to_column("rows") %>%
+            left_join(data_test %>%
+                        select(y) %>%
+                        rownames_to_column("rows"), by = "rows") %>%
+            mutate(set = "test")
+        )
+    }
+    pred_to_bind = pred_to_bind %>%
+      mutate(y = as.character(y)) %>%
+      rename(y_true = y) %>%
+      select(-rows) %>%
+      mutate(fold = fold_i)
+    
+    fold_prediction = fold_prediction %>%
+      bind_rows(pred_to_bind)
+  } # fold_i
+  if (nrow(fold_prediction) != fold_i * nrow(df_work) & is.null(no_cv_train_ind)){cat('\n\n###### mismatch in fold evaluation: total observation mismatch - ', algo_type, '\n')
+    print(unlist(parameter_set))}
+  
+  # select set to evaluate tuning_crit
+  final_performance = fold_prediction %>%
+    filter(set == tuning_crit_set)
+  
+  # evaluate optimal threshold
+  df_thresh = c()
+  for (fold_i in total_folds){
+    if (prob_thresh_cv == "best"){
+      thresh_set = NULL
+    } else {
+      thresh_set = prob_thresh_cv
+    }
+    tt = find_best_threshold(final_performance %>%
+                               filter(fold == fold_i), prob_thresh_perf = tuning_crit_perf,
+                             prob_thresh_perf_minimize = tuning_crit_minimize, thresh_set = thresh_set)
+    tt = tt$threshold_results %>% rename(!!sym(paste0("fold_", fold_i)) := perf)
+    if (is.null(df_thresh)){
+      df_thresh = tt
+    } else {
+      df_thresh = df_thresh %>%
+        full_join(tt, by = "threshold")
+    }
+  } # fold_i
+  df_thresh = df_thresh %>%
+    mutate(perf = rowMeans(select(., -threshold), na.rm = T))
+  df_thresh = df_thresh %>%
+    filter(is.finite(perf)) %>%
+    arrange(desc(perf))
+  if (tuning_crit_minimize){
+    df_thresh = df_thresh %>%
+      arrange(perf)
+  }
+  best_threshold = df_thresh$threshold[1]
+  
+  # evaluate all performance on both train and test with best threshold
+  fold_all_performance = c()
+  list_ROC = list()
+  for (fold_i in total_folds){
+    pred_train = fold_prediction %>%
+      filter(set == "train" & fold == fold_i) %>%
+      mutate(y_pred = ifelse(Prob >= best_threshold, 1, 0) %>% as.character())
+    pred_test = fold_prediction %>%
+      filter(set == "test" & fold == fold_i) %>%
+      mutate(y_pred = ifelse(Prob >= best_threshold, 1, 0) %>% as.character())
+    
+    fold_all_performance = fold_all_performance %>%
+      bind_rows(
+        data.frame(tuned_param) %>%
+          bind_cols(
+            data.frame(threshold = best_threshold, fold = fold_i, obs_train = nrow(pred_train), obs_test = max(c(0, nrow(pred_test))),
+                       perc_1_train = round(sum(pred_train$y_true == "1") / nrow(pred_train), 2),
+                       perc_1_test = round(sum(pred_test$y_true == "1") / nrow(pred_test), 2),
+                       AUC_train = MLmetrics::AUC(y_pred = pred_train$Prob, y_true = pred_train$y_true),
+                       AUC_test = ifelse(nrow(pred_test) != 0, MLmetrics::AUC(y_pred = pred_test$Prob, y_true = pred_test$y_true), NA),
+                       F1_train = MLmetrics::F1_Score(y_true = pred_train$y_true, y_pred = pred_train$y_pred, positive = "1"),
+                       F1_test = ifelse(nrow(pred_test) != 0, MLmetrics::F1_Score(y_true = pred_test$y_true, y_pred = pred_test$y_pred, positive = "1"), NA),
+                       Precision_train = MLmetrics::Precision(y_true = pred_train$y_true, y_pred = pred_train$y_pred, positive = "1"),
+                       Precision_test = ifelse(nrow(pred_test) != 0, MLmetrics::Precision(y_true = pred_test$y_true, y_pred = pred_test$y_pred, positive = "1"), NA),
+                       Recall_train = MLmetrics::Recall(y_true = pred_train$y_true, y_pred = pred_train$y_pred, positive = "1"),
+                       Recall_test = ifelse(nrow(pred_test) != 0, MLmetrics::Recall(y_true = pred_test$y_true, y_pred = pred_test$y_pred, positive = "1"), NA),
+                       Accuracy_train = MLmetrics::Accuracy(y_true = pred_train$y_true, y_pred = pred_train$y_pred),
+                       Accuracy_test = ifelse(nrow(pred_test) != 0, MLmetrics::Accuracy(y_true = pred_test$y_true, y_pred = pred_test$y_pred), NA), stringsAsFactors = F)
+          )
+      )
+    
+    ROC_train = rocit(score= pred_train$Prob, class=pred_train$y_true)
+    ROC_train = data.frame(x = ROC_train$FPR, y = ROC_train$TPR)
+    if (nrow(pred_test) != 0){
+      ROC_test = rocit(score= pred_test$Prob, class=pred_test$y_true)
+      ROC_test = data.frame(x = ROC_test$FPR, y = ROC_test$TPR)
+    } else {
+      ROC_test = NULL
+    }
+    list_ROC[[paste0("fold_", fold_i)]] = list(ROC_train = ROC_train,
+                                               ROC_test = ROC_test)
+  } # fold_i
+  
+  tot_diff=seconds_to_period(difftime(Sys.time(), start_time, units='secs'))
+  total_time = paste0(lubridate::hour(tot_diff), 'h:', lubridate::minute(tot_diff), 'm:', round(lubridate::second(tot_diff)))
+  
+  return(list(best_threshold = best_threshold,
+              optim_perf = df_thresh$perf[1],
+              threshold_list = df_thresh,
+              fold_all_performance = fold_all_performance,
+              list_ROC = list_ROC,
+              fold_model_fit = fold_model_fit,
+              parameter_set = parameter_set,
+              tuned_param = tuned_param,
+              total_time = total_time))
+}
+
+# Bayesian tuning machine learning
+ml_tuning = function(df_work, algo_type, cv_ind, prob_thresh_cv, tuning_crit = "F1_test", tuning_crit_minimize = F,
+                     save_RDS_additional_lab = '',
+                     rds_folder = './Distance_to_Default/Checkpoints/ML_model/'){
+  
+  # https://mlrmbo.mlr-org.com/articles/supplementary/mixed_space_optimization.html
+  
+  # df_work: dataset with target variable ("y") and predictors
+  # algo_type: used in fit_model_with_cv()
+  # cv_ind: dataframe ["ind", "fold"] of index for each fold.
+  # no_cv_train_ind: index for train set for fitting without cross-validation
+  # prob_thresh_cv: threshold to convert probabilities into class. If "best" optimal value is evaluated according to tuning_crit
+  # tuning_crit: criterion to be optimized - "AUC" or "Precision" or "Recall" or "Accuracy" for "_test" or "_train"
+  # tuning_crit_minimize: whether to minimize or maximize tuning_crit
+  # save_RDS_additional_lab: adds prefix to saved rds for parameters combination reloading
+  # rds_folder: folder for checkpoints - should finish with "/"
+  
+  # bayes_options: list of options
+  #                - par.set: tunable parameters (makeParamSet)
+  #                - non_tunable_param: non-tunable parameters (list)
+  #                - max_iter: maximum iterations after initial design
+  #                - design_iter: initial design iterations
+  n_vars = ncol(df_work) - 1   # df_work has target variable
+  n_obs = cv_ind %>%
+    group_by(fold) %>%
+    summarise(obs = n(), .groups = "drop") %>%
+    pull(obs) %>%
+    min()
+  bayes_parameter_set = list(
+    `Elastic-net` = list(
+      par.set = makeParamSet(
+        makeNumericParam("alpha", 0, 1)
+      ),
+      non_tunable_param = list(standardize = F, 
+                               intercept = T, 
+                               parallel = T,
+                               type.measure = "auc",
+                               lambda_final = "lambda.1se",
+                               family = "binomial",
+                               n_fold_cvgmlnet = 10,
+                               fixed_variables = fixed_variables),
+      max_iter = 20,   # todo: rimetti
+      design_iter = 10   # todo: rimetti
+    ),
+    
+    Random_Forest = list(
+      par.set = makeParamSet(
+        makeIntegerParam("num.trees", 50, 500),#makeIntegerParam("num.trees", 50, 1000),   # todo: rimetti
+        makeIntegerParam("mtry", 1, (n_vars - 1)),
+        makeIntegerParam("min.node.size", 1, as.integer(n_obs / 2))
+      ),
+      non_tunable_param = NULL,
+      max_iter = 30,   # todo: rimetti
+      design_iter = 20   # todo: rimetti
+    ),
+    
+    MARS = list(
+      par.set = makeParamSet(
+        makeIntegerParam("degree", 1, 5)
+      ),
+      non_tunable_param = NULL,
+      max_iter = 1,
+      design_iter = 5
+    )
+  )
+  bayes_options = bayes_parameter_set[[algo_type]]
+  par.set = bayes_options$par.set
+  non_tunable_param = bayes_options$non_tunable_param
+  max_iter = bayes_options$max_iter
+  design_iter = bayes_options$design_iter
+  tunable_names = names(par.set$pars)
+  
+  # check if rds_folder ends with "/"
+  if (substr(rds_folder, nchar(rds_folder), nchar(rds_folder)) != "/"){rds_folder = paste0(rds_folder, "/")}
+  
+  # save RDS with vector of rds path to reload model_fit in order to retrieve all folds performance fold_all_performance from fit_model_with_cv()
+  saveRDS(c(), paste0(rds_folder, "current_model_path_list.rds"))
+  
+  # function to be optimized
+  fun = function(x) {
+    
+    # x is the names list of parameters and their values
+    
+    p_names = x %>% unlist() %>% names()
+    p_values = x %>% unlist()
+    p_order = match(p_names, tunable_names)
+    param_compact_label = paste0(p_names[p_order], "_", p_values[p_order]) %>% paste0(collapse = ".")
+    
+    out_label = paste0(ifelse(save_RDS_additional_lab != '', paste0(save_RDS_additional_lab, '_'), ''),
+                       param_compact_label, '.rds')
+    reload_err = try(model_fit <- suppressWarnings(readRDS(paste0(rds_folder, out_label))), silent = T)
+    
+    if (class(reload_err) == "try-error"){
+      model_fit = fit_model_with_cv(df_work = df_work, cv_ind = cv_ind, algo_type = algo_type,
+                                    parameter_set = x, non_tunable_param = non_tunable_param,
+                                    no_cv_train_ind = NULL, no_cv_test_ind = NULL,
+                                    prob_thresh_cv = prob_thresh_cv, tuning_crit = tuning_crit, tuning_crit_minimize = tuning_crit_minimize)
+      model_fit[["fold_model_fit"]] = NULL  # remove fitted model to save space
+      model_fit$param_compact_label = param_compact_label
+      saveRDS(model_fit, paste0(rds_folder, out_label))
+    }
+    
+    # add model path to current_model_path_list
+    current_model_path_list = readRDS(paste0(rds_folder, "current_model_path_list.rds"))
+    saveRDS(c(current_model_path_list, paste0(rds_folder, out_label)), paste0(rds_folder, "current_model_path_list.rds"))
+    
+    perf = model_fit$optim_perf
+    
+    return(perf)
+  }
+  
+  # set parameter space
+  objfun = makeSingleObjectiveFunction(
+    name = "ML_tuning",
+    fn = fun,
+    par.set = par.set,
+    has.simple.signature = FALSE,
+    minimize = TRUE
+  )
+  
+  # set surrogate and number of design
+  surr.rf = makeLearner("regr.randomForest", predict.type = "se")
+  
+  control = makeMBOControl()
+  control = setMBOControlInfill(
+    control = control,
+    crit = makeMBOInfillCritAdaCB(cb.lambda.start = 4, cb.lambda.end = 0.1)
+  )
+  control = setMBOControlTermination(
+    control = control,
+    iters = max_iter    # maximum number of iteration, not including the ones used to generate the design
+  )
+  
+  design = suppressWarnings(generateDesign(n = design_iter, par.set = getParamSet(objfun)))
+  
+  # run optimizer
+  start = Sys.time()
+  mlr::configureMlr(show.info = FALSE, show.learner.output = FALSE, on.learner.warning = "quiet")
+  results = suppressWarnings(mbo(objfun, design = design, learner = surr.rf, control = control, show.info = F))
+  tot_diff=seconds_to_period(difftime(Sys.time(),start, units='secs'))
+  
+  # reload fold performance for all combinations (both single fold and folds' average)
+  current_model_path_list = readRDS(paste0(rds_folder, "current_model_path_list.rds"))
+  oo = file.remove(paste0(rds_folder, "current_model_path_list.rds"))
+  if (length(current_model_path_list) != nrow(as.data.frame(results$opt.path))){cat("\n #######", algo_type, "error: number of saved models doesnt't match optimization combinations")}
+  fold_all_performance = c()
+  for (path in current_model_path_list){
+    model_fit = readRDS(path)
+    fold_all_performance = fold_all_performance %>%
+      bind_rows(model_fit$fold_all_performance %>%
+                  mutate(rds = path,
+                         param_compact_label = model_fit$param_compact_label)) %>%
+      unique()
+  }
+  fold_all_performance_avg = fold_all_performance %>%
+    select(-starts_with("obs_"), -starts_with("perc_1_"), -fold) %>%
+    group_by_at(c(tunable_names, "threshold", "rds", "param_compact_label")) %>%
+    summarize_all(list(avg = function(x) mean(x, na.rm = T),
+                       std = function(x) sd(x, na.rm = T))) %>%
+    select(names(.) %>% sort()) %>%
+    select(all_of(tunable_names), threshold, everything()) %>%
+    relocate(param_compact_label, .after = last_col()) %>%
+    relocate(rds, .after = last_col()) %>%
+    unique()
+
+  # save results
+  optimization_results = as.data.frame(results$opt.path, stringsAsFactors = F) %>%
+    mutate(
+      final_state = results$final.state,
+      total_time = paste0(lubridate::hour(tot_diff), 'h:', lubridate::minute(tot_diff), 'm:', round(lubridate::second(tot_diff)))) %>%
+    rename(!!sym(tuning_crit) := y) %>%
+    left_join(fold_all_performance_avg, by = tunable_names) %>%
+    select(all_of(tunable_names), threshold, everything()) %>%
+    mutate_if(is.factor, as.character) %>%
+    unique()
+  
+  optimization_results_all_folds = as.data.frame(results$opt.path, stringsAsFactors = F) %>%
+    mutate(
+      final_state = results$final.state,
+      total_time = paste0(lubridate::hour(tot_diff), 'h:', lubridate::minute(tot_diff), 'm:', round(lubridate::second(tot_diff)))) %>%
+    rename(!!sym(paste0("optim_", tuning_crit)) := y) %>%
+    left_join(fold_all_performance, by = tunable_names) %>%
+    select(all_of(tunable_names), threshold, fold, everything()) %>%
+    mutate_if(is.factor, as.character) %>%
+    unique()
+  
+  # write.table(optimization_results, paste0(rds_folder, '00_Optimization_list_', save_RDS_additional_lab, '.csv'), sep = ';', row.names = F, append = F)
+  # write.table(optimization_results_all_folds, paste0(rds_folder, '01_Optimization_list_ALLFOLDS_', save_RDS_additional_lab, '.csv'), sep = ';', row.names = F, append = F)
+  
+  # evaluate best parameters set
+  optimization_results = optimization_results %>%
+    arrange(desc(!!sym(tuning_crit)))
+  if (tuning_crit_minimize){
+    df_thresh = df_thresh %>%
+      arrange(!!sym(tuning_crit))
+  }
+  best_parameters = optimization_results %>%
+    filter(row_number() == 1) %>%
+    select(all_of(tunable_names))
+  
+  return(list(optimization_results = optimization_results,
+              optimization_results_all_folds = optimization_results_all_folds,
+              best_parameters = best_parameters,
+              non_tunable_param = non_tunable_param))
+}

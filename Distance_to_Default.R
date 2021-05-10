@@ -1,5 +1,5 @@
 
-utils::memory.limit(64000)
+utils::memory.limit(32000)
 library(haven)
 library(readxl)
 library(stringr)
@@ -23,10 +23,20 @@ library(rpca)
 library(uwot)   # for UMAP
 library(DescTools)
 library(LatticeDesign)
-library(rgl)
 library(PKPDmisc)
 library(parallelMap)
 library(parallel)
+library(doParallel)
+library(glmnet)
+library(HEMDAG)
+library(MLmetrics)
+library(ROCit)
+library(fastDummies)
+library(wesanderson)
+library(ranger)
+library(earth)
+library(RSBID)
+library(rgl)
 library(data.table)
 library(dplyr)
 library(tidyverse)
@@ -328,10 +338,6 @@ reload_df = T  # reload df_final
 #   ) %>%
 #   mutate(dd = round(value_ricalc - value_original, 5))
 
-
-
-
-
 # remove highly correlated variables
 corr_thresh = 0.4   # theshold for partial correlation. Correlation > 0.7 is always removed
 {
@@ -396,103 +402,11 @@ corr_thresh = 0.4   # theshold for partial correlation. Correlation > 0.7 is alw
 df_final_small = df_final %>%
   select(-all_of(setdiff(var_to_remove, short_list)))
 
-# baseline model FLAG_Default vs short list BILA
-{
-
-  # https://cran.r-project.org/web/packages/lme4/vignettes/lmer.pdf
-  
-  # we want to estimate y_it = A + B*x_it + u_i + e_it
-  #                            u_i individual error component (doesn't change over time)
-  #                            e_it idiosyncratic error component
-  # - if u_i is correlated with X use the FIXED EFFECT (or WITHIN) so there is an individual-specific effect driving the data
-  # - if u_i is uncorrelated with X use the RANDOM EFFECT so there's an individual+time-specific effect driving the data
-  # - if u_i is missing use the POOLED model i.e. you assume there's no actual panel structure
-  
-  short_list = c('BILA_cashflow_ricavi', 'BILA_totdebiti_su_patrim', 'BILA_debitifornit_su_patrim', 'BILA_durata_scorte',
-                 'BILA_liquid_imm', 'BILA_oneri_valagg', 'BILA_patr_su_patrml', 'BILA_roa', 'BILA_rotazione_circolante', 'BILA_turnover')
-  control_variable = c('segmento_CRIF', 'Dimensione_Impresa', 'Industry', 'Dummy_industry')
-  df_reg = df_final %>% select(abi, ndg, year, FLAG_Default, all_of(control_variable), all_of(short_list)) %>%
-    mutate(abi_ndg = paste0(abi, '_', ndg)) %>%
-    select(-abi, -ndg) %>%
-    select(abi_ndg, everything()) %>%
-    mutate_at(all_of(short_list), ~scale(.)) %>%
-    mutate_at(all_of(short_list), function(x) { attributes(x) <- NULL; x }) %>%
-    mutate(Industry = substr(Industry, 1, 8)) %>%
-    mutate_at(all_of(control_variable), ~as.factor(.))
-  
-  # check correlation and partial correlation
-  correlation_list = evaluate_correlation(df_reg %>% select(all_of(short_list)))
-
-  
-  ctrl = 'Dummy_industry'
-  ff = c()
-  for (v in short_list){
-    ff = c(ff, paste0('(', v, '|', ctrl, ')'))
-  }
-  form = as.formula(paste('FLAG_Default', paste(ff, collapse = " + "), sep = " ~ "))
-  
-  form = as.formula(paste('FLAG_Default ~', paste(short_list, collapse = " + "), '+ (', paste(short_list, collapse = " + "), ') |', ctrl))
-  
-  
-  
-  fit_mixed <- glmer(form, data = df_reg[1:1000,], family = binomial(link = "logit"),
-                     control = glmerControl(optimizer ='optimx', optCtrl=list(method='nlminb')))
-  ss2 = summary(fit_mixed)
-  
-  
-  ss1 = summary(fit_mixed)
-  
-  
-  confint.merMod(fit_mixed,method="profile") 
-  
-  
-  
-  # https://cran.r-project.org/web/packages/plm/vignettes/plmPackage.html#fnref3
-  # conver to panel data.frame
-  # df_rep_pdata <- pdata.frame(df_reg, index=c("abi_ndg", "year"), drop.index=TRUE, row.names=TRUE)
-  # 
-  # # check balance (if gamma and nu are close to 1 then is balanced)
-  # punbalancedness(df_rep_pdata)
-  # 
-  # form = as.formula(paste('FLAG_Default', paste(short_list, collapse = " + "), sep = " ~ "))
-  # 
-  # # fit fixed-effect with different effects
-  # for (eff in c('individual', 'time', 'twoways')){
-  #   errR = try(mod <- plm(form, data = df_rep_pdata, model = "within", effect = eff), silent = T)
-  #   if(is(errR,'try-error')){
-  #   } else {
-  #     sink(paste0('./Distance_to_Default/Baseline_regression/FixEff_', eff, '_summary.txt'))
-  #     cat('\n------------------------  Testing effects  ------------------------\n\n')
-  #     print(plmtest(form, data = df_rep_pdata, effect = eff))
-  #     cat('\n\n\n\n------------------------  Fitting Model  ------------------------\n\n')
-  #     print(summary(mod))
-  #     sink()
-  #   }
-  # }
-  # 
-  # # fit random-effect with different effects
-  # for (eff in c('individual', 'time', 'twoways')){
-  #   errR = try(mod <- plm(form, data = df_rep_pdata, model = "random", effect = eff), silent = T)
-  #   if(is(errR,'try-error')){
-  #   } else {
-  #     sink(paste0('./Distance_to_Default/Baseline_regression/RanEff_', eff, '_summary.txt'))
-  #     cat('\n------------------------  Testing effects  ------------------------\n\n')
-  #     print(plmtest(form, data = df_rep_pdata, effect = eff))
-  #     cat('\n\n\n\n------------------------  Fitting Model  ------------------------\n\n')
-  #     print(summary(mod))
-  #     sink()
-  #   }
-  # }
-  
- 
-  
-}
-
 # evaluate embeddings and evaluate UMAP 3D visualization
 reload_embedding_input = T    # reload embedding input (scaled original data)
 reload_PCA = T    # reload Robust PCA embedding
 reload_autoencoder = T   # reload autoencoder embedding
-tune_autoencoder = F    # tune autoencoder parameters
+tune_autoencoder_flag = F    # tune autoencoder parameters
 reload_peers_embedding = T    # reload list of embedding and predicted embedding on peers dataset - requires Keras environment and will conflict with
                               # densMAP python environment when evaluating visualization data
 reload_embedding_visualization = T    # reload evaluation of UMAP
@@ -788,7 +702,7 @@ run_embedding_best_report = F    # create embedding visualization report for bes
 
     # test different activation function and architectures
     {
-      if (tune_autoencoder){
+      if (tune_autoencoder_flag){
         tune_autoencoder = autoencoder_tuning(dataset = df_emb_input, NA_masking = 0, masking_value = 0, save_RDS_additional_lab = 'AE_emb',
                                               batch_size = 500, epochs = 300, max_iter = 80, design_iter = 15)
         
@@ -1323,10 +1237,10 @@ run_embedding_best_report = F    # create embedding visualization report for bes
       rm(best_comb_visual)
     }
   }
-}  
+}
   
 # test different clustering variables to assign peers to each CRIF observation
-reload_manual_label = T
+reload_manual_label = T    # if FALSE evaluate median/percentile clusters 
 reload_cluster_performance = T
 plot_manual_clustering = F
 {
@@ -1742,30 +1656,40 @@ plot_manual_clustering = F
                             output_format = "html_document", output_file = paste0("02b_Manual_Clustering_visualization_", label_type, ".html"))
         } # label_type
         for (rr in rds_list){file.remove(rr)}
-        rm(best_subset, best_ind_overall, clustering_performance_summary, summary_table, class_table, plot_list)
+        rm(best_subset, best_ind_overall, summary_table, class_table, plot_list)
       }
     }
   }
   
   # assign closest peers to each CRIF data (cluster label is Company_name_Latin_alphabet)
   {
-    # todo: capisci se fare la distanza sul df_final_small o anche sugli embedding
+    # todo: capisci se fare la distanza sul df_final_small o anche sugli embedding - il plot lo puoi fare come sopra (magari aggiungi anche questi clustering nel loop)
+    #        forse è meglio usare gli embedding (devi scegliere quello che funziona meglio, in base al Reconst_RMSE?) - per i long devi fare prima la media del vettore
+    #        dei 3 anni e poi calcolare il Peer più vicino (o puoi fare per majority voting - se c'è pareggio(difficile) scegli a caso)
+    
+    # todo:  aggiungi il clustering in list_manual_cluster ma metti un prefisso tipo "POINTWISE_" per far capire sotto quando assegnare la DD puntualmente
+    #         o facendo la media dei peers nel clustering "manuale" mappato sui peers (nella DD si assegna l'etichetta median/perc, si fanno le medie di A, L e si calcola la DD media)
   }
   
   # evaluate best clusterization on CRIF data and assign peers to each cluster (cluster label is a "set" of Company_name_Latin_alphabet)
   {
-    # todo: capisci se fare il clustering sul df_final_small o anche sugli embedding
+    # todo: capisci se fare il clustering sul df_final_small o anche sugli embedding. Leggi sopra, la vicinanza dei peers si può calcolare sia dal centroide sia con
+    #        altre misure che tengono conto di tutti i punti). In questo caso l'embedding migliore si può scegliere in base alle performance del clustering.
+    #         Magari lo si usa anche per trovare il migliore nel caso precedente
   }
   
-  rm(best_comb_visual)
+  rm(best_comb_visual, clustering_performance_summary)
 }
 
 # evaluate Distance to Default - 2014 is removed
 {
   # evaluate DD in the following way:
-  #  - evaluate peers DD and map to abi+ndg with clustering label (peers DD are averaged over same class label)
-  #  - evaluate peers asset volatility and use abi+ndg Asset and Equity
-  #  - todo: ogni abi+ndg può essere associato ad un singolo peer e quindi si possono ripetere i due casi precedenti
+  #  - for manual_cluster with median/percentile: map labels onto peers and evaluate peers average A, L and volatility and compute DD in order to
+  #                                               map DD/Volatility by class label
+  #  - for manual_cluster with single observation clustering: map peers DD/Volatility directly by peers ID
+  #  - evaluate DD on CRIF data:
+  #    + use peers DD of corresponding class mapping "_-_peers_DD"
+  #    + use peers Volatility of corresponding class mapping and use A and L from each CRIF observation to calculate DD "_-_peers_Volatility"
   
   #### if equity<0 we evaluate liability=asset-equity and if the resulting L is negative, we set L = 1e-16 so that ln(L) is quite big (negative)
   #### and the resulting DD is quite high (so low PD). Negative L means that equity is bigger than asset so the firm has no debt
@@ -1844,29 +1768,6 @@ plot_manual_clustering = F
         summarise(Volatility = sd(Close), .groups = "drop") %>%
         filter(year <= 2013 & year >= 2012)
       
-      # todo: rimuovi ----- per ora copio il valore del 2013 a quelli per cui manca il 2014
-      {
-        # peers_all_years = DD_peers_volatility_annual %>%
-        #   filter(year == 2014) %>%
-        #   pull(Company_name_Latin_alphabet)
-        # 
-        # DD_peers_volatility_annual = DD_peers_volatility_annual %>%
-        #   filter(Company_name_Latin_alphabet %in% peers_all_years) %>%
-        #   bind_rows(DD_peers_volatility_annual %>%
-        #               filter(!Company_name_Latin_alphabet %in% peers_all_years),
-        #             DD_peers_volatility_annual %>%
-        #               filter(year == 2013) %>%
-        #               mutate(year = 2014) %>%
-        #               filter(!Company_name_Latin_alphabet %in% peers_all_years))
-        # 
-        # check_to_delete = DD_peers_volatility_annual %>%
-        #   group_by(Company_name_Latin_alphabet) %>%
-        #   summarise(yy = uniqueN(Volatility)) %>%
-        #   group_by(yy) %>%
-        #   summarise(count = n())
-        # if (check_to_delete %>% filter(yy == 3) %>% pull(count) != length(peers_all_years)){cat('\n###### error in filling 2014 missing volatility')}
-        # rm(check_to_delete)
-        }
       rm(files_list, peers_match, DD_peers_volatility_summary)
       }
     
@@ -1879,7 +1780,7 @@ plot_manual_clustering = F
       left_join(DD_peers_volatility_annual, by = c("Company_name_Latin_alphabet", "year")) %>%
       left_join(DD_risk_free_yield %>% select(year, risk_free_yield), by = "year") %>%
       mutate(T = 1) %>%
-      mutate(Tot_Liability = ifelse(Tot_Liability < 0, 1e-16, Tot_Liability)) %>%
+      mutate(Tot_Liability = ifelse(Tot_Liability <= 0, 1e-16, Tot_Liability)) %>%
       mutate(DD = (log(Tot_Attivo / Tot_Liability) + (risk_free_yield - Volatility^2 / 2) * T) / (Volatility * sqrt(T))) %>%
       mutate(PD = round(pnorm(-DD), 3))
     write.table(DD_peers, './Distance_to_Default/Stats/03a_ORBIS_peers_DD.csv', sep = ';', row.names = F, append = F)
@@ -1894,13 +1795,20 @@ plot_manual_clustering = F
       for (manual_label in manual_clustering_label){
         cluster_data = list_manual_cluster[[manual_label]][["cluster_label"]]
         
+        
+        # todo: quando ci sarà il clustering puntale, usa il prefisso "POINTWISE_" per individuarli e assegnare la DD puntualmente anziché quella media
+        #        calcolata sul cluster dei peers
+        #       quindi ci sarà un'alternativa per il peers_ref, la label deve essere il company_ID e tutto il resto dovrebbe essere uguale
+        
+        
+        
         # evaluate class average (by year) for A, L, r and volatility and re-evaluate DD/PD
         peers_ref = DD_peers %>%
           left_join(map_cluster_on_peers(label_type = manual_label, categorical_variables,
                                          df_peers_long, ORBIS_mapping, ORBIS_label), by = "Company_name_Latin_alphabet") %>%
           group_by(Label, year) %>%
           summarise_at(vars(Tot_Attivo, Tot_Liability_orig, Volatility, risk_free_yield, `T`), mean) %>%
-          mutate(Tot_Liability = ifelse(Tot_Liability_orig < 0, 1e-16, Tot_Liability_orig)) %>%
+          mutate(Tot_Liability = ifelse(Tot_Liability_orig <= 0, 1e-16, Tot_Liability_orig)) %>%
           mutate(DD = (log(Tot_Attivo / Tot_Liability) + (risk_free_yield - Volatility^2 / 2) * T) / (Volatility * sqrt(T))) %>%
           mutate(PD = round(pnorm(-DD), 3))
         
@@ -1920,7 +1828,7 @@ plot_manual_clustering = F
           left_join(DD_risk_free_yield %>% select(year, risk_free_yield), by = "year") %>%
           left_join(peers_ref %>% select(Label, year, Volatility, `T`), by = c("year", "Label")) %>%
           mutate(Tot_Liability = Tot_Attivo - Tot_Equity) %>%
-          mutate(Tot_Liability = ifelse(Tot_Liability < 0, 1e-16, Tot_Liability)) %>%
+          mutate(Tot_Liability = ifelse(Tot_Liability <= 0, 1e-16, Tot_Liability)) %>%
           mutate(DD = (log(Tot_Attivo / Tot_Liability) + (risk_free_yield - Volatility^2 / 2) * T) / (Volatility * sqrt(T))) %>%
           mutate(PD = round(pnorm(-DD), 3))
         if (nrow(df_match_Volat) != nrow(df_final_small %>% filter(year != 2014))){cat('\n\n##### left_join mismatch for df_match:', manual_label)}
@@ -1936,7 +1844,7 @@ plot_manual_clustering = F
     
     # apply closest peers cluster
     {
-      # todo:
+      # todo: si dovrebbe poter già includere in peers_ref
     }
     
     # apply CRIF data cluster
@@ -1947,10 +1855,727 @@ plot_manual_clustering = F
 }
 
 # run logistic regression for each DD assignment in list_DD_CRIF_data
+run_oversample_test = F    # run test for oversampling percentage
+run_tuning = T    # force parameters tuning with cross-validation. If FALSE saved tuned parameters will be reloaded
+fit_final_model = T    # force fit model on full dataset with tuned parameters and reloaded cross-validated performance. If FALSE saved model will be reloaded
+{
+  # variables to be used as control variables (dummy)
+  control_variables = c('Dummy_industry', 'Industry' , 'Dimensione_Impresa',  'segmento_CRIF', 'Regione_Macro') # todo: rimetti
+  target_var = "FLAG_Default"
+  additional_var = "PD"   # variable to be added to baseline model to check added value
+  fixed_variables = c("PD")   # variables to be always kept in the model, i.e. no shrinkage is applied
+  n_fold = 5   # todo: rimetti
+  algo_set = c("Elastic-net", "Random_Forest", "MARS")    # see fit_model_with_cv() for allowed values
+  prob_thresh_cv = "best"    # probability threshold for cross-validation (in tuning)
+  prob_thresh_full = "best"    # probability threshold for full dataset
+  tuning_crit = "F1_test"  # "F1" or "AUC" or "Precision" or "Recall" or "Accuracy" for "_test" or "_train"
+  tuning_crit_full = "F1_train"   # same of tuning_crit but applied to full dataset model when using prob_thresh_full = "best"
+  tuning_crit_minimize = F    # if TRUE tuning_crit is minimized
+  tuning_crit_minimize_full = F    # if TRUE tuning_crit is minimized
+  final_oversample_perc = 100     # percentage of oversampling (SMOTE)
+  
+  
+  # define perimeter
+  df_main = df_final_small %>%
+    filter(year != 2014) %>%
+    mutate(abi_ndg = paste0(abi, "_", ndg)) %>%
+    mutate(Industry = substr(Industry, 1, 1),
+           segmento_CRIF = gsub(" ", "_", segmento_CRIF),
+           Regione_Macro = gsub("-", "_", Regione_Macro)) %>%
+    select(-abi, -ndg) %>%
+    select(abi_ndg, everything()) %>%
+    as.data.frame()
+  
+  # scale df_main, name target_var "y" and save scaling parameters for model coefficients rescaling
+  scaled_regressor_main = df_main %>%
+    select(starts_with("BILA")) %>%
+    mutate_all(~scale(., center=T, scale=T))
+  df_main_scaling = c()
+  for (var in colnames(scaled_regressor_main)){
+    tt = scaled_regressor_main %>% pull(all_of(var)) %>% attributes()
+    df_main_scaling = df_main_scaling %>%
+      bind_rows(data.frame(variable = var, center = tt$`scaled:center`, scale = tt$`scaled:scale`, stringsAsFactors = F))
+    scaled_regressor_main = scaled_regressor_main %>%
+      mutate_at(vars(all_of(var)), function(x) { attributes(x) <- NULL; x })
+    rm(tt)
+  }
 
+  # check variable distribution for each target class
+  {
+    # all_BILA = df_main %>%
+    #   select(abi_ndg, year) %>%
+    #   left_join(
+    #   df_final %>%
+    #   mutate(abi_ndg = paste0(abi, "_", ndg)) %>%
+    #   select(abi_ndg, year, starts_with("BILA_")), by = c("abi_ndg", "year")) %>%
+    #   select(-abi_ndg, -year)
+    
+    df_check = 
+      scaled_regressor_main %>%
+      # all_BILA %>%
+      mutate(rows = 1:n()) %>%
+      gather('variable', 'val', -rows) %>%
+      left_join(df_main %>%
+                  select(all_of(target_var)) %>%
+                  rename(y = !!sym(target_var)) %>%
+                  mutate(rows = 1:n()), by = "rows") %>%
+      mutate(y = as.factor(y))
+    
+    png(paste0('./Distance_to_Default/Results/00_variable_distribution.png'), width = 12, height = 40, units = 'in', res=200)
+    plot(ggplot(df_check,
+                # filter(variable == "BILA_ARIC_VPROD"),
+                aes(x=val, fill = y)) +
+           geom_density(alpha = 0.5) +
+           scale_fill_manual(values = c("blue", "red")) +
+           labs(title = "Distribution of input variables by target",
+                y = "Density", x = "Values") +
+           facet_wrap(~variable, scales = "free", ncol = 3) +
+           theme(axis.text.y = element_blank(),
+                 axis.ticks.y = element_blank(),
+                 axis.text.x = element_text(size = 14),
+                 axis.title = element_text(size = 24),
+                 plot.title = element_text(size=30),
+                 plot.subtitle = element_text(size=22),
+                 legend.title=element_text(size=20),
+                 legend.text=element_text(size=17),
+                 strip.text = element_text(size = 14),
+                 panel.background = element_rect(fill = "white", colour = "black"),
+                 panel.grid.major.x = element_line(colour = "grey", linetype = 'dashed', size = 0.4),
+                 panel.grid.minor.x = element_line(colour = "grey", linetype = 'dashed', size = 0.4))
+    )
+    dev.off()
+    rm(df_check)
+  }
+  
+  # test impact of oversampling
+  {
+    if (run_oversample_test){
+      contr_var = NULL
+      df_main_work = df_main %>%
+        select(abi_ndg, year, all_of(target_var)) %>%
+        rename(y = !!sym(target_var)) %>%
+        bind_cols(scaled_regressor_main) %>%
+        `rownames<-`(paste0("row_", 1:nrow(.))) %>%
+        select(-abi_ndg, -year)
+      if (sum(is.na(df_main_work)) > 0){cat('\n###### missing in df_main_work')} 
+      
+      strat_fold = create_stratified_fold(df_main %>%
+                                            rename(TARGET = !!sym(target_var)) %>%
+                                            select(all_of(setdiff(c("TARGET", contr_var), ""))) %>%
+                                            mutate_if(is.character, as.factor), inn_cross_val_fold = 1, out_cross_val_fold = n_fold,
+                                          out_stratify_columns = setdiff(c("TARGET", contr_var), ""), out_stratify_target = T)
+      cv_ind = strat_fold$final_blocking %>%
+        rename(fold = block,
+               ind = index)
+      if (nrow(cv_ind) != nrow(df_main_work)){cat('\n##### observation missing in cv_ind')}
+      cv_ind_check = cv_ind %>% group_by(ind) %>% summarise(count = n())
+      if (nrow(cv_ind_check) != nrow(df_main_work) | max(cv_ind_check$count) != 1){cat('\n##### repeated observation in cv_ind')}
+      
+      test_oversample = c()
+      start_time_overall = Sys.time()
+      cat('\n--- Testing oversampling percentage:')
+      for (oversample_perc in c(25, 50, 75, 100)){
+        
+        cat('  testing percentage:', oversample_perc, end = '')
+        
+        start_time = Sys.time()
+        for (alpha in alpha_set){
+          
+          for (fold_i in 1:n_fold){
+            test_ind = cv_ind %>%
+              filter(fold == fold_i) %>%
+              pull(ind)
+            train_ind = cv_ind %>%
+              filter(fold != fold_i) %>%
+              pull(ind)
+            data_test = df_main_work[test_ind, ]
+            data_train = df_main_work[train_ind, ]
+            
+            for (seed in c(11, 22, 33, 44, 55, 66)){
+              
+              # oversample train set
+              set.seed(seed)
+              data_train_over <- suppressMessages(SMOTE(data = data_train %>% mutate(y = as.factor(y)), outcome = "y", perc_maj = oversample_perc)) %>%
+                mutate(y = as.numeric(as.character(y)))
+              
+              ## baseline regression
+              oversample_cv = get_glmnet_performance(data_train_over, data_test = data_test, alpha = alpha, standardize = F, intercept = T, parallel = T,
+                                                     type.measure = "auc", lambda_final = "lambda.1se", family = "binomial",
+                                                     fixed_variables = fixed_variables, n_fold_cvgmlnet = n_fold_cvgmlnet, prob_thresh = prob_thresh_cv)
+              
+              
+              
+              test_oversample = test_oversample %>%
+                bind_rows(
+                  oversample_cv$perf_metrics %>%
+                    mutate(oversample_perc = oversample_perc, orig_train_obs = nrow(data_train), orig_perc_1 = round(sum(data_train$y) / nrow(data_train) * 100, 1),
+                           over_train_obs = nrow(data_train_over), over_perc_1 = round(sum(data_train_over$y) / nrow(data_train_over) * 100, 1),
+                           alpha = alpha, seed = seed, fold = fold_i)
+                )
+              
+              rm(oversample_cv, data_train_over)
+            } # seed
+            rm(data_test, data_train)
+            saveRDS(test_oversample, './Distance_to_Default/Checkpoints/logistic_regression/00_test_oversample.rds')
+          } # fold_i
+        } # alpha
+        tot_diff=seconds_to_period(difftime(Sys.time(), start_time, units='secs'))
+        cat(' elapsed time:', paste0(lubridate::hour(tot_diff), 'h:', lubridate::minute(tot_diff), 'm:', round(lubridate::second(tot_diff))), end = '\r')
+      } # oversample_perc
+      tot_diff=seconds_to_period(difftime(Sys.time(), start_time_overall, units='secs'))
+      cat('\n\nTotal elapsed time:', paste0(lubridate::hour(tot_diff), 'h:', lubridate::minute(tot_diff), 'm:', round(lubridate::second(tot_diff))))
+    } else {
+      test_oversample = readRDS('./Distance_to_Default/Checkpoints/logistic_regression/99_test_oversample.rds')
+    }
+    
+    # plot results
+    plt_perf = "F1"
+    dist_baseline = 1
+    dist_dataset = 0.5
+    
+    perf_lab = ifelse(plt_perf == "F1", "F1-score", plt_perf)
+    y_lim = c(test_oversample %>% pull(paste0(plt_perf, "_train")), test_oversample %>% pull(paste0(plt_perf, "_test"))) %>% range()
+    tt = test_oversample %>%
+      select(oversample_perc, over_perc_1, starts_with(plt_perf)) %>%      # average over fold, seed and alpha
+      gather('measure', 'val', starts_with(plt_perf)) %>%
+      group_by(oversample_perc, over_perc_1, measure) %>%
+      summarize(avg = mean(val, na.rm = T),
+                sd = sd(val, na.rm = T), .groups = "drop") %>%
+      mutate(label = paste0(oversample_perc, "%\n(% of \"1\": ", over_perc_1, "%)")) %>%
+      mutate(measure = gsub(paste0(plt_perf, "_"), "", measure)) %>%
+      left_join(data.frame(oversample_perc = test_oversample %>% arrange(oversample_perc) %>% pull(oversample_perc) %>% unique(), stringsAsFactors = F) %>%
+                  mutate(pos = (1:nrow(.)) * 5), by = "oversample_perc") %>%
+      mutate(position = ifelse(measure == "train", pos - dist_baseline, pos + dist_baseline)) %>%
+      mutate(measure = paste0(capitalize(measure), " set")) %>%
+      rename(`Performance on:` = measure)
+    
+    control_label = tt %>%
+      select(oversample_perc, label, pos) %>%
+      unique() %>%
+      mutate(vertical = zoo::rollmean(pos, k=2, fill = NA))
+    
+    png(paste0('./Distance_to_Default/Results/00_test_oversampling.png'), width = 12, height = 10, units = 'in', res=100)
+    plot(ggplot(tt, aes(x=position, y=avg, color=`Performance on:`)) + 
+           geom_point(size = 8) +
+           scale_color_manual(values = c("blue", "red")) +
+           geom_errorbar(aes(ymin=avg-sd, ymax=avg+sd), width = 0.5, size = 1.7) +
+           geom_vline(xintercept = control_label$vertical %>% setdiff(NA)) +
+           scale_x_continuous(name ="\nOversampling percentage", 
+                              breaks= control_label$pos, labels = control_label$label) +
+           labs(title = "Performance comparison for different oversampling percentage",
+                subtitle = paste0(perf_lab, " is averaged over ", n_fold, " folds, ", uniqueN(test_oversample$alpha), " alphas, ", uniqueN(test_oversample$seed), " seeds"),
+                y = paste0(perf_lab, "\n")) +
+           scale_y_continuous(labels = scales::percent_format(accuracy = 1), limits = c(y_lim[1]*0.8, y_lim[2]*1.2)) +
+           theme(axis.text.y = element_text(size = 16),
+                 axis.text.x = element_text(size = 18),
+                 axis.title = element_text(size = 24),
+                 plot.title = element_text(size=30),
+                 plot.subtitle = element_text(size=26),
+                 legend.title=element_text(size=20),
+                 legend.text=element_text(size=17),
+                 panel.background = element_rect(fill = "white", colour = "black"),
+                 panel.grid.major.y = element_line(colour = "grey", linetype = 'dashed', size = 0.8),
+                 panel.grid.minor.y = element_line(colour = "grey", linetype = 'dashed', size = 0.8))
+    )
+    dev.off()
+  }
+  
+  log_tuning = log_tuning_all_fold = log_fitting = c()
+  start_time_overall = Sys.time()
+  for (model_setting in c("", control_variables)){
+    # model_setting = 'Industry'   # todo: rimuovi
+    
+    if (model_setting == ""){
+      contr_var = NULL
+    } else {
+      contr_var = model_setting
+    }
+    model_setting_lab = ifelse(model_setting == "", "no_control", paste0("control_", model_setting))
+    
+    cat('\n===================== ', model_setting_lab, ' =====================\n')
+    
+    
+    # add dummy
+    if (model_setting != ""){
+      scaled_regressor = scaled_regressor_main %>%
+        bind_cols(dummy_cols(
+          df_main %>% select(all_of(model_setting)),
+          select_columns = model_setting,
+          remove_first_dummy = T,
+          remove_selected_columns = TRUE)
+        )
+      dummy_regressor = setdiff(colnames(scaled_regressor), colnames(scaled_regressor_main))
+    } else {
+      scaled_regressor = scaled_regressor_main
+      dummy_regressor = c()
+    }
+    main_regressor = colnames(scaled_regressor)
+    
+    df_main_work = df_main %>%
+      select(abi_ndg, year, all_of(target_var)) %>%
+      rename(y = !!sym(target_var)) %>%
+      bind_cols(scaled_regressor) %>%
+      `rownames<-`(paste0("row_", 1:nrow(.)))
+    if (sum(is.na(df_main_work)) > 0){cat('\n###### missing in df_main_work')} 
+    
+    ## split data into train and test using stratified sampling
+    # library(HEMDAG)
+    # aa = stratified.cv.data.single.class(1:nrow(df_main_work), which(df_main_work$y == 1), kk=n_fold, seed=23)
+    # cv_ind = c()
+    # for (kk in 1:n_fold){
+    #   cv_ind = cv_ind %>%
+    #     bind_rows(data.frame(fold = kk, ind = c(aa$fold.positives[[kk]], aa$fold.negatives[[kk]])))
+    # }
+    strat_fold = create_stratified_fold(df_main %>%
+                                          rename(TARGET = !!sym(target_var)) %>%
+                                          select(all_of(setdiff(c("TARGET", contr_var), ""))) %>%
+                                          mutate_if(is.character, as.factor), inn_cross_val_fold = 1, out_cross_val_fold = n_fold,
+                                        out_stratify_columns = setdiff(c("TARGET", contr_var), ""), out_stratify_target = T)
+    cv_ind = strat_fold$final_blocking %>%
+      rename(fold = block,
+             ind = index)
+    if (nrow(cv_ind) != nrow(df_main_work)){cat('\n##### observation missing in cv_ind')}
+    cv_ind_check = cv_ind %>% group_by(ind) %>% summarise(count = n())
+    if (nrow(cv_ind_check) != nrow(df_main_work) | max(cv_ind_check$count) != 1){cat('\n##### repeated observation in cv_ind')}
+    
+    # plot fold distribution
+    {
+      final_distr_data = strat_fold$final_distr_data %>%
+        group_by(block) %>%
+        mutate(block = paste0(block, "\n(", sum(Count), " obs)")) %>%
+        ungroup()
+      cmap = c(as.character(wes_palette("Cavalcanti1")), as.character(wes_palette("GrandBudapest1")), as.character(wes_palette("GrandBudapest2")),
+               as.character(wes_palette("Moonrise1")), as.character(wes_palette("FantasticFox1")), as.character(wes_palette("Darjeeling1")),
+               as.character(wes_palette("Zissou1")), as.character(wes_palette("Royal1")), as.character(wes_palette("Rushmore1")))
+      
+      png(paste0('./Distance_to_Default/Results/01_fold_distribution_', model_setting_lab, '.png'), width = 12, height = 10, units = 'in', res=100)
+      plot(ggplot(final_distr_data, aes(fill=Combination, y=perc/100, x=block)) + 
+             geom_bar(position="stack", stat="identity") +
+             scale_y_continuous(labels = scales::percent_format(accuracy = 1)) +
+             labs(y = "Distribution (%)", x = "Folds",
+                  title = paste0("Stratification by: ", paste0(final_distr_data %>% select(-block, -Combination, -Count, -perc) %>% colnames(), collapse = " - "))) +
+             scale_fill_manual(values = cmap) +
+             theme(axis.text.y = element_text(size = 16),
+                   axis.text.x = element_text(size = 16),
+                   axis.title = element_text(size = 22),
+                   plot.title = element_text(size=26),
+                   legend.text=element_text(size=17),
+                   legend.title=element_text(size=20)))
+      dev.off()
+    }
+    
+    # fit regression model with cross-validation and return single final model
+    for (cluster_lab in names(list_DD_CRIF_data)){
+      
+      cat('\n\n    --- Evaluating clustering: ', cluster_lab, ' - ', which(names(list_DD_CRIF_data) == cluster_lab), '/', length(list_DD_CRIF_data),'\n')
+      
+      for (data_type in c("original")){  #, "oversample")){
+        # todo: oversampled dataset must be implemented - see OLD_script_chucks.R for details (oversample should be done also at fold level)
+        
+        for (model in c("baseline", "additional_var")){
+          
+          cat('\n\n        +++ oversample:', data_type, ' - variables:', model, '\n')
+          
+          # define dataset
+          if (model == "baseline"){
+            df_work = df_main_work %>%
+              left_join(list_DD_CRIF_data[[cluster_lab]], by = c("abi_ndg", "year")) %>%
+              select(y, all_of(main_regressor)) %>%
+              `rownames<-`(rownames(df_main_work))
+            
+          } else if (model == "additional_var"){
+            df_work = df_main_work %>%
+              left_join(list_DD_CRIF_data[[cluster_lab]], by = c("abi_ndg", "year")) %>%
+              select(y, all_of(c(main_regressor, additional_var))) %>%
+              `rownames<-`(rownames(df_main_work))
+          }
+          
+          for (algo_type in algo_set){
+            
+            cat('\n\n          # Fitting:', algo_type, '\n')
+            save_RDS_additional_lab = paste0("tuning", "_", model_setting_lab, "_", cluster_lab, "_", model, "_", data_type, "_", algo_type)
+            
+            # run or reload tuning
+            r_err = try(tuning_perf <- suppressWarnings(readRDS(paste0('./Distance_to_Default/Checkpoints/ML_model/02_reload_', save_RDS_additional_lab, '.rds'))), silent = T)
+            if (class(r_err) == "try-error"){tuning_perf = NULL}
+            if (is.null(tuning_perf) | run_tuning){
+              
+              cat('\n            * tuning parameters...', end = '')
+              
+              tuning_perf = ml_tuning(df_work = df_work, algo_type = algo_type, cv_ind = cv_ind, prob_thresh_cv = prob_thresh_cv,
+                                      tuning_crit = tuning_crit, tuning_crit_minimize = tuning_crit_minimize,
+                                      save_RDS_additional_lab = save_RDS_additional_lab, rds_folder = './Distance_to_Default/Checkpoints/ML_model/')
+              
+              saveRDS(tuning_perf, paste0('./Distance_to_Default/Checkpoints/ML_model/02_reload_', save_RDS_additional_lab, '.rds'))
+              cat('Done in', tuning_perf$optimization_results$total_time %>% unique(), '\n')
+              
+            } else {
+              cat('\n            * reloaded best parameters\n')
+            } # run_tuning
+            
+            # select best parameters and fit model on full dataset
+            best_model_RDS_lab = paste0(gsub("tuning_", "fullset_", save_RDS_additional_lab), "_", tuning_perf$optimization_results$param_compact_label[1])
+            best_param_set = tuning_perf$best_parameters
+            non_tunable_param = tuning_perf$non_tunable_param
+            
+            r_err = try(fit_fullset <- suppressWarnings(readRDS(paste0('./Distance_to_Default/Checkpoints/ML_model/03_reload_', best_model_RDS_lab, '.rds'))), silent = T)
+            if (class(r_err) == "try-error"){fit_fullset = NULL}
+            if (is.null(fit_fullset) | fit_final_model){
+              
+              cat('\n            * fitting full-set model...', end = '')
+              
+              fit_fullset = fit_model_with_cv(df_work = df_work, cv_ind = NULL, algo_type = algo_type,
+                                              parameter_set = best_param_set, non_tunable_param = non_tunable_param,
+                                              no_cv_train_ind = c(1:nrow(df_work)), no_cv_test_ind = NULL,
+                                              prob_thresh_cv = prob_thresh_full, tuning_crit = tuning_crit_full, tuning_crit_minimize = tuning_crit_minimize_full)
+              
+              saveRDS(fit_fullset, paste0('./Distance_to_Default/Checkpoints/ML_model/03_reload_', best_model_RDS_lab, '.rds'))
+              cat('Done in', fit_fullset$total_time, '\n')
+              
+            } else {
+              cat('\n            * reloaded full-set model\n')
+            } # fit_final_model
+            
+            # save results
+            setting_block = data.frame(model_setting_lab = model_setting_lab,
+                                       cluster_lab = cluster_lab,
+                                       data_type = data_type,
+                                       model = model,
+                                       algo_type = algo_type, stringsAsFactors = F)
+            
+            log_tuning = log_tuning %>%
+              bind_rows(
+                setting_block %>%
+                  bind_cols(tuning_perf$optimization_results %>%
+                              mutate(best_param = c("yes", rep("", n() -1 ))) %>%
+                              select(-all_of(names(best_param_set))) %>%
+                              select(param_compact_label, best_param, everything()))
+              )
+            
+            log_tuning_all_fold = log_tuning_all_fold %>%
+              bind_rows(
+                setting_block %>%
+                  bind_cols(tuning_perf$optimization_results_all_folds %>%
+                              left_join(best_param_set %>% mutate(best_param = "yes"), by = names(best_param_set)) %>%
+                              select(-all_of(names(best_param_set))) %>%
+                              select(param_compact_label, best_param, everything()))
+              )
+
+            log_fitting = log_fitting %>%
+              bind_rows(
+                setting_block %>%
+                  bind_cols(fit_fullset$fold_all_performance %>%
+                              left_join(tuning_perf$optimization_results %>%
+                                          select(all_of(names(best_param_set)), param_compact_label), by = names(best_param_set)) %>%
+                              select(-all_of(names(best_param_set)), -fold, -ends_with("_test")) %>%
+                              select(param_compact_label, everything()))
+              )
+            
+            write.table(log_tuning, './Distance_to_Default/Checkpoints/ML_model/00_Optimization_list.csv', sep = ';', row.names = F, append = F)
+            write.table(log_tuning_all_fold, './Distance_to_Default/Checkpoints/ML_model/01_Optimization_list_ALLFOLDS.csv', sep = ';', row.names = F, append = F)
+            write.table(log_tuning, './Distance_to_Default/Results/02_Fitted_models_performance.csv', sep = ';', row.names = F, append = F)
+ 
+            # todo: rimuovi, serve per debugging
+            # df_work = df_work_baseline
+            # algo_type = "MARS"# "Random_Forest"# "Elastic-net"
+            # parameter_set = list(alpha = 0.5)
+            # non_tunable_param = list(standardize = F, 
+            #                      intercept = T, 
+            #                      parallel = T,
+            #                      type.measure = "auc",
+            #                      lambda_final = "lambda.1se",
+            #                      family = "binomial",
+            #                      n_fold_cvgmlnet = n_fold_cvgmlnet,
+            #                      fixed_variables = fixed_variables)
+            # parameter_set = list(num.trees = 100,
+            #                      mtry = 5,
+            #                      min.node.size = 20)
+            # parameter_set = list(degree = 2)
+            # 
+            # model_fit = fit_model_with_cv(df_work = df_work_baseline, cv_ind = cv_ind, algo_type = algo_type,
+            #                        parameter_set = parameter_set, non_tunable_param = non_tunable_param,
+            #                        no_cv_train_ind = NULL, no_cv_test_ind = NULL,
+            #                        prob_thresh_cv = prob_thresh_cv, tuning_crit = tuning_crit, tuning_crit_minimize = tuning_crit_minimize)
+            
+          } # algo_type
+        } # model
+      } # data_type
+    } # cluster_lab 
+  } # model_setting
+  tot_diff=seconds_to_period(difftime(Sys.time(), start_time_overall, units='secs'))
+  cat('\n\nTotal elapsed time:', paste0(lubridate::hour(tot_diff), 'h:', lubridate::minute(tot_diff), 'm:', round(lubridate::second(tot_diff))))
+  
+  
+  rm(additional_full, baseline_full, best_alpha, cv_ind, cv_ind_check, data_test_additional, data_test_baseline, data_train_additional, data_train_baseline,
+     df_main_work, df_work_additional, df_work_baseline, final_distr_data, scaled_regressor, strat_fold, tuning_perf)
+  
+  ## create report
+  {
+    # for (cluster_lab in unique(log_fitting$cluster_lab)){}      # todo: cicla
+    cl_lab = "roa_Median_-_peers_Volatility"
+    d_type = "oversample"      # todo: cicla
+    plt_perf = "F1"
+    
+    
+    
+    # performance comparison - test set for cross-validated folds
+    perf_lab = ifelse(plt_perf == "F1", "F1-score", plt_perf)
+    y_lim = c(log_fitting %>% pull(paste0(plt_perf, "_train")), log_tuning %>% pull(paste0(plt_perf, "_test_avg"))) %>% range()
+    dist_baseline = 1
+    dist_dataset = 0.5
+    tt = log_fitting %>%
+      filter(data_type == d_type) %>%
+      filter(cluster_lab == cl_lab) %>%
+      left_join(log_tuning, by = c("model_setting_lab", "cluster_lab", "model", "alpha", "data_type")) %>%
+      select(model_setting_lab, model, starts_with(plt_perf)) %>%
+      gather('measure', 'val', -c(model_setting_lab, model)) %>%
+      mutate(measure = gsub(paste0(plt_perf, "_"), "", measure)) %>%
+      filter(!measure %in% c("train_avg", "train_std")) %>%
+      mutate(type = ifelse(str_detect(measure, "_std|_avg"), "Cross-Validation", "Full dataset")) %>%
+      mutate(dim = ifelse(str_detect(measure, "_std"), "sd", "avg")) %>%
+      setDT() %>%
+      dcast(model_setting_lab + model + type ~ dim, value.var = "val") %>%
+      mutate(width = ifelse(!is.na(sd), 0.4, 0)) %>%
+      left_join(data.frame(model_setting_lab = log_fitting %>% arrange(desc(model_setting_lab)) %>% pull(model_setting_lab) %>% unique(), stringsAsFactors = F) %>%
+                  mutate(pos = (1:nrow(.)) * 5), by = "model_setting_lab") %>%
+      mutate(position = ifelse(model == "baseline", pos - dist_baseline, pos + dist_baseline)) %>%
+      mutate(position = ifelse(type == "Cross-Validation", position - dist_dataset, position + dist_dataset)) %>%
+      mutate(sd = ifelse(is.na(sd), 0, sd)) %>%
+      mutate(type = gsub("Cross-Validation", "Cross-Validation\ntest set", type)) %>%
+      mutate(model = gsub("additional_var", paste0("With ", additional_var), model),
+             model = gsub("baseline", "Baseline", model)) %>%
+      rename(Model = model,
+             Dataset = type) %>%
+      mutate(Model = as.factor(Model),
+             Dataset = as.factor(Dataset))
+    
+    control_label = tt %>%
+      select(model_setting_lab, pos) %>%
+      unique() %>%
+      mutate(label = gsub("control_", "", model_setting_lab)) %>%
+      mutate(label = gsub("_", "\n", label)) %>%
+      mutate(vertical = zoo::rollmean(pos, k=2, fill = NA))
+    
+    p_perf = ggplot(tt, aes(x=position, y=avg, color=Model)) + 
+      geom_point(aes(shape = Dataset), size = 8) +
+      scale_shape_manual(values = c(16, 18)) +
+      scale_color_manual(values = c("blue", "red")) +
+      guides(size = FALSE,
+             color = guide_legend(override.aes = list(shape = 15, size = 10)),
+             shape = guide_legend(override.aes = list(size = 9))) +
+      geom_errorbar(aes(ymin=avg-sd, ymax=avg+sd, width=width), size = 1.7) +
+      geom_vline(xintercept = control_label$vertical %>% setdiff(NA), size = 1.2) +
+      scale_x_continuous(name ="\nControl Variables", 
+                       breaks= control_label$pos, labels = control_label$label) +
+      labs(title = paste0("Performance comparison for ", cl_lab %>% gsub("_-_", " - ", .) %>% gsub("_", " ", .), "\n"),
+           y = paste0(perf_lab, "\n")) +
+      scale_y_continuous(labels = scales::percent_format(accuracy = 1), limits = c(y_lim[1]*0.8, y_lim[2]*1.2)) +
+      theme(axis.text.y = element_text(size = 16),
+            axis.text.x = element_text(size = 18),
+            axis.title = element_text(size = 24),
+            plot.title = element_text(size=30),
+            legend.title=element_text(size=20),
+            legend.text=element_text(size=17),
+            panel.background = element_rect(fill = "white", colour = "black"),
+            panel.grid.major.y = element_line(colour = "grey", linetype = 'dashed', size = 0.8),
+            panel.grid.minor.y = element_line(colour = "grey", linetype = 'dashed', size = 0.8))
+    
+    
+    # todo: togli, servono solo per la call
+    png(paste0('./Distance_to_Default/Results/perf_test_', cl_lab, '_', d_type, '.png'), width = 12, height = 10, units = 'in', res=100)
+    plot(p_perf)
+    dev.off()
+    
+    
+    
+    # probability distribution
+    model_setting_lab = "no_control"     # todo: cicla e metti insieme nella stessa immagine
+    
+    # tt = log_fitting %>%
+    #   filter(data_type == d_type) %>%
+    #   filter(cluster_lab == cl_lab) %>%
+    #   filter(model_setting_lab == ms_lab)
+    
+    reload_full = readRDS(paste0('./Distance_to_Default/Checkpoints/logistic_regression/final_', model_setting_lab, '_', cl_lab, '.rds'))
+    tt = c()
+    for(d_type in names(reload_full)){
+      
+      tt_bas = reload_full[[d_type]]$baseline_full$pred_train %>%
+        mutate(data_type = d_type,
+               model = "Baseline") %>%
+        group_by(y_true) %>%
+        mutate(tot_true = n()) %>%
+        ungroup() %>%
+        group_by(y_true, y_pred) %>%
+        mutate(tot_pred = n()) %>%
+        ungroup()
+      
+      tt_add = reload_full[[d_type]]$additional_full$pred_train %>%
+        mutate(data_type = d_type,
+               model = "additional_var") %>%
+        group_by(y_true) %>%
+        mutate(tot_true = n()) %>%
+        ungroup() %>%
+        group_by(y_true, y_pred) %>%
+        mutate(tot_pred = n()) %>%
+        ungroup()
+      
+      tt = tt %>%
+        bind_rows(tt_bas,
+                  tt_add)
+      rm(tt_bas, tt_add)
+    }
+    tt = tt %>%
+      rename(Predicted = y_pred) %>%
+      mutate(y_true = paste0("True: ", y_true, " (", format(tot_true, big.mark = ","), " obs)"),
+             model = gsub("additional_var", paste0("With ", additional_var), model))
+      
+    tt_annotate = tt %>%
+      group_by(data_type, model, y_true) %>%
+      summarize(Pred_lab_1 = paste0("Pred \"1\"\nobs: ", format(tot_pred[Predicted == 1][1], big.mark = ",")),
+                Pred_lab_0 = paste0("Pred \"0\"\nobs: ", format(tot_pred[Predicted == 0][1], big.mark = ",")), .groups = "drop")
+    
+    
+    d_type = "oversample"   # todo: già ciclato sopra
+    
+    
+    ggplot(tt %>%
+             filter(data_type == d_type),
+               # filter(model == "Baseline", y_true == "True: 1 ( 1,338 obs)"),
+             aes(x=Prob, fill = Predicted)) +
+      geom_density(alpha = 0.5) +
+      scale_fill_manual(values = c("blue", "red")) +
+      scale_x_continuous(labels = scales::percent_format(accuracy = 1)) +
+      labs(title = "Distribution of true vs predicted",
+           subtitle = "Vertical lines represent classification thresholds",
+           y = "Density", x = "Predicted probability") +
+      geom_vline(aes(xintercept = threshold), linetype = 'dashed', size = 1.2) +
+      facet_grid(model~y_true, scales = "fixed", switch = 'y') +
+      theme(axis.text.y = element_blank(),
+            axis.ticks.y = element_blank(),
+            axis.text.x = element_text(size = 14),
+            axis.title = element_text(size = 24),
+            plot.title = element_text(size=30),
+            plot.subtitle = element_text(size=22),
+            legend.title=element_text(size=20),
+            legend.text=element_text(size=17),
+            strip.text = element_text(size = 14),
+            panel.background = element_rect(fill = "white", colour = "black"),
+            panel.grid.major.x = element_line(colour = "grey", linetype = 'dashed', size = 0.4),
+            panel.grid.minor.x = element_line(colour = "grey", linetype = 'dashed', size = 0.4)) +
+      geom_text(data = tt_annotate %>% filter(data_type == d_type) %>% mutate(Prob = 0.75, Predicted = "1"), aes(x = Prob, y = 3.6, label = Pred_lab_1), size = 6) +
+      geom_text(data = tt_annotate %>% filter(data_type == d_type) %>% mutate(Prob = 0.25, Predicted = "0"), aes(x = Prob, y = 3.6, label = Pred_lab_0), size = 6)
+    
+    
+    # todo: togli, servono solo per la call
+    png(paste0('./Distance_to_Default/Results/perf_test_', cl_lab, '_', model_setting_lab, '_', d_type, '.png'), width = 12, height = 10, units = 'in', res=100)
+    plot(p_distr)
+    dev.off()
+    
+    
+    
+  }
+
+  
+   
+}
+
+
+## todo: per ogni fold calcola F1-score, AUC e ROC (sia per train che per test) e poi crea report finale con i valori medi +st.dev
+#        valuta se fare due plot diversi con le misure medie del train e del test
 
   
 ## todo: aggiungi distribuzione PD e DD per ogni regressione (anche vs FLAG_default)
+
+## valuta se ritrasformare i coefficienti rispetto alla scala iniziale dei dati
+# https://stats.stackexchange.com/questions/74622/converting-standardized-betas-back-to-original-variables
+
+# todo: aggiungi la variable importance
+
+
+
+
+
+
+
+
+
+# baseline
+df_work = df_main_work %>%
+  left_join(list_DD_CRIF_data[[cluster_lab]], by = c("abi_ndg", "year")) %>%
+  select(y, all_of(main_regressor)) %>%
+  `rownames<-`(rownames(df_main_work))
+
+
+fit_train_baseline = fit_cv_glmnet(x = df_work %>% select(-y), y = df_work$y, alpha = 1, standardize = F, intercept = T, parallel = T,
+                          type.measure = "auc", lambda_final = "lambda.1se", family = "binomial",
+                          fixed_variables = fixed_variables, n_fold_cvgmlnet = n_fold_cvgmlnet)
+
+
+# regression with additional_var = PD
+df_work_PD = df_main_work %>%
+  left_join(list_DD_CRIF_data[[cluster_lab]], by = c("abi_ndg", "year")) %>%
+  select(y, all_of(c(main_regressor, additional_var))) %>%
+  `rownames<-`(rownames(df_main_work))
+
+fit_train_PD = fit_cv_glmnet(x = df_work_PD %>% select(-y), y = df_work_PD$y, alpha = 1, standardize = F, intercept = T, parallel = T,
+                             type.measure = "auc", lambda_final = "lambda.1se", family = "binomial",
+                             fixed_variables = fixed_variables, n_fold_cvgmlnet = n_fold_cvgmlnet)
+
+fit_train_PD_no_pen = fit_cv_glmnet(x = df_work_PD %>% select(-y), y = df_work_PD$y, alpha = 1, standardize = F, intercept = T, parallel = T,
+                                    type.measure = "auc", lambda_final = "lambda.1se", family = "binomial",
+                                    fixed_variables = c(), n_fold_cvgmlnet = n_fold_cvgmlnet)
+
+
+# regression with additional_var = DD
+df_work_DD = df_main_work %>%
+  left_join(list_DD_CRIF_data[[cluster_lab]], by = c("abi_ndg", "year")) %>%
+  select(y, all_of(c(main_regressor, "DD"))) %>%
+  `rownames<-`(rownames(df_main_work)) %>%
+  mutate(DD = scale(DD))
+
+fit_train_DD = fit_cv_glmnet(x = df_work_DD %>% select(-y), y = df_work_DD$y, alpha = 1, standardize = F, intercept = T, parallel = T,
+                             type.measure = "auc", lambda_final = "lambda.1se", family = "binomial",
+                             fixed_variables = c("DD"), n_fold_cvgmlnet = n_fold_cvgmlnet)
+
+fit_train_DD_no_pen = fit_cv_glmnet(x = df_work_DD %>% select(-y), y = df_work_DD$y, alpha = 1, standardize = F, intercept = T, parallel = T,
+                                    type.measure = "auc", lambda_final = "lambda.1se", family = "binomial",
+                                    fixed_variables = c(), n_fold_cvgmlnet = n_fold_cvgmlnet)
+
+
+
+
+aa_res = data.frame(Variable = "Accuracy", Coeff = pp(fit_train_baseline$pred_prob, df_work$y), stringsAsFactors = F) %>%
+  bind_rows(fit_train_baseline$coeff) %>%
+  rename(Coeff_baseline = Coeff) %>%
+  
+  full_join(data.frame(Variable = "Accuracy", Coeff = pp(fit_train_PD$pred_prob, df_work$y), stringsAsFactors = F) %>%
+              bind_rows(fit_train_PD$coeff) %>%
+              rename(Coeff_PD = Coeff), by = "Variable") %>%
+  full_join(data.frame(Variable = "Accuracy", Coeff = pp(fit_train_PD_no_pen$pred_prob, df_work$y), stringsAsFactors = F) %>%
+              bind_rows(fit_train_PD_no_pen$coeff) %>%
+              rename(Coeff_PD_no_forcing = Coeff), by = "Variable") %>%
+  
+  full_join(data.frame(Variable = "Accuracy", Coeff = pp(fit_train_DD$pred_prob, df_work$y), stringsAsFactors = F) %>%
+              bind_rows(fit_train_DD$coeff) %>%
+              rename(Coeff_DD = Coeff), by = "Variable") %>%
+  
+  full_join(data.frame(Variable = "Accuracy", Coeff = pp(fit_train_DD_no_pen$pred_prob, df_work$y), stringsAsFactors = F) %>%
+              bind_rows(fit_train_DD_no_pen$coeff) %>%
+              rename(Coeff_DD_no_forcing = Coeff), by = "Variable")
+
+
+write.table(aa_res, 'logistic_res.csv', sep = ';', row.names = F, append = F)
+
+pp = function(prob, y_true){
+  
+  y_pred = prob$Prob
+  y_pred = ifelse(y_pred >= 0.5, 1, 0)
+  
+  prec = sum(y_true == y_pred) / length(y_true)
+  
+  return(prec)
+}
 
 
 
@@ -2014,7 +2639,7 @@ write.table(aa, 'check_equity.csv', sep = ';', row.names = F, append = F)
 #   masking = matrix(FALSE, ncol = ncol(x_input_full), nrow = nrow(x_input_full))
 # }
 # 
-# result_csv = paste0('./Distance_to_Default/Stats/Autoencoder_test/00_Optimization_list_', save_RDS_additional_lab, '.csv')
+# result_csv = paste0('./Distance_to_Default/Checkpoints/Autoencoder_test/00_Optimization_list_', save_RDS_additional_lab, '.csv')
 # result = read.csv(result_csv, sep=";", stringsAsFactors=FALSE) %>%
 #   mutate(R2 = -99) %>%
 #   relocate(R2, .after = MSE)
@@ -2039,10 +2664,10 @@ write.table(aa, 'check_equity.csv', sep = ';', row.names = F, append = F)
 # write.table(result, result_csv, sep = ';', row.names = F, append = F)
 
 
-# res =  read.csv('./Distance_to_Default/Stats/Autoencoder_test/00_Optimization_list_AE_LSTM_emb.csv', sep=";", stringsAsFactors=FALSE) %>%
+# res =  read.csv('./Distance_to_Default/Checkpoints/Autoencoder_test/00_Optimization_list_AE_LSTM_emb.csv', sep=";", stringsAsFactors=FALSE) %>%
 #   mutate(layers_list = as.character(layers_list))
-# lstm_list = paste0("./Distance_to_Default/Stats/Autoencoder_test/",
-#                      list.files(path = './Distance_to_Default/Stats/Autoencoder_test/', pattern = "^AE_LSTM_emb*"), sep = "")
+# lstm_list = paste0("./Distance_to_Default/Checkpoints/Autoencoder_test/",
+#                      list.files(path = './Distance_to_Default/Checkpoints/Autoencoder_test/', pattern = "^AE_LSTM_emb*"), sep = "")
 # for (i in 1:length(lstm_list)){
 #   aut = readRDS(lstm_list[i])
 #   opt = aut$options
@@ -2058,4 +2683,4 @@ write.table(aa, 'check_equity.csv', sep = ';', row.names = F, append = F)
 #   res = res %>%
 #     bind_rows(add_row)
 # }
-# write.table(res %>% relocate(R2, .after = MSE) %>% filter(!is.na(R2)), './Distance_to_Default/Stats/Autoencoder_test/00_Optimization_list_AE_LSTM_emb.csv', sep = ';', row.names = F, append = F)
+# write.table(res %>% relocate(R2, .after = MSE) %>% filter(!is.na(R2)), './Distance_to_Default/Checkpoints/Autoencoder_test/00_Optimization_list_AE_LSTM_emb.csv', sep = ';', row.names = F, append = F)

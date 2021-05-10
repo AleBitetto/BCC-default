@@ -405,3 +405,292 @@ include_CRIF_cluster = F  # if TRUE clustering with CRIF median/percentiles is e
   }
   write.table(clustering_performance_summary, './Distance_to_Default/Stats/02b_Manual_Clustering_Summary.csv', sep = ';', row.names = F, append = F)
 }
+
+# baseline model FLAG_Default vs short list BILA
+{
+  
+  # https://cran.r-project.org/web/packages/lme4/vignettes/lmer.pdf
+  
+  # we want to estimate y_it = A + B*x_it + u_i + e_it
+  #                            u_i individual error component (doesn't change over time)
+  #                            e_it idiosyncratic error component
+  # - if u_i is correlated with X use the FIXED EFFECT (or WITHIN) so there is an individual-specific effect driving the data
+  # - if u_i is uncorrelated with X use the RANDOM EFFECT so there's an individual+time-specific effect driving the data
+  # - if u_i is missing use the POOLED model i.e. you assume there's no actual panel structure
+  
+  short_list = c('BILA_cashflow_ricavi', 'BILA_totdebiti_su_patrim', 'BILA_debitifornit_su_patrim', 'BILA_durata_scorte',
+                 'BILA_liquid_imm', 'BILA_oneri_valagg', 'BILA_patr_su_patrml', 'BILA_roa', 'BILA_rotazione_circolante', 'BILA_turnover')
+  control_variable = c('segmento_CRIF', 'Dimensione_Impresa', 'Industry', 'Dummy_industry')
+  df_reg = df_final %>% select(abi, ndg, year, FLAG_Default, all_of(control_variable), all_of(short_list)) %>%
+    mutate(abi_ndg = paste0(abi, '_', ndg)) %>%
+    select(-abi, -ndg) %>%
+    select(abi_ndg, everything()) %>%
+    mutate_at(all_of(short_list), ~scale(.)) %>%
+    mutate_at(all_of(short_list), function(x) { attributes(x) <- NULL; x }) %>%
+    mutate(Industry = substr(Industry, 1, 8)) %>%
+    mutate_at(all_of(control_variable), ~as.factor(.))
+  
+  # check correlation and partial correlation
+  correlation_list = evaluate_correlation(df_reg %>% select(all_of(short_list)))
+  
+  
+  ctrl = 'Dummy_industry'
+  ff = c()
+  for (v in short_list){
+    ff = c(ff, paste0('(', v, '|', ctrl, ')'))
+  }
+  form = as.formula(paste('FLAG_Default', paste(ff, collapse = " + "), sep = " ~ "))
+  
+  form = as.formula(paste('FLAG_Default ~', paste(short_list, collapse = " + "), '+ (', paste(short_list, collapse = " + "), ') |', ctrl))
+  
+  
+  
+  fit_mixed <- glmer(form, data = df_reg[1:1000,], family = binomial(link = "logit"),
+                     control = glmerControl(optimizer ='optimx', optCtrl=list(method='nlminb')))
+  ss2 = summary(fit_mixed)
+  
+  
+  ss1 = summary(fit_mixed)
+  
+  
+  confint.merMod(fit_mixed,method="profile") 
+  
+  
+  
+  # https://cran.r-project.org/web/packages/plm/vignettes/plmPackage.html#fnref3
+  # conver to panel data.frame
+  # df_rep_pdata <- pdata.frame(df_reg, index=c("abi_ndg", "year"), drop.index=TRUE, row.names=TRUE)
+  # 
+  # # check balance (if gamma and nu are close to 1 then is balanced)
+  # punbalancedness(df_rep_pdata)
+  # 
+  # form = as.formula(paste('FLAG_Default', paste(short_list, collapse = " + "), sep = " ~ "))
+  # 
+  # # fit fixed-effect with different effects
+  # for (eff in c('individual', 'time', 'twoways')){
+  #   errR = try(mod <- plm(form, data = df_rep_pdata, model = "within", effect = eff), silent = T)
+  #   if(is(errR,'try-error')){
+  #   } else {
+  #     sink(paste0('./Distance_to_Default/Baseline_regression/FixEff_', eff, '_summary.txt'))
+  #     cat('\n------------------------  Testing effects  ------------------------\n\n')
+  #     print(plmtest(form, data = df_rep_pdata, effect = eff))
+  #     cat('\n\n\n\n------------------------  Fitting Model  ------------------------\n\n')
+  #     print(summary(mod))
+  #     sink()
+  #   }
+  # }
+  # 
+  # # fit random-effect with different effects
+  # for (eff in c('individual', 'time', 'twoways')){
+  #   errR = try(mod <- plm(form, data = df_rep_pdata, model = "random", effect = eff), silent = T)
+  #   if(is(errR,'try-error')){
+  #   } else {
+  #     sink(paste0('./Distance_to_Default/Baseline_regression/RanEff_', eff, '_summary.txt'))
+  #     cat('\n------------------------  Testing effects  ------------------------\n\n')
+  #     print(plmtest(form, data = df_rep_pdata, effect = eff))
+  #     cat('\n\n\n\n------------------------  Fitting Model  ------------------------\n\n')
+  #     print(summary(mod))
+  #     sink()
+  #   }
+  # }
+
+}
+
+# chunk of logistic regression fitting only - code for oversampled dataset included
+{
+  r_err = try(tuning_perf <- suppressWarnings(readRDS(paste0('./Distance_to_Default/Checkpoints/logistic_regression/tuning_', model_setting_lab, '_', cluster_lab, '.rds'))), silent = T)
+  if (class(r_err) == "try-error"){tuning_perf = NULL}
+  if (is.null(tuning_perf) | run_tuning){
+    tuning_perf = c()
+    start_time = Sys.time()
+    for (alpha in alpha_set){
+      
+      cat('        * tuning alpha:', which(alpha_set == alpha), '/', length(alpha_set), end = '')
+      
+      oversample_from_fold_baseline = oversample_from_fold_additional = c()
+      for (fold_i in 1:n_fold){
+        test_ind = cv_ind %>%
+          filter(fold == fold_i) %>%
+          pull(ind)
+        train_ind = cv_ind %>%
+          filter(fold != fold_i) %>%
+          pull(ind)
+        data_test_baseline = df_work_baseline[test_ind, ]
+        data_train_baseline = df_work_baseline[train_ind, ]# %>%
+        # group_by(y) %>%
+        # filter(row_number() <= 1500) %>%   # todo: rimuovi
+        # ungroup()
+        data_test_additional = df_work_additional[test_ind, ]
+        data_train_additional = df_work_additional[train_ind, ]# %>%
+        # group_by(y) %>%
+        # filter(row_number() <= 1500) %>%   # todo: rimuovi
+        # ungroup()
+        
+        for (data_type in c("original", "oversample")){
+          
+          if (data_type == "oversample"){
+            
+            bas_err = try(train_baseline <- suppressWarnings(readRDS(paste0('./Distance_to_Default/Checkpoints/logistic_regression/dataset_overs_baseline_', model_setting_lab, '_', cluster_lab, '_fold', fold_i, '.rds'))), silent = T)
+            if (class(bas_err) == "try-error"){
+              train_baseline = dataset_oversample(data = data_train_baseline, target_var = "y",
+                                                  oversample_perc = final_oversample_perc, categorical_regressor = dummy_regressor) %>%
+                mutate(y = as.numeric(as.character(y)))
+              saveRDS(train_baseline, paste0('./Distance_to_Default/Checkpoints/logistic_regression/dataset_overs_baseline_', model_setting_lab, '_', cluster_lab, '_fold', fold_i, '.rds'))
+            }
+            add_err = try(train_additional <- suppressWarnings(readRDS(paste0('./Distance_to_Default/Checkpoints/logistic_regression/dataset_overs_additional_', model_setting_lab, '_', cluster_lab, '_fold', fold_i, '.rds'))), silent = T)
+            if (class(add_err) == "try-error"){
+              train_additional = dataset_oversample(data = data_train_additional, target_var = "y",
+                                                    oversample_perc = final_oversample_perc, categorical_regressor = dummy_regressor) %>%
+                mutate(y = as.numeric(as.character(y)))
+              saveRDS(train_additional, paste0('./Distance_to_Default/Checkpoints/logistic_regression/dataset_overs_additional_', model_setting_lab, '_', cluster_lab, '_fold', fold_i, '.rds'))
+            }
+            rm(bas_err, add_err)
+            
+            # save generated sample for final model fitting (restarted and repeated for each alpha, no problem)
+            # oversample_from_fold_baseline = oversample_from_fold_baseline %>%
+            #   bind_rows(train_baseline[(nrow(data_train_baseline) + 1):nrow(train_baseline), ])
+            # oversample_from_fold_additional = oversample_from_fold_additional %>%
+            #   bind_rows(train_additional[(nrow(data_train_additional) + 1):nrow(train_additional), ])
+          } else {
+            train_baseline = data_train_baseline
+            train_additional = data_train_additional
+          }
+          test_baseline = data_test_baseline
+          test_additional = data_test_additional
+          
+          ## baseline regression
+          baseline_cv = get_glmnet_performance(train_baseline, data_test = test_baseline, alpha = alpha, standardize = F, intercept = T, parallel = T,
+                                               type.measure = "auc", lambda_final = "lambda.1se", family = "binomial",
+                                               fixed_variables = fixed_variables, n_fold_cvgmlnet = n_fold_cvgmlnet, prob_thresh = prob_thresh_cv)
+          
+          ## regression with additional_var
+          additional_cv = get_glmnet_performance(train_additional, data_test = test_additional, alpha = alpha, standardize = F, intercept = T, parallel = T,
+                                                 type.measure = "auc", lambda_final = "lambda.1se", family = "binomial",
+                                                 fixed_variables = fixed_variables, n_fold_cvgmlnet = n_fold_cvgmlnet, prob_thresh = prob_thresh_cv)
+          
+          tuning_perf = tuning_perf %>%
+            bind_rows(
+              baseline_cv$perf_metrics %>%
+                mutate(model_setting_lab = model_setting_lab, cluster_lab = cluster_lab, data_type = data_type, model = "baseline", alpha = alpha, fold = fold_i),
+              additional_cv$perf_metrics %>%
+                mutate(model_setting_lab = model_setting_lab, cluster_lab = cluster_lab, data_type = data_type, model = "additional_var", alpha = alpha, fold = fold_i)
+            )
+          
+          rm(baseline_cv, additional_cv, train_baseline, test_baseline, train_additional, test_additional)
+        } # data_type
+      } # fold_i
+      tot_diff=seconds_to_period(difftime(Sys.time(), start_time, units='secs'))
+      cat(' elapsed time:', paste0(lubridate::hour(tot_diff), 'h:', lubridate::minute(tot_diff), 'm:', round(lubridate::second(tot_diff))), end = '\r')
+    } # alpha
+    saveRDS(tuning_perf, paste0('./Distance_to_Default/Checkpoints/logistic_regression/tuning_', model_setting_lab, '_', cluster_lab, '.rds'))
+  } else {
+    cat('        * reloaded best alpha')
+  }
+  
+  # select optimal alpha, one for each "baseline" and "additional_var"
+  best_alpha = tuning_perf %>%
+    mutate(optim_crit = !!sym(tuning_crit)) %>%
+    group_by(data_type, model, alpha) %>%
+    summarize(avg_perf = mean(optim_crit, na.rm = T), .groups = "drop") %>%
+    mutate(minim = tuning_crit_minimize) %>%
+    mutate(optim_crit = ifelse(minim == FALSE, -avg_perf, avg_perf)) %>%  # optim_crit will be always minimized
+    group_by(data_type, model) %>%
+    arrange(optim_crit) %>%
+    filter(row_number() == 1) %>%
+    ungroup() %>%
+    rename(alpha_best = alpha)
+  
+  log_tuning = log_tuning %>%
+    bind_rows(
+      tuning_perf %>%
+        group_by(model_setting_lab, cluster_lab, data_type, model, alpha) %>%  # model_setting_lab, cluster_lab are constant but used for appending to final log
+        summarise_all(list(avg = mean, std = sd)) %>%
+        select(-starts_with("fold")) %>%
+        mutate(total_folds = max(tuning_perf$fold),
+               tuning_crit = tuning_crit) %>%
+        left_join(best_alpha %>% select(model, data_type, alpha_best), by = c("data_type", "model")) %>%
+        select(model_setting_lab, cluster_lab, data_type, model, alpha, alpha_best, tuning_crit, total_folds, everything())
+    )
+  
+  # fit model on full dataset and save models
+  r_err = try(reload_full <- suppressWarnings(readRDS(paste0('./Distance_to_Default/Checkpoints/logistic_regression/final_', model_setting_lab, '_', cluster_lab, '.rds'))), silent = T)
+  if (class(r_err) == "try-error"){reload_full = NULL}
+  if (is.null(reload_full) | fit_final_model){
+    start_time = Sys.time()
+    cat('\n        * fitting on full dataset...', end = '')
+    
+    reload_full = list()
+    for (d_type in c("original", "oversample")){
+      
+      if (d_type == "oversample"){
+        
+        bas_err = try(train_baseline <- suppressWarnings(readRDS(paste0('./Distance_to_Default/Checkpoints/logistic_regression/dataset_overs_baseline_', model_setting_lab, '_', cluster_lab, '_full.rds'))), silent = T)
+        if (class(bas_err) == "try-error"){
+          train_baseline = dataset_oversample(data = df_work_baseline, target_var = "y",
+                                              oversample_perc = final_oversample_perc, categorical_regressor = dummy_regressor) %>%
+            mutate(y = as.numeric(as.character(y)))
+          saveRDS(train_baseline, paste0('./Distance_to_Default/Checkpoints/logistic_regression/dataset_overs_baseline_', model_setting_lab, '_', cluster_lab, '_full.rds'))
+        }
+        add_err = try(train_additional <- suppressWarnings(readRDS(paste0('./Distance_to_Default/Checkpoints/logistic_regression/dataset_overs_additional_', model_setting_lab, '_', cluster_lab, '_full.rds'))), silent = T)
+        if (class(add_err) == "try-error"){
+          train_additional = dataset_oversample(data = df_work_additional, target_var = "y",
+                                                oversample_perc = final_oversample_perc, categorical_regressor = dummy_regressor) %>%
+            mutate(y = as.numeric(as.character(y)))
+          saveRDS(train_additional, paste0('./Distance_to_Default/Checkpoints/logistic_regression/dataset_overs_additional_', model_setting_lab, '_', cluster_lab, '_full.rds'))
+        }
+        rm(bas_err, add_err)
+        
+      } else {
+        train_baseline = df_work_baseline
+        train_additional = df_work_additional
+      }
+      
+      # baseline regression
+      baseline_full = get_glmnet_performance(train_baseline, data_test = NULL, alpha = best_alpha %>% filter(model == "baseline" & data_type == d_type) %>% pull(alpha_best),
+                                             standardize = F, intercept = T, parallel = T,
+                                             type.measure = "auc", lambda_final = "lambda.1se", family = "binomial",
+                                             fixed_variables = fixed_variables, n_fold_cvgmlnet = n_fold_cvgmlnet,
+                                             train_subset = c(1:nrow(df_work_baseline)),
+                                             prob_thresh = prob_thresh_full, prob_thresh_perf = "F1", prob_thresh_perf_minimize = F, prob_thresh_set = "train")
+      
+      # regression with additional_var
+      additional_full = get_glmnet_performance(train_additional, data_test = NULL, alpha = best_alpha %>% filter(model == "additional_var" & data_type == d_type) %>% pull(alpha_best),
+                                               standardize = F, intercept = T, parallel = T,
+                                               type.measure = "auc", lambda_final = "lambda.1se", family = "binomial",
+                                               fixed_variables = fixed_variables, n_fold_cvgmlnet = n_fold_cvgmlnet,
+                                               train_subset = c(1:nrow(df_work_additional)),
+                                               prob_thresh = prob_thresh_full, prob_thresh_perf = "F1", prob_thresh_perf_minimize = F, prob_thresh_set = "train")
+      
+      reload_full[[d_type]] = list(baseline_full = baseline_full,
+                                   additional_full = additional_full)
+      
+      rm(train_baseline, train_additional)
+    } # d_type
+    saveRDS(reload_full,
+            paste0('./Distance_to_Default/Checkpoints/logistic_regression/final_', model_setting_lab, '_', cluster_lab, '.rds'))
+    tot_diff=seconds_to_period(difftime(Sys.time(), start_time, units='secs'))
+    cat('Done in', paste0(lubridate::hour(tot_diff), 'h:', lubridate::minute(tot_diff), 'm:', round(lubridate::second(tot_diff))))
+  }
+  
+  # save results
+  for (d_type in names(reload_full)){
+    
+    baseline_full = reload_full[[d_type]]$baseline_full
+    additional_full = reload_full[[d_type]]$additional_full
+    
+    log_fitting = log_fitting %>%
+      bind_rows(
+        baseline_full$perf_metrics %>%
+          select(-ends_with("_test")) %>%
+          mutate(model_setting_lab = model_setting_lab, cluster_lab = cluster_lab, data_type = d_type, model = "baseline",
+                 alpha = baseline_full$fit_train$options$alpha, obs = baseline_full$pred_train %>% nrow()),
+        additional_full$perf_metrics %>%
+          select(-ends_with("_test")) %>%
+          mutate(model_setting_lab = model_setting_lab, cluster_lab = cluster_lab, data_type = d_type, model = "additional_var",
+                 alpha = additional_full$fit_train$options$alpha, obs = additional_full$pred_train %>% nrow())
+      ) %>%
+      select(model_setting_lab, cluster_lab, data_type, model, obs, alpha, everything())
+  } # d_type
+  rm(reload_full)
+} # cluster_lab
+}
