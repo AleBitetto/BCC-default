@@ -2876,7 +2876,7 @@ evaluate_SHAP = function(dataSample, sample.size = 100, trained_model_prediction
   # obs_index_class: data.frame of "obs_index", "class". If not NULL contains class for each obs_index_to_evaluate. All output are then evaluated
   #                 for each class and all observations.
   # verbose: 1 to display calculation time, 0 for silent.
-  # n_batch: number of batch to split the evaluation. May speed uo evaluation and save memory.
+  # n_batch: number of batch to split the evaluation. May speed up evaluation and save memory.
   # n_workers: number of workers for parallel calculation. Try not to exceed 30-40.
   # seed: seed for reproducibility
   
@@ -3147,7 +3147,7 @@ evaluate_SHAP = function(dataSample, sample.size = 100, trained_model_prediction
 evaluate_Perm_Feat_Imp = function(dataSample, trained_model_prediction_function = NULL, n_repetitions = 5, compare = "difference",
                                   obs_index_to_evaluate = NULL, obs_index_to_shuffle = NULL, obs_index_class = NULL,
                                   perf_metric = NULL, perf_metric_add_pars = NULL, true_val_name = NULL, prediction_name = NULL, perf_metric_minimize = F,
-                                  package_to_load = c("glmnet", "ranger", "earth", "kernlab"), n_workers = 5, seed = 66){
+                                  package_to_load = c("glmnet", "ranger", "earth", "kernlab"), verbose = 1, n_workers = 5, seed = 66){
   
   # evaluate Permutation Feature Importance.
   
@@ -3170,6 +3170,7 @@ evaluate_Perm_Feat_Imp = function(dataSample, trained_model_prediction_function 
   #                      Used to set right order of "compare" method. For "difference", if FALSE then Imp = Perf_original - Perf_permutation, else reverse order.
   #                      For "ratio", if FALSE then Imp = Perf_original / Perf_permutation, else reverse order.
   # package_to_load: vector of strings. Include packages used to predict trained_model_prediction_function. Needed in future_lapply() todo: vedi se si risolve con loadedNamespaces()
+  # verbose: 1 to display calculation time, 0 for silent.
   # n_workers: number of workers for parallel calculation. Try not to exceed 30-40.
   # seed: seed for reproducibility
   
@@ -3203,7 +3204,8 @@ evaluate_Perm_Feat_Imp = function(dataSample, trained_model_prediction_function 
   feat_names = setdiff(colnames(dataSample), "y")
   tot_features = ncol(dataSample) - 1
   dataSample = dataSample %>%
-    mutate(obs_index = 1:n())
+    mutate(obs_index = 1:n()) %>%
+    as.data.frame()
   
   generate_data = function(k){    # k = feature
     
@@ -3222,6 +3224,10 @@ evaluate_Perm_Feat_Imp = function(dataSample, trained_model_prediction_function 
     })
     data.table::rbindlist(runs)%>% mutate(feature = f_name)
   }
+  
+  # suppress messages
+  if (verbose == 0){sink(tempfile());on.exit(sink())}
+  
   
   options(future.globals.maxSize = 8000 * 1024^2)
   plan(multisession, workers = n_workers)
@@ -3303,7 +3309,7 @@ evaluate_Perm_Feat_Imp = function(dataSample, trained_model_prediction_function 
                                            ifelse(perf_metric_minimize, perf / perf_original, perf_original / perf))) %>% # for "ratio"
             as.data.frame() %>%
             group_by(feature) %>%
-            summarise(importance = mean(importance_val),     # todo: capisci cosa fare con i valori negativi o < 1 (migliorano le performance)
+            summarise(importance = mean(importance_val),     # todo: capisci cosa fare con i valori negativi o < 1 (cioè migliorano le performance)
                       importance.std = sd(importance_val),
                       importance.5 = quantile(importance_val, 0.05),
                       importance.95 = quantile(importance_val, 0.95), .groups = "drop") %>%
@@ -3333,7 +3339,7 @@ evaluate_Perm_Feat_Imp = function(dataSample, trained_model_prediction_function 
 
 # Plot Shapley summary
 plot_SHAP_summary = function(list_input, sina_method = "counts", sina_bins = 20, sina_size = 2, sina_alpha = 0.7, plot_model_set = NULL, plot_class_set = NULL,
-                             SHAP_axis_lower_limit = 0, magnify_text = 1.4, color_range = c("blue", "red"),
+                             SHAP_axis_lower_limit = 0, magnify_text = 1.4, color_range = c("red", "blue"),
                              save_path = '', plot_width = 12, plot_height = 12){
   
   # Plot Shapley summary. Returns plots for all trained model and 'All observations' and 'class ...' if any.
@@ -3348,7 +3354,7 @@ plot_SHAP_summary = function(list_input, sina_method = "counts", sina_bins = 20,
   # plot_width, plot_height: width and height of saved plot
   
   # check last character of save_path
-  if (substr(save_path, nchar(save_path), nchar(save_path)) != "_"){save_path = paste0(save_path, "_")}
+  if (substr(save_path, nchar(save_path), nchar(save_path)) != "_" & save_path != ''){save_path = paste0(save_path, "_")}
   
   # check if class plots are available
   summary_plot_data = list_input$summary_plot_data
@@ -3459,7 +3465,7 @@ plot_SHAP_summary = function(list_input, sina_method = "counts", sina_bins = 20,
       # todo: rimuovi
       # {
       # png("./Distance_to_Default/Results/000p.png",
-      #     width = plot_height, height = plot_height, units = 'in', res=300)
+      #     width = plot_width, height = plot_height, units = 'in', res=300)
       # plot(out_plot)
       # dev.off()
       #   }
@@ -3469,7 +3475,7 @@ plot_SHAP_summary = function(list_input, sina_method = "counts", sina_bins = 20,
       # save plot
       if (save_path != ''){
         png(paste0(save_path, tr_model, ifelse(class_i == "No class", "", paste0("_", gsub(" ", "_", class_i))), ".png"),
-            width = plot_height, height = plot_height, units = 'in', res=300)
+            width = plot_width, height = plot_height, units = 'in', res=300)
         plot(out_plot)
         dev.off()
       }
@@ -3483,8 +3489,7 @@ plot_SHAP_summary = function(list_input, sina_method = "counts", sina_bins = 20,
 
 # Plot feature importance
 plot_feat_imp = function(list_input, normalize = F, color_pos = "blue", color_neg = "red", plot_model_set = NULL, plot_class_set = NULL,
-                         magnify_text = 1, color_range = c("blue", "red"),
-                         save_path = '', plot_width = 12, plot_height = 12){
+                         magnify_text = 1, save_path = '', plot_width = 12, plot_height = 12){
   
   # Plot feature importance. Returns plots for all trained model and 'All observations' and 'class ...' if any. If input is from evaluate_SHAP() plots
   # global (signed) features effects and global SHAP features importance. If input is from evaluate_Perm_Feat_Imp() simply plots feature importance.
@@ -3502,7 +3507,7 @@ plot_feat_imp = function(list_input, normalize = F, color_pos = "blue", color_ne
   # todo: aggiungi le barre di errore nel caso della PFI e capisci cosa viene fuori se la PFI è negativa
   
   # check last character of save_path
-  if (substr(save_path, nchar(save_path), nchar(save_path)) != "_"){save_path = paste0(save_path, "_")}
+  if (substr(save_path, nchar(save_path), nchar(save_path)) != "_" & save_path != ''){save_path = paste0(save_path, "_")}
   
   # check if class plots are available
   if (list_input$type == "SHAP"){
@@ -3538,11 +3543,11 @@ plot_feat_imp = function(list_input, normalize = F, color_pos = "blue", color_ne
       # set importance axis label
       normalize_work = normalize
       if (plot_type == "global_features_effect"){
-        imp_axis_label = "Average absolute SHAP value\n(impact on model predictions)"
-        plot_title = "Average absolute SHAP"
-      } else if (plot_type == "SHAP_feat_imp"){
         imp_axis_label = "Average signed SHAP value\n(impact on model predictions)"
         plot_title = "Average signed SHAP"
+      } else if (plot_type == "SHAP_feat_imp"){
+        imp_axis_label = "Average absolute SHAP value\n(impact on model predictions)"
+        plot_title = "Average absolute SHAP"
       } else if (plot_type == "Permutation_feat_imp"){
         imp_axis_label = "Feature importance"
         if (normalize_work){imp_axis_label = paste0(imp_axis_label, " (normalized)")}
@@ -3612,7 +3617,7 @@ plot_feat_imp = function(list_input, normalize = F, color_pos = "blue", color_ne
         # todo: rimuovi
         # {
         # png("./Distance_to_Default/Results/000p.png",
-        #     width = plot_height, height = plot_height, units = 'in', res=300)
+        #     width = plot_width, height = plot_height, units = 'in', res=300)
         # plot(out_plot)
         # dev.off()
         #   }
@@ -3622,7 +3627,7 @@ plot_feat_imp = function(list_input, normalize = F, color_pos = "blue", color_ne
         # save plot
         if (save_path != ''){
           png(paste0(save_path, plot_type, "_", tr_model, ifelse(class_i == "No class", "", paste0("_", gsub(" ", "_", class_i))), ".png"),
-              width = plot_height, height = plot_height, units = 'in', res=300)
+              width = plot_width, height = plot_height, units = 'in', res=300)
           plot(out_plot)
           dev.off()
         }
@@ -3633,4 +3638,181 @@ plot_feat_imp = function(list_input, normalize = F, color_pos = "blue", color_ne
   if (class_i == "No class"){plot_list = plot_list[[1]]}
   
   return(plot_list)
+}
+
+# evaluate feature importance
+evaluate_feature_importance = function(df_work, model_setting_block, method,
+                                       performance_metric = "F1", n_repetitions = 5, compare = "difference",
+                                       sample.size = 100, n_batch = 5,
+                                       verbose = 1, n_workers = 5, seed = 66){
+  
+  # Evaluate feature importance with SHAP or Permutation Feature Importance. SHAP will use a subset of observations, i.e. y=0 are downsampled to match y=1.
+  
+  # df_work: dataset with predictors and target variable as "y" to be used for feature importance
+  # model_setting_block: subset of log_fitting with "model_setting_lab", "cluster_lab", "data_type", "model", "algo_type", "rds".
+  #                     algorithms in "algo_type" will be evaluated. Corresponding fitted model is reloaded by "rds".
+  # method: vector of c("SHAP", "Permutation")
+  #  --- Arguments for Permutation Feature Importance
+  # performance_metric: performance metric to be used in permutation feature importance. "F1", "Precision" or "Recall". SHAP will use only predicted probabilities.
+  # n_repetitions: how many times permutation importance must be evaluated with different seeds and then averaged.
+  # compare: "difference" or "ratio" to compare permutation performance with original input performance. See perf_metric_minimize.
+  #  --- Arguments for SHAP
+  # sample.size: sample size to generate shuffled instances (coalitions). The higher the more accurate the explanations become.
+  # n_batch: number of batch to split the evaluation. May speed up evaluation and save memory.
+  #
+  # verbose: 1 to display calculation time, 0 for silent.
+  # n_workers: number of workers for parallel calculation. Try not to exceed 30-40.
+  # seed: seed for reproducibility
+  
+  
+  # set performance metric for permutation feature importance (see evaluate_Perm_Feat_Imp() input)
+  if (performance_metric == "F1"){
+    perf_metric = MLmetrics::F1_Score
+    perf_metric_minimize = F
+    perf_metric_add_pars = list(positive = "1")
+    prediction_name = "y_pred"
+    true_val_name = "y_true"
+  }
+  if (performance_metric == "Precision"){
+    perf_metric = MLmetrics::Precision
+    perf_metric_minimize = F
+    perf_metric_add_pars = list(positive = "1")
+    prediction_name = "y_pred"
+    true_val_name = "y_true"
+  }
+  if (performance_metric == "Recall"){
+    perf_metric = MLmetrics::Recall
+    perf_metric_minimize = F
+    perf_metric_add_pars = list(positive = "1")
+    prediction_name = "y_pred"
+    true_val_name = "y_true"
+  }
+  
+  
+  # select prediction method (raw probability or class)
+  if (method == "SHAP"){
+    pred_type = "raw"
+  } else if (method == "Permutation"){
+    pred_type = "class"
+  }
+  
+  # create list of prediction function for trained models
+  trained_model_prediction_function = list()
+  for (alg_type in model_setting_block$algo_type){
+    
+    # reload model
+    fit_fullset = readRDS(model_setting_block %>% filter(algo_type == alg_type) %>% pull(rds))
+    
+    # create predict model
+    if (alg_type == "Elastic-net"){
+      
+      model_Elastic_net = fit_fullset$fold_model_fit$fold_1$fit
+      lambda_opt = fit_fullset$fold_model_fit$fold_1$lambda_opt
+      family = fit_fullset$fold_model_fit$fold_1$options$family
+      best_threshold_Elastic_net = fit_fullset$best_threshold
+      
+      pred_function = function(x){
+        out = predict(model_Elastic_net, newx = x %>% as.matrix(), s = lambda_opt, family = family, type="response") %>% as.numeric()
+        if (pred_type == "class"){
+          out = ifelse(out >= best_threshold_Elastic_net, 1, 0) %>% as.character()
+        }
+        return(out)
+      }
+      
+    } else if (alg_type == "Random_Forest"){
+      
+      model_Random_Forest = fit_fullset$fold_model_fit$fold_1$fit
+      best_threshold_Random_Forest = fit_fullset$best_threshold
+      
+      pred_function = function(x){
+        out = predict(model_Random_Forest, data = x, type = "response")$predictions[, 2] %>% as.numeric()
+        if (pred_type == "class"){
+          out = ifelse(out >= best_threshold_Random_Forest, 1, 0) %>% as.character()
+        }
+        return(out)
+      }
+      
+    } else if (alg_type == "MARS"){
+      
+      model_MARS = fit_fullset$fold_model_fit$fold_1$fit
+      best_threshold_MARS = fit_fullset$best_threshold
+      
+      pred_function = function(x){
+        out = predict(model_MARS, newdata = x, type = "response") %>% as.numeric()
+        if (pred_type == "class"){
+          out = ifelse(out >= best_threshold_MARS, 1, 0) %>% as.character()
+        }
+        return(out)
+      }
+      
+    } else if (alg_type == "SVM-RBF"){
+      
+      model_SVM_RBF = fit_fullset$fold_model_fit$fold_1$fit
+      best_threshold_SVM_RBF = fit_fullset$best_threshold
+      
+      pred_function = function(x){
+        out = predict(model_SVM_RBF, newdata = x, type = "probabilities")[,2] %>% as.numeric()
+        if (pred_type == "class"){
+          out = ifelse(out >= best_threshold_SVM_RBF, 1, 0) %>% as.character()
+        }
+        return(out)
+      }
+      
+    }
+    
+    trained_model_prediction_function[[alg_type]] = pred_function
+    
+  } # alg_type
+  
+  # todo: rimuovi
+  # tt = trained_model_prediction_function[["MARS"]]
+  # tt(df_predictors)[1:10]
+  # predict(model_MARS, newdata = df_predictors, type = "response")[1:10]
+  # 
+  # 
+  # tt = trained_model_prediction_function[["Random_Forest"]]
+  # tt(df_predictors)[1:10]
+  # predict(model_Random_Forest, data = df_predictors, type = "response")$predictions[, 2][1:10]
+  # 
+  # 
+  # tt = trained_model_prediction_function[["Elastic-net"]]
+  # tt(df_predictors)[1:10]
+  # predict(model_Elastic_net, newx = df_predictors %>% as.matrix(), s = lambda_opt, family = family, type="response")[1:10]
+  
+  
+  if (method == "Permutation"){
+    cat('\n    - Permutation Feature Importance\n\n')
+    
+    obs_index_to_evaluate = NULL
+    obs_index_to_shuffle = NULL
+    obs_index_class = NULL
+    
+    feat_imp = evaluate_Perm_Feat_Imp(dataSample = df_work %>% mutate(y = as.character(y)),
+                                      trained_model_prediction_function = trained_model_prediction_function, n_repetitions = n_repetitions, compare = compare,
+                                      obs_index_to_evaluate = obs_index_to_evaluate, obs_index_to_shuffle = obs_index_to_shuffle, obs_index_class = obs_index_class,
+                                      perf_metric = perf_metric, perf_metric_add_pars = perf_metric_add_pars, true_val_name = true_val_name,
+                                      prediction_name = prediction_name, perf_metric_minimize = perf_metric_minimize,
+                                      verbose = verbose, n_workers = n_workers, seed = seed)
+  }
+  
+  if (method == "SHAP"){
+    cat('\n    - SHAP values\n')
+    
+    # downsample df_work to match y=1 and y=0 class # todo: find a better way to downsample
+    obs_0_to_remove = (sum(df_work$y == 0) * (1 - sum(df_work$y == 1) / sum(df_work$y == 0))) %>% as.integer()
+    set.seed(seed)
+    index_to_remove = sample(which(df_work$y == 0), obs_0_to_remove, replace = F)
+    df_work = df_work[-index_to_remove, ]
+    # df_work = df_work[1:100, ]   # todo: rimuovi
+    
+    obs_index_to_evaluate = NULL   # take all observations
+    obs_index_class = data.frame(obs_index = 1:nrow(df_work), class = df_work$y)   # evaluate SHAP for each class as well
+    
+    feat_imp = evaluate_SHAP(dataSample = df_work %>% select(-y),
+                             sample.size = sample.size, trained_model_prediction_function = trained_model_prediction_function,
+                             obs_index_to_evaluate = obs_index_to_evaluate, obs_index_class = obs_index_class,
+                             n_batch = n_batch, verbose = verbose, n_workers = n_workers, seed = seed)
+  }
+  
+  return(feat_imp)
 }
