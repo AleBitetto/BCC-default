@@ -10,6 +10,7 @@ library(reshape)
 library(Hmisc)
 library(lubridate)
 library(ggplot2)
+library(ggforce)
 library(gganimate)
 library(gtable)
 library(grid)
@@ -27,6 +28,8 @@ library(PKPDmisc)
 library(parallelMap)
 library(parallel)
 library(doParallel)
+library(future)
+library(future.apply)
 library(glmnet)
 library(HEMDAG)
 library(MLmetrics)
@@ -35,8 +38,10 @@ library(fastDummies)
 library(wesanderson)
 library(ranger)
 library(earth)
+library(kernlab)
 library(RSBID)
 library(rgl)
+library(tictoc)
 library(data.table)
 library(dplyr)
 library(tidyverse)
@@ -963,7 +968,7 @@ run_embedding_best_report = F    # create embedding visualization report for bes
           
           saveRDS(list_emb_visual, './Distance_to_Default/Checkpoints/list_emb_visual.rds')
           tot_diff=seconds_to_period(difftime(Sys.time(), start_time, units='secs'))
-          cat(' Done in', paste0(lubridate::hour(tot_diff), 'h:', lubridate::minute(tot_diff), 'm:', round(lubridate::second(tot_diff))))
+          cat(' Done in', paste0(lubridate::hour(tot_diff), 'h:', lubridate::minute(tot_diff), 'm:', round(lubridate::second(tot_diff))), ' ', as.character(Sys.time()))
         }
       } else {
         list_emb_visual = readRDS('./Distance_to_Default/Checkpoints/list_emb_visual.rds')
@@ -1854,10 +1859,13 @@ plot_manual_clustering = F
   }
 }
 
+rm(list_emb_visual, list_emb_visual_aggreg)
+
+
 # run logistic regression for each DD assignment in list_DD_CRIF_data
 run_oversample_test = F    # run test for oversampling percentage
-run_tuning = T    # force parameters tuning with cross-validation. If FALSE saved tuned parameters will be reloaded
-fit_final_model = T    # force fit model on full dataset with tuned parameters and reloaded cross-validated performance. If FALSE saved model will be reloaded
+run_tuning = F    # force parameters tuning with cross-validation. If FALSE saved tuned parameters will be reloaded
+fit_final_model = F    # force fit model on full dataset with tuned parameters and reloaded cross-validated performance. If FALSE saved model will be reloaded
 {
   # variables to be used as control variables (dummy)
   control_variables = c('Dummy_industry', 'Industry' , 'Dimensione_Impresa',  'segmento_CRIF', 'Regione_Macro') # todo: rimetti
@@ -1865,13 +1873,14 @@ fit_final_model = T    # force fit model on full dataset with tuned parameters a
   additional_var = "PD"   # variable to be added to baseline model to check added value
   fixed_variables = c("PD")   # variables to be always kept in the model, i.e. no shrinkage is applied
   n_fold = 5   # todo: rimetti
-  algo_set = c("Elastic-net", "Random_Forest", "MARS")    # see fit_model_with_cv() for allowed values
+  algo_set = c("Elastic-net", "Random_Forest", "MARS", "SVM-RBF")    # see fit_model_with_cv() for allowed values
   prob_thresh_cv = "best"    # probability threshold for cross-validation (in tuning)
   prob_thresh_full = "best"    # probability threshold for full dataset
   tuning_crit = "F1_test"  # "F1" or "AUC" or "Precision" or "Recall" or "Accuracy" for "_test" or "_train"
   tuning_crit_full = "F1_train"   # same of tuning_crit but applied to full dataset model when using prob_thresh_full = "best"
   tuning_crit_minimize = F    # if TRUE tuning_crit is minimized
   tuning_crit_minimize_full = F    # if TRUE tuning_crit is minimized
+  balance_abi_ndg_fold = F    # if TRUE balance distribution of abi_ndg between train and test when y=1 in cross-validation
   final_oversample_perc = 100     # percentage of oversampling (SMOTE)
   
   
@@ -1921,7 +1930,7 @@ fit_final_model = T    # force fit model on full dataset with tuned parameters a
                   mutate(rows = 1:n()), by = "rows") %>%
       mutate(y = as.factor(y))
     
-    png(paste0('./Distance_to_Default/Results/00_variable_distribution.png'), width = 12, height = 40, units = 'in', res=200)
+    png(paste0('./Distance_to_Default/Results/00_Input_variable_distribution.png'), width = 18, height = 20, units = 'in', res=200)
     plot(ggplot(df_check,
                 # filter(variable == "BILA_ARIC_VPROD"),
                 aes(x=val, fill = y)) +
@@ -1929,7 +1938,7 @@ fit_final_model = T    # force fit model on full dataset with tuned parameters a
            scale_fill_manual(values = c("blue", "red")) +
            labs(title = "Distribution of input variables by target",
                 y = "Density", x = "Values") +
-           facet_wrap(~variable, scales = "free", ncol = 3) +
+           facet_wrap(~variable, scales = "free", ncol = 5) +
            theme(axis.text.y = element_blank(),
                  axis.ticks.y = element_blank(),
                  axis.text.x = element_text(size = 14),
@@ -1938,6 +1947,7 @@ fit_final_model = T    # force fit model on full dataset with tuned parameters a
                  plot.subtitle = element_text(size=22),
                  legend.title=element_text(size=20),
                  legend.text=element_text(size=17),
+                 legend.position="top",
                  strip.text = element_text(size = 14),
                  panel.background = element_rect(fill = "white", colour = "black"),
                  panel.grid.major.x = element_line(colour = "grey", linetype = 'dashed', size = 0.4),
@@ -2080,6 +2090,111 @@ fit_final_model = T    # force fit model on full dataset with tuned parameters a
     dev.off()
   }
   
+  # check impact of abi_ndg that have different default flag over two years (1->0 or 0->1)
+  {
+    # check flag distribution
+    df_check = df_main %>%
+      select(abi_ndg, year, all_of(target_var)) %>%
+      rename(y = !!sym(target_var)) %>%
+      bind_cols(scaled_regressor)
+    
+    check_double_flag = df_check %>%
+      group_by(abi_ndg) %>%
+      summarize(total_flag = uniqueN(y))
+    
+    df_double = df_check %>%
+      filter(abi_ndg %in% (check_double_flag %>% filter(total_flag == 2) %>% pull(abi_ndg)))
+    df_single = df_check %>%
+      filter(abi_ndg %in% (check_double_flag %>% filter(total_flag == 1) %>% pull(abi_ndg)))
+    
+    df_target_type_abi_ndg = df_single %>%
+      mutate(Target_type = as.character(y)) %>%
+      select(abi_ndg, Target_type) %>%
+      unique() %>%
+      bind_rows(
+        df_double %>%
+          select(abi_ndg, year, y) %>%
+          group_by(abi_ndg) %>%
+          arrange(year) %>%
+          mutate(Target_type = paste0(y, collapse = "->")) %>%
+          select(abi_ndg, Target_type) %>%
+          unique()
+      )
+    
+    summary_double_flag = df_single %>%
+      group_by(y) %>%
+      summarise(Total_rows = n(),
+                Total_abi_ndg = uniqueN(abi_ndg)) %>%
+      rename(Target = y) %>%
+      mutate(Target = as.character(Target)) %>%
+      bind_rows(
+        df_double %>%
+          select(abi_ndg, year, y) %>%
+          group_by(abi_ndg) %>%
+          arrange(year) %>%
+          mutate(Target = paste0(y, collapse = "->")) %>%
+          mutate(Target = paste0(y, '(', Target, ')')) %>%
+          group_by(Target) %>%
+          summarise(Total_rows = n(),
+                    Total_abi_ndg = uniqueN(abi_ndg)) %>%
+          mutate(Total_abi_ndg = ifelse(grepl("1\\(", Target), NA, Total_abi_ndg))
+      ) %>%
+      as.data.frame() %>%
+      bind_rows(data.frame(Target = "Total", .[,-1] %>% summarise_all(sum, na.rm = T), stringsAsFactors = F)) %>%
+      mutate_if(is.numeric, ~format(., big.mark = ",")) %>%
+      replace(. == "    NA", "")
+    write.table(summary_double_flag, './Distance_to_Default/Results/00_Double_flag_summary.csv', sep = ';', row.names = F, append = F)
+    if (nrow(df_target_type_abi_ndg) != summary_double_flag %>% filter(Target == "Total") %>% pull(Total_abi_ndg) %>% gsub(",", "", .)  %>% as.numeric()){
+      cat('\n####### error: mismatch in df_target_type_abi_ndg total count of abi+ndg')
+    }
+    
+    # check predictors distribution for double flag
+    legend_order = df_target_type_abi_ndg %>%
+      group_by(Target_type) %>%
+      summarize(Obs = n()) %>%
+      arrange(match(Target_type, c("0", "1", "0->1", "1->0"))) %>%
+      mutate(label = paste0(Target_type, " (", Obs, " obs)"))
+    
+    data_plot = df_check %>%
+      left_join(df_target_type_abi_ndg, by = "abi_ndg") %>%
+      group_by(Target_type, abi_ndg) %>%
+      arrange(year) %>%
+      summarise_all(~(.[2] - .[1]) / abs(.[1])) %>%
+      filter(!is.na(year)) %>%
+      select(-abi_ndg, -year, -y) %>%
+      gather("Variable", "Value", -Target_type) %>%
+      group_by(Variable) %>%
+      mutate(p5 = quantile(Value, 0.05) %>% as.numeric(),
+             p95 = quantile(Value, 0.95) %>% as.numeric()) %>%
+      filter(Value <= p95 & Value >= p5) %>%
+      left_join(legend_order, by = "Target_type") %>%
+      mutate(label = factor(label, levels = legend_order$label))
+    # filter(Variable %in% c("BILA_ARIC_VPROD", "BILA_oneri_valagg"))
+    
+    png(paste0('./Distance_to_Default/Results/00_Target_variable_distribution.png'), width = 15, height = 30, units = 'in', res=300)
+    plot(ggplot(data_plot, aes(x = Value, fill = label)) +
+           geom_density(alpha = 0.5) +
+           scale_x_continuous(labels = scales::percent_format(accuracy = 1)) +
+           scale_fill_manual(values = c('dodgerblue3', 'firebrick2', 'chartreuse3', 'gold1')) +
+           labs(title = "Distribution of relative change (%)\nbetween 2012 and 2013", fill = "Target\nvariable:") +
+           facet_wrap(.~Variable, scales = 'free', ncol = 3) +
+           theme_bw() +
+           theme(
+             axis.text.y = element_blank(),
+             axis.text.x = element_text(size = 14),
+             axis.ticks.y = element_blank(),
+             # axis.title.x = element_text(size = 22),
+             axis.title = element_blank(),
+             plot.title = element_text(size = 32),
+             strip.text = element_text(size = 14),
+             legend.title=element_text(size=20),
+             legend.text=element_text(size=17))
+    )
+    dev.off()
+    
+    rm(df_check, check_double_flag, df_double, df_single, summary_double_flag, legend_order, data_plot)
+  }
+  
   log_tuning = log_tuning_all_fold = log_fitting = c()
   start_time_overall = Sys.time()
   for (model_setting in c("", control_variables)){
@@ -2092,7 +2207,7 @@ fit_final_model = T    # force fit model on full dataset with tuned parameters a
     }
     model_setting_lab = ifelse(model_setting == "", "no_control", paste0("control_", model_setting))
     
-    cat('\n===================== ', model_setting_lab, ' =====================\n')
+    cat('\n\n\n===================== ', model_setting_lab, ' =====================')
     
     
     # add dummy
@@ -2111,12 +2226,26 @@ fit_final_model = T    # force fit model on full dataset with tuned parameters a
     }
     main_regressor = colnames(scaled_regressor)
     
+    # set up final dataset
     df_main_work = df_main %>%
       select(abi_ndg, year, all_of(target_var)) %>%
       rename(y = !!sym(target_var)) %>%
       bind_cols(scaled_regressor) %>%
       `rownames<-`(paste0("row_", 1:nrow(.)))
-    if (sum(is.na(df_main_work)) > 0){cat('\n###### missing in df_main_work')} 
+    if (sum(is.na(df_main_work)) > 0){cat('\n###### missing in df_main_work')}
+    
+    # prepare input of function that balance distribution of abi_ndg between train and test when y=1 balance_abi_ndg_class1()
+    abi_ndg_row_reference_class1 = df_main_work %>%
+      filter(y == 1) %>%
+      select(abi_ndg) %>%
+      rownames_to_column("row_ind") %>%
+      mutate(row_ind = gsub("row_", "", row_ind) %>% as.numeric()) %>%
+      group_by(abi_ndg) %>%
+      summarise(row_ind = paste0(sort(row_ind), collapse = ","))
+    
+    abi_ndg_row_index = df_main_work %>%
+      select(abi_ndg) %>%
+      rownames_to_column("row_ind")
     
     ## split data into train and test using stratified sampling
     # library(HEMDAG)
@@ -2192,7 +2321,7 @@ fit_final_model = T    # force fit model on full dataset with tuned parameters a
           
           for (algo_type in algo_set){
             
-            cat('\n\n          # Fitting:', algo_type, '\n')
+            cat('\n\n          # Fitting:', algo_type)
             save_RDS_additional_lab = paste0("tuning", "_", model_setting_lab, "_", cluster_lab, "_", model, "_", data_type, "_", algo_type)
             
             # run or reload tuning
@@ -2204,13 +2333,15 @@ fit_final_model = T    # force fit model on full dataset with tuned parameters a
               
               tuning_perf = ml_tuning(df_work = df_work, algo_type = algo_type, cv_ind = cv_ind, prob_thresh_cv = prob_thresh_cv,
                                       tuning_crit = tuning_crit, tuning_crit_minimize = tuning_crit_minimize,
-                                      save_RDS_additional_lab = save_RDS_additional_lab, rds_folder = './Distance_to_Default/Checkpoints/ML_model/')
+                                      save_RDS_additional_lab = save_RDS_additional_lab, rds_folder = './Distance_to_Default/Checkpoints/ML_model/',
+                                      balance_abi_ndg_fold = balance_abi_ndg_fold,
+                                      abi_ndg_row_reference_class1 = abi_ndg_row_reference_class1, abi_ndg_row_index = abi_ndg_row_index)
               
               saveRDS(tuning_perf, paste0('./Distance_to_Default/Checkpoints/ML_model/02_reload_', save_RDS_additional_lab, '.rds'))
-              cat('Done in', tuning_perf$optimization_results$total_time %>% unique(), '\n')
+              cat('Done in', tuning_perf$optimization_results$total_time %>% unique(), ' ', as.character(Sys.time()))
               
             } else {
-              cat('\n            * reloaded best parameters\n')
+              cat('\n            * reloaded best parameters')
             } # run_tuning
             
             # select best parameters and fit model on full dataset
@@ -2223,17 +2354,19 @@ fit_final_model = T    # force fit model on full dataset with tuned parameters a
             if (is.null(fit_fullset) | fit_final_model){
               
               cat('\n            * fitting full-set model...', end = '')
-              
+
               fit_fullset = fit_model_with_cv(df_work = df_work, cv_ind = NULL, algo_type = algo_type,
                                               parameter_set = best_param_set, non_tunable_param = non_tunable_param,
                                               no_cv_train_ind = c(1:nrow(df_work)), no_cv_test_ind = NULL,
-                                              prob_thresh_cv = prob_thresh_full, tuning_crit = tuning_crit_full, tuning_crit_minimize = tuning_crit_minimize_full)
+                                              prob_thresh_cv = prob_thresh_full, tuning_crit = tuning_crit_full, tuning_crit_minimize = tuning_crit_minimize_full,
+                                              balance_abi_ndg_fold = balance_abi_ndg_fold,
+                                              abi_ndg_row_reference_class1 = abi_ndg_row_reference_class1, abi_ndg_row_index = abi_ndg_row_index)
               
               saveRDS(fit_fullset, paste0('./Distance_to_Default/Checkpoints/ML_model/03_reload_', best_model_RDS_lab, '.rds'))
-              cat('Done in', fit_fullset$total_time, '\n')
+              cat('Done in', fit_fullset$total_time, ' ', as.character(Sys.time()))
               
             } else {
-              cat('\n            * reloaded full-set model\n')
+              cat('\n            * reloaded full-set model')
             } # fit_final_model
             
             # save results
@@ -2268,12 +2401,14 @@ fit_final_model = T    # force fit model on full dataset with tuned parameters a
                               left_join(tuning_perf$optimization_results %>%
                                           select(all_of(names(best_param_set)), param_compact_label), by = names(best_param_set)) %>%
                               select(-all_of(names(best_param_set)), -fold, -ends_with("_test")) %>%
-                              select(param_compact_label, everything()))
+                              select(param_compact_label, everything()) %>%
+                              mutate(rds = paste0('./Distance_to_Default/Checkpoints/ML_model/03_reload_', best_model_RDS_lab, '.rds')))
               )
             
-            write.table(log_tuning, './Distance_to_Default/Checkpoints/ML_model/00_Optimization_list.csv', sep = ';', row.names = F, append = F)
-            write.table(log_tuning_all_fold, './Distance_to_Default/Checkpoints/ML_model/01_Optimization_list_ALLFOLDS.csv', sep = ';', row.names = F, append = F)
-            write.table(log_tuning, './Distance_to_Default/Results/02_Fitted_models_performance.csv', sep = ';', row.names = F, append = F)
+            # todo: controlla non siano commentati
+            write.table(log_tuning, './Distance_to_Default/Checkpoints/ML_model/00_Optimization_list.csv', sep = ';', row.names = F, append = F, na = "")
+            write.table(log_tuning_all_fold, './Distance_to_Default/Checkpoints/ML_model/01_Optimization_list_ALLFOLDS.csv', sep = ';', row.names = F, append = F, na = "")
+            write.table(log_fitting, './Distance_to_Default/Results/02_Fitted_models_performance.csv', sep = ';', row.names = F, append = F, na = "")
  
             # todo: rimuovi, serve per debugging
             # df_work = df_work_baseline
@@ -2303,30 +2438,43 @@ fit_final_model = T    # force fit model on full dataset with tuned parameters a
     } # cluster_lab 
   } # model_setting
   tot_diff=seconds_to_period(difftime(Sys.time(), start_time_overall, units='secs'))
-  cat('\n\nTotal elapsed time:', paste0(lubridate::hour(tot_diff), 'h:', lubridate::minute(tot_diff), 'm:', round(lubridate::second(tot_diff))))
+  cat('\n\nTotal elapsed time:', paste0(lubridate::day(tot_diff), 'd:', lubridate::hour(tot_diff), 'h:', lubridate::minute(tot_diff), 'm:', round(lubridate::second(tot_diff))))
   
   
+  # todo: controlla cosa rimuovere
   rm(additional_full, baseline_full, best_alpha, cv_ind, cv_ind_check, data_test_additional, data_test_baseline, data_train_additional, data_train_baseline,
      df_main_work, df_work_additional, df_work_baseline, final_distr_data, scaled_regressor, strat_fold, tuning_perf)
+  
+  
+
+  
+  
+  log_tuning = read.csv('./Distance_to_Default/Checkpoints/ML_model/00_Optimization_list - Copy.csv', sep=";", stringsAsFactors=FALSE)
+  log_fitting = read.csv('./Distance_to_Default/Results/02_Fitted_models_performance - Copy.csv', sep=";", stringsAsFactors=FALSE)
+  
+  
   
   ## create report
   {
     # for (cluster_lab in unique(log_fitting$cluster_lab)){}      # todo: cicla
     cl_lab = "roa_Median_-_peers_Volatility"
-    d_type = "oversample"      # todo: cicla
+    d_type = "original"      # todo: cicla
     plt_perf = "F1"
-    
+    alg_type = "Random_Forest"
     
     
     # performance comparison - test set for cross-validated folds
     perf_lab = ifelse(plt_perf == "F1", "F1-score", plt_perf)
     y_lim = c(log_fitting %>% pull(paste0(plt_perf, "_train")), log_tuning %>% pull(paste0(plt_perf, "_test_avg"))) %>% range()
-    dist_baseline = 1
+    dist_baseline = 1    # x-label spacing
     dist_dataset = 0.5
     tt = log_fitting %>%
       filter(data_type == d_type) %>%
       filter(cluster_lab == cl_lab) %>%
-      left_join(log_tuning, by = c("model_setting_lab", "cluster_lab", "model", "alpha", "data_type")) %>%
+      filter(algo_type == alg_type) %>%
+      left_join(log_tuning %>%
+                  select(model_setting_lab, cluster_lab, data_type, model, algo_type, param_compact_label, matches("_avg|_std")),
+                by = c("model_setting_lab", "cluster_lab", "data_type", "model", "algo_type", "param_compact_label")) %>%
       select(model_setting_lab, model, starts_with(plt_perf)) %>%
       gather('measure', 'val', -c(model_setting_lab, model)) %>%
       mutate(measure = gsub(paste0(plt_perf, "_"), "", measure)) %>%
@@ -2379,28 +2527,32 @@ fit_final_model = T    # force fit model on full dataset with tuned parameters a
             panel.background = element_rect(fill = "white", colour = "black"),
             panel.grid.major.y = element_line(colour = "grey", linetype = 'dashed', size = 0.8),
             panel.grid.minor.y = element_line(colour = "grey", linetype = 'dashed', size = 0.8))
-    
-    
-    # todo: togli, servono solo per la call
-    png(paste0('./Distance_to_Default/Results/perf_test_', cl_lab, '_', d_type, '.png'), width = 12, height = 10, units = 'in', res=100)
+
+    png(paste0('./Distance_to_Default/Results/03_Perf_comparison_', cl_lab, '_', d_type, '_', alg_type, '.png'), width = 12, height = 10, units = 'in', res=100)
     plot(p_perf)
     dev.off()
     
     
     
     # probability distribution
-    model_setting_lab = "no_control"     # todo: cicla e metti insieme nella stessa immagine
+    tot_mod_set_lab = log_fitting$model_setting_lab %>% unique()
+    tot_mod_set_lab = c(tot_mod_set_lab, tot_mod_set_lab)   # todo: rimuovi
+    fig_per_row = 3
     
-    # tt = log_fitting %>%
-    #   filter(data_type == d_type) %>%
-    #   filter(cluster_lab == cl_lab) %>%
-    #   filter(model_setting_lab == ms_lab)
-    
-    reload_full = readRDS(paste0('./Distance_to_Default/Checkpoints/logistic_regression/final_', model_setting_lab, '_', cl_lab, '.rds'))
-    tt = c()
-    for(d_type in names(reload_full)){
+    row_list = c()
+    fig_count = 1
+    for (mod_set_lab in tot_mod_set_lab){
+      # mod_set_lab = "no_control"     # todo: rimuovi
       
-      tt_bas = reload_full[[d_type]]$baseline_full$pred_train %>%
+      if (fig_count %% fig_per_row == 1){row_img = c()}
+      
+      rds_ref = log_fitting %>%
+        filter(data_type == d_type) %>%
+        filter(cluster_lab == cl_lab) %>%
+        filter(algo_type == alg_type) %>%
+        filter(model_setting_lab == mod_set_lab)
+      
+      tt = readRDS(rds_ref %>% filter(model == "baseline") %>% pull(rds))$fold_prediction %>%
         mutate(data_type = d_type,
                model = "Baseline") %>%
         group_by(y_true) %>%
@@ -2408,67 +2560,106 @@ fit_final_model = T    # force fit model on full dataset with tuned parameters a
         ungroup() %>%
         group_by(y_true, y_pred) %>%
         mutate(tot_pred = n()) %>%
-        ungroup()
-      
-      tt_add = reload_full[[d_type]]$additional_full$pred_train %>%
-        mutate(data_type = d_type,
-               model = "additional_var") %>%
-        group_by(y_true) %>%
-        mutate(tot_true = n()) %>%
         ungroup() %>%
-        group_by(y_true, y_pred) %>%
-        mutate(tot_pred = n()) %>%
-        ungroup()
+        bind_rows(
+          readRDS(rds_ref %>% filter(model == "additional_var") %>% pull(rds))$fold_prediction %>%
+            mutate(data_type = d_type,
+                   model = "additional_var") %>%
+            group_by(y_true) %>%
+            mutate(tot_true = n()) %>%
+            ungroup() %>%
+            group_by(y_true, y_pred) %>%
+            mutate(tot_pred = n()) %>%
+            ungroup()
+        ) %>%
+        rename(Predicted = y_pred) %>%
+        mutate(y_true = paste0("True: ", y_true, " (", format(tot_true, big.mark = ","), " obs)"),
+               model = gsub("additional_var", paste0("With ", additional_var), model))
       
-      tt = tt %>%
-        bind_rows(tt_bas,
-                  tt_add)
-      rm(tt_bas, tt_add)
-    }
-    tt = tt %>%
-      rename(Predicted = y_pred) %>%
-      mutate(y_true = paste0("True: ", y_true, " (", format(tot_true, big.mark = ","), " obs)"),
-             model = gsub("additional_var", paste0("With ", additional_var), model))
+      tt_annotate = tt %>%
+        group_by(data_type, model, y_true) %>%
+        summarize(Pred_lab_1 = paste0("Pred \"1\"\nobs: ", format(tot_pred[Predicted == 1][1], big.mark = ",")),
+                  Pred_lab_0 = paste0("Pred \"0\"\nobs: ", format(tot_pred[Predicted == 0][1], big.mark = ",")), .groups = "drop")
       
-    tt_annotate = tt %>%
-      group_by(data_type, model, y_true) %>%
-      summarize(Pred_lab_1 = paste0("Pred \"1\"\nobs: ", format(tot_pred[Predicted == 1][1], big.mark = ",")),
-                Pred_lab_0 = paste0("Pred \"0\"\nobs: ", format(tot_pred[Predicted == 0][1], big.mark = ",")), .groups = "drop")
+      p_distr = ggplot(tt, aes(x=Prob, fill = Predicted)) +
+        geom_density(alpha = 0.5) +
+        scale_fill_manual(values = c("blue", "red")) +
+        scale_x_continuous(labels = scales::percent_format(accuracy = 1)) +
+        labs(title = paste0(fig_count, "---", gsub("control_", "", mod_set_lab) %>% gsub("_", " ", .)),  # todo: togli paste0
+             y = "Density", x = "Predicted probability", fill = "Predicted\nClass") +
+        facet_grid(model~y_true, scales = "fixed", switch = 'y') +
+        theme(
+          axis.text.y = element_blank(),
+          axis.ticks.y = element_blank(),
+          axis.text.x = element_text(size = 14),
+          axis.title = element_text(size = 20),
+          plot.title = element_text(size=27),
+          plot.subtitle = element_text(size=22),
+          legend.title=element_text(size=20),
+          legend.text=element_text(size=17),
+          strip.text = element_text(size = 14),
+          strip.text.y = element_text(margin = margin(0,0.4,0,0.4, "cm")),
+          panel.background = element_rect(fill = "white", colour = "black"),
+          panel.grid.major.x = element_line(colour = "grey", linetype = 'dashed', size = 0.4),
+          panel.grid.minor.x = element_line(colour = "grey", linetype = 'dashed', size = 0.4))
+      max_y_val = suppressWarnings(layer_scales(p_distr)$y$get_limits() %>% max())
+      p_distr = p_distr +
+        geom_text(data = tt_annotate %>% filter(data_type == d_type) %>% mutate(Prob = 0.75, Predicted = "1"), aes(x = Prob, y = 0.9*max_y_val, label = Pred_lab_1), size = 5) +
+        geom_text(data = tt_annotate %>% filter(data_type == d_type) %>% mutate(Prob = 0.25, Predicted = "0"), aes(x = Prob, y = 0.9*max_y_val, label = Pred_lab_0), size = 5) +
+        geom_segment(aes(x = threshold , y = 0, xend = threshold, yend = 0.8*max_y_val), linetype = 'dashed', size = 1.2) +
+        geom_text(aes(x = threshold, y = 0, label = as.character(round(threshold, 2))), vjust = 1)
+      if (fig_count %% fig_per_row != 0 & fig_count != length(tot_mod_set_lab)){
+        p_distr = p_distr + theme(legend.position = "none")
+      }
+      
+      img = image_graph(res = 100, width = 800, height = 800, clip = F)
+      suppressWarnings(p_distr)
+      dev.off()
+      
+      cat('\n', fig_count, dim(img))
+      
+      if (is.null(row_img)){
+        row_img = img
+      } else {
+        row_img = image_append(c(row_img, img))
+      }
+      if (fig_count %% fig_per_row == 0 | fig_count == length(tot_mod_set_lab)){row_list = c(row_list, row_img)}
+      cat('\n', fig_count)
+      fig_count = fig_count + 1
+    } # mod_set_lab
     
+    # assemble rows
+    eval(parse(text=paste0('final_plot = image_append(c(', paste0('row_list[[', 1:length(row_list), ']]', collapse = ','), '), stack = T)')))
     
-    d_type = "oversample"   # todo: già ciclato sopra
+    # add main title and subtitle
+    title_lab = image_graph(res = 100, width = image_info(final_plot)$width, height = 200, clip = F)
+    plot(
+      ggplot(mtcars, aes(x = wt, y = mpg)) + geom_blank() + xlim(0, 1) + ylim(0, 5) +
+        annotate(geom = "text", x = 0, y = 3.5, label = "titletttt", cex = 20, hjust = 0, vjust = 0.5) +
+        annotate(geom = "text", x = 0, y = 1.5, label = "subtitletttt", cex = 15, hjust = 0, vjust = 0.5) +
+        theme_bw() +
+        theme( panel.grid.major = element_blank(), panel.grid.minor = element_blank(), panel.border = element_blank(),
+               axis.title=element_blank(), axis.text=element_blank(), axis.ticks=element_blank(),
+               plot.margin=unit(c(0,0.4,0,0.4),"cm"))
+    )
+    dev.off()
     
+    final_plot = image_append(c(title_lab, final_plot), stack = T)
+
+    png(paste0('./Distance_to_Default/Results/04_Prob_distr_', cl_lab, '_', d_type, '_', alg_type, '.png'), width = 7, height = 2.1 * length(row_list), units = 'in', res=300)
+    par(mar=c(0,0,0,0))
+    par(oma=c(0,0,0,0))
+    plot(final_plot)
+    dev.off()
     
-    ggplot(tt %>%
-             filter(data_type == d_type),
-               # filter(model == "Baseline", y_true == "True: 1 ( 1,338 obs)"),
-             aes(x=Prob, fill = Predicted)) +
-      geom_density(alpha = 0.5) +
-      scale_fill_manual(values = c("blue", "red")) +
-      scale_x_continuous(labels = scales::percent_format(accuracy = 1)) +
-      labs(title = "Distribution of true vs predicted",
-           subtitle = "Vertical lines represent classification thresholds",
-           y = "Density", x = "Predicted probability") +
-      geom_vline(aes(xintercept = threshold), linetype = 'dashed', size = 1.2) +
-      facet_grid(model~y_true, scales = "fixed", switch = 'y') +
-      theme(axis.text.y = element_blank(),
-            axis.ticks.y = element_blank(),
-            axis.text.x = element_text(size = 14),
-            axis.title = element_text(size = 24),
-            plot.title = element_text(size=30),
-            plot.subtitle = element_text(size=22),
-            legend.title=element_text(size=20),
-            legend.text=element_text(size=17),
-            strip.text = element_text(size = 14),
-            panel.background = element_rect(fill = "white", colour = "black"),
-            panel.grid.major.x = element_line(colour = "grey", linetype = 'dashed', size = 0.4),
-            panel.grid.minor.x = element_line(colour = "grey", linetype = 'dashed', size = 0.4)) +
-      geom_text(data = tt_annotate %>% filter(data_type == d_type) %>% mutate(Prob = 0.75, Predicted = "1"), aes(x = Prob, y = 3.6, label = Pred_lab_1), size = 6) +
-      geom_text(data = tt_annotate %>% filter(data_type == d_type) %>% mutate(Prob = 0.25, Predicted = "0"), aes(x = Prob, y = 3.6, label = Pred_lab_0), size = 6)
+    # todo: capisci perché magik non funziona nel loop per fig_count = 2
+    
+    labs(title = "Distribution of true vs predicted",
+         subtitle = "Vertical lines represent probability to class thresholds",
     
     
     # todo: togli, servono solo per la call
-    png(paste0('./Distance_to_Default/Results/perf_test_', cl_lab, '_', model_setting_lab, '_', d_type, '.png'), width = 12, height = 10, units = 'in', res=100)
+    png(paste0('./Distance_to_Default/Results/prob_distr_', cl_lab, '_', model_setting_lab, '_', d_type, '_', alg_type, '.png'), width = 12, height = 10, units = 'in', res=100)
     plot(p_distr)
     dev.off()
     
@@ -2491,6 +2682,36 @@ fit_final_model = T    # force fit model on full dataset with tuned parameters a
 # https://stats.stackexchange.com/questions/74622/converting-standardized-betas-back-to-original-variables
 
 # todo: aggiungi la variable importance
+
+# todo: aggiungi un semplice calcolo di quanti abi_ndg cambiano flag da un anno all'altro. Magari si potrebbe fare un focus di predizione solo su quelli
+#       per capire se il modello riesce a predirli bene o li predice sempre 0 o sempre 1.
+#       aa = df_main_work %>% group_by(abi_ndg) %>% summarize(cc = uniqueN(y))
+
+vv = df_main_work %>%
+  filter(abi_ndg %in% (aa %>% filter(cc == 2) %>% pull(abi_ndg)))
+
+vv1 = vv %>%
+  group_by(abi_ndg) %>%
+  arrange(year) %>%
+  summarise(evol = paste0(y, collapse = ",")) %>%
+  group_by(evol) %>%
+  summarise(Count = n())
+
+
+
+vv2 = df_main_work %>%
+  filter(!abi_ndg %in% (aa %>% filter(cc == 2) %>% pull(abi_ndg))) %>%
+  group_by(y) %>%
+  summarise(count = n())
+
+
+
+
+
+
+
+
+
 
 
 

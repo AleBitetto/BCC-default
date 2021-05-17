@@ -1070,7 +1070,7 @@ scale_range = function(x, a, b, xmin = NULL, xmax = NULL, mode = 'linear', s = N
   
   # Scale input interval into new range
   # - a, b: new interval range
-  # - xmin, xmax: provided if scaling has to be performed from a different input range [min(x), max(x)]
+  # - xmin, xmax: provided if scaling has to be performed from a input range different from [min(x), max(x)]
   # - mode: 'linear' for linear scaling, 'exponential' for exponential scaling
   # - s: if mode == 'exponential' s is used for decay in exponential kernel.
   # The higher s the more spiked the decay (leptokurtic)
@@ -2091,6 +2091,179 @@ dataset_oversample = function(data, target_var, oversample_perc, categorical_reg
   return(data_over)
 }
 
+# balance distribution of abi_ndg between train and test when y=1
+balance_abi_ndg_class1 = function(data_train, data_test, abi_ndg_row_reference_class1, abi_ndg_row_index){
+  
+  # Balance distribution of abi_ndg with y=1 between train and test. Fix the problem of abi_ndg with multiple observations
+  # data_train, data_test: data.frame of train and test set. Must have rownames with "row_123" and target variable "y"
+  # abi_ndg_row_reference_class1: data.frame with "abi_ndg" and "row_ind" = string of corresponding "row_123" for abi_ndg, e.g. "23,24".
+  #                               "abi_ndg" has unique values only. Only abi_ndg with target variable = 1
+  # abi_ndg_row_index: data.frame with "row_ind" and "abi_ndg", where "row_ind" = "row_123". "abi_ndg" is repeated over different "row_ind"
+  #
+  # Output: list of (data_train_new, data_test_new, summary_movement)
+  
+  # set up main working dataset
+  data_work = data_train %>%
+    rownames_to_column("row_ind") %>%
+    mutate(set = "train") %>%
+    bind_rows(
+      data_test %>%
+        rownames_to_column("row_ind") %>%
+        mutate(set = "test"))
+  
+  # subset y=1
+  test_1 = data_test %>%
+    filter(y == 1) %>%
+    rownames_to_column("row_ind") %>%
+    left_join(abi_ndg_row_index, by = "row_ind")
+  
+  train_1 = data_train %>%
+    filter(y == 1) %>%
+    rownames_to_column("row_ind") %>%
+    left_join(abi_ndg_row_index, by = "row_ind")
+  
+  # find unbalanced observations
+  check_balance = train_1 %>%
+    select(abi_ndg) %>%
+    group_by(abi_ndg) %>%
+    summarize(train_obs = n()) %>%
+    full_join(
+      test_1 %>%
+        select(abi_ndg) %>%
+        group_by(abi_ndg) %>%
+        summarize(test_obs = n()), by = "abi_ndg") %>%
+    replace(is.na(.), 0) %>%
+    mutate(unbalance = ifelse((train_obs == 0 & test_obs > 1) | (train_obs > 1 & test_obs == 0), "yes", "no"))
+  
+  # unbalanced observation
+  df_unbalance = check_balance %>%
+    filter(unbalance == "yes") %>%
+    left_join(abi_ndg_row_reference_class1, by = "abi_ndg")
+  
+  if (nrow(df_unbalance) > 0){
+    # observations in one single set -> candidates to replace movement of unbalanced observations
+    df_free_to_move = check_balance %>%
+      filter(unbalance == "no") %>%
+      filter(train_obs == 0 | test_obs == 0) %>%
+      mutate(from = ifelse(train_obs == 0, "test", "train")) %>%
+      mutate(to = ifelse(from == "test", "train", "test")) %>%
+      left_join(abi_ndg_row_reference_class1, by = "abi_ndg") %>%
+      group_by(abi_ndg) %>%
+      slice(rep(1:n(), first(length(strsplit(row_ind, "\\,")[[1]])))) %>%
+      mutate(index = strsplit(row_ind, "\\,")[[1]] %>% as.numeric()) %>%
+      ungroup() %>%
+      arrange(abi_ndg, index) %>%  # for reproducibility
+      mutate(n_ord = 1:n())
+    
+    # find remapping rows for unbalanced abi_ndg in train and test - always move first index by row_ind (to ensure reproducibility)
+    index_remapping = c()
+    for (i in 1:nrow(df_unbalance)){
+      row = df_unbalance[i, ]
+      train_obs = row$train_obs
+      test_obs = row$test_obs
+      abi_index = strsplit(row$row_ind, "\\,")[[1]] %>% as.numeric()
+      obs_to_move = as.integer((train_obs + test_obs) / 2)
+      index_to_move = abi_index[1:obs_to_move]
+      
+      if (train_obs > test_obs){
+        index_remapping = index_remapping %>%
+          bind_rows(data.frame(index = index_to_move, from = "train", to = "test", stringsAsFactors = F))
+      } else {
+        index_remapping = index_remapping %>%
+          bind_rows(data.frame(index = index_to_move, from = "test", to = "train", stringsAsFactors = F))
+      }
+    }
+    index_remapping = index_remapping %>%
+      mutate(type = "unbalance")
+    
+    total_train_to_test = (index_remapping$from == "train") %>% sum()
+    total_test_to_train = nrow(index_remapping) - total_train_to_test
+    
+    # find replacement to balance the remapping from df_free_to_move
+    if (total_train_to_test > 0){
+      index_remapping = index_remapping %>%
+        bind_rows(df_free_to_move %>%
+                    filter(from == "test") %>%
+                    arrange(n_ord) %>%
+                    filter(row_number() <= total_train_to_test) %>%
+                    select(index, from, to) %>%
+                    mutate(type = "free"))
+    }
+    if (total_test_to_train > 0){
+      index_remapping = index_remapping %>%
+        bind_rows(df_free_to_move %>%
+                    filter(from == "train") %>%
+                    arrange(n_ord) %>%
+                    filter(row_number() <= total_test_to_train) %>%
+                    select(index, from, to) %>%
+                    mutate(type = "free"))
+    }
+    
+    # apply observations switching
+    data_work = data_work %>%
+      left_join(index_remapping %>%
+                  mutate(row_ind = paste0("row_", index)) %>%
+                  rename(final_set = to) %>%
+                  select(row_ind, final_set), by = "row_ind") %>%
+      mutate(final_set = ifelse(is.na(final_set), set, final_set)) %>%
+      column_to_rownames("row_ind")
+    
+    data_train_new = data_work %>%
+      filter(final_set == "train") %>%
+      select(colnames(data_train))
+    data_test_new = data_work %>%
+      filter(final_set == "test") %>%
+      select(colnames(data_test))
+    
+    # if (abs(nrow(data_train) - nrow(data_train_new)) + abs(nrow(data_test) - nrow(data_test_new)) !=
+    #     2*abs(sum(index_remapping$type == "free") - sum(index_remapping$type == "unbalance"))){
+    #   cat('\n\n########### error in balancing train and test folds')
+    # }
+    
+    # further check for final balancing
+    test_1_new = data_test_new %>%
+      filter(y == 1) %>%
+      rownames_to_column("row_ind") %>%
+      left_join(abi_ndg_row_index, by = "row_ind")
+    
+    train_1_new = data_train_new %>%
+      filter(y == 1) %>%
+      rownames_to_column("row_ind") %>%
+      left_join(abi_ndg_row_index, by = "row_ind")
+    
+    
+    check_balance_new = train_1_new %>%
+      select(abi_ndg) %>%
+      group_by(abi_ndg) %>%
+      summarize(train_obs = n()) %>%
+      full_join(
+        test_1_new %>%
+          select(abi_ndg) %>%
+          group_by(abi_ndg) %>%
+          summarize(test_obs = n()), by = "abi_ndg") %>%
+      replace(is.na(.), 0) %>%
+      mutate(unbalance = ifelse((train_obs == 0 & test_obs > 1) | (train_obs > 1 & test_obs == 0), "yes", "no"))
+    if (sum(check_balance_new$unbalance == "yes") > 0){cat('\n\n########### error in final balanced train and test folds')}
+    
+    summary_movement = table(data_train$y) %>% as.data.frame() %>% mutate(set = "train") %>% spread(Var1, Freq) %>%
+      bind_rows(
+        table(data_train_new$y) %>% as.data.frame() %>% mutate(set = "train_new") %>% spread(Var1, Freq),
+        table(data_test$y) %>% as.data.frame() %>% mutate(set = "test") %>% spread(Var1, Freq),
+        table(data_test_new$y) %>% as.data.frame() %>% mutate(set = "test_new") %>% spread(Var1, Freq)
+      )
+    
+  } else {
+    data_train_new = data_train
+    data_test_new = data_test
+    summary_movement = NULL
+  } # nrow(df_unbalance) > 0
+  if (nrow(data_train) + nrow(data_test) != nrow(data_train_new) + nrow(data_test_new)){cat('\n\n########### error in balancing: rows missing')}
+  
+  return(list(data_train_new = data_train_new,
+              data_test_new = data_test_new,
+              summary_movement = summary_movement))
+}
+
 # fit Random Forest with ranger
 fit_RandomForest = function(data_train, data_test, num.trees, mtry, min.node.size){
   
@@ -2182,22 +2355,63 @@ fit_MARS = function(data_train, data_test, degree){
               options = list(degree = degree)))
 }
 
+# fit SVM with RBF
+fit_SVM_RBF = function(data_train, data_test, sigma, C, scaled = F){
+  
+  # https://cran.r-project.org/web/packages/kernlab/kernlab.pdf
+  # data_train: must contain target variable as "y" and factor
+  # data_test: same columns of data_train ("y" not required)
+  
+  # fit model
+  fit <-  ksvm(y~., data = data_train, type = "C-svc", prob.model = T, scaled = scaled,
+               kernel="rbfdot", kpar=list(sigma = sigma), C=C)
+  
+  # predict on train and test
+  pred_prob_train = predict(fit, newdata = data_train, type = "probabilities")[,2] %>%
+    data.frame() %>%
+    setNames("Prob") %>%
+    `rownames<-`(rownames(data_train))
+  if (!is.null(data_test)){
+    pred_prob_test = predict(fit, newdata = data_test, type = "probabilities")[,2] %>%
+      data.frame() %>%
+      setNames("Prob") %>%
+      `rownames<-`(rownames(data_test))
+  } else {
+    pred_prob_test = NULL
+  }
+  
+  return(list(fit = fit,
+              pred_prob_train = pred_prob_train,
+              pred_prob_test = pred_prob_test,
+              options = list(sigma = sigma,
+                             C = C,
+                             scaled = scaled)))
+}
+
 # fit model with or without cross-validation
 fit_model_with_cv = function(df_work, cv_ind, algo_type, parameter_set, non_tunable_param = NULL, no_cv_train_ind = NULL, no_cv_test_ind = NULL,
-                             prob_thresh_cv = 0.5, tuning_crit = "F1_test", tuning_crit_minimize = F){
+                             prob_thresh_cv = 0.5, tuning_crit = "F1_test", tuning_crit_minimize = F,
+                             balance_abi_ndg_fold = F, abi_ndg_row_reference_class1 = NULL, abi_ndg_row_index = NULL,
+                             train_downsample_perc = NULL){
   
   # fit model on each fold, evaluate class based on threshold prob_thresh_cv and return final performance tuning_crit
   
-  # df_work: full dataset to sample fold from
+  # df_work: full dataset to sample fold from. Target variable must be "y".
   # cv_ind: dataframe ["ind", "fold"] of index for each fold. Unused if no_cv_train_ind != NULL or no_cv_test_ind != NULL
   # no_cv_train_ind: index for train set for fitting without cross-validation
   # no_cv_test_ind: index for test set for fitting without cross-validation
-  # algo_type: algorithm to be fitted. "Elastic-net", "Random_Forest", "MARS"
+  # algo_type: algorithm to be fitted. "Elastic-net", "Random_Forest", "MARS", "SVM-RBF"
   # parameter_set: named list of parameters for algo_type
-  # non_tunable_param: list of additional parameters not to be tuned
+  # non_tunable_param: list of additional parameters not to be tuned - used only when tuning.
   # prob_thresh_cv: threshold to convert probabilities into class. If "best" optimal value is evaluated according to tuning_crit
   # tuning_crit: criterion to be optimized - "AUC" or "Precision" or "Recall" or "Accuracy" for "_test" or "_train"
   # tuning_crit_minimize: whether to minimize or maximize tuning_crit
+  # balance_abi_ndg_fold: if TRUE balance distribution of abi_ndg between train and test when y=1 in cross-validation using balance_abi_ndg_class1()
+  # abi_ndg_row_reference_class1, abi_ndg_row_index: input for balance_abi_ndg_class1()
+  # train_downsample_perc: if not NULL downsample train set for y=0. New y=0 will account to train_downsample_perc*n_total_0    # todo va eventualmente inclusa come input nella funzione di tuning
+  
+  # check target variable
+  if (!"y" %in% colnames(df_work)){stop('No target variable "y" found')}
   
   tuned_param = parameter_set
   parameter_set = c(parameter_set, non_tunable_param)
@@ -2229,6 +2443,21 @@ fit_model_with_cv = function(df_work, cv_ind, algo_type, parameter_set, non_tuna
     # filter(row_number() <= 1500) %>%   # todo: rimuovi
     # ungroup()
     if (nrow(data_test) == 0){data_test = NULL}
+    
+    # downsample train set for y=0
+    if (!is.null(train_downsample_perc)){
+      obs_0_to_remove = (sum(data_train$y == 0) * (1 - train_downsample_perc)) %>% as.integer()
+      set.seed(66)
+      index_to_remove = sample(which(data_train$y == 0), obs_0_to_remove, replace = F)
+      data_train = data_train[-index_to_remove, ]
+    }
+    
+    # balance distribution of abi_ndg between train and test when y=1
+    if (balance_abi_ndg_fold & nrow(data_test) != 0){
+      bal = balance_abi_ndg_class1(data_train, data_test, abi_ndg_row_reference_class1, abi_ndg_row_index)
+      data_train = bal$data_train_new
+      data_test = bal$data_test_new
+    }
     
     # return column data.frame "Prob" of predicted probabilities for train and test set
     if (algo_type == "Elastic-net"){
@@ -2267,6 +2496,14 @@ fit_model_with_cv = function(df_work, cv_ind, algo_type, parameter_set, non_tuna
       
       fit_train = fit_MARS(data_train = data_train %>% mutate(y = as.factor(y)), data_test = data_test, degree = degree)
       
+    } else if (algo_type == "SVM-RBF"){
+      
+      sigma = parameter_set$sigma
+      C = parameter_set$C
+      scaled = parameter_set$scaled
+      
+      fit_train = fit_SVM_RBF(data_train = data_train %>% mutate(y = as.factor(y)), data_test = data_test, sigma = sigma, C = C, scaled = scaled)
+      
     }
     prob_train = fit_train$pred_prob_train
     prob_test = fit_train$pred_prob_test
@@ -2300,7 +2537,8 @@ fit_model_with_cv = function(df_work, cv_ind, algo_type, parameter_set, non_tuna
     fold_prediction = fold_prediction %>%
       bind_rows(pred_to_bind)
   } # fold_i
-  if (nrow(fold_prediction) != fold_i * nrow(df_work) & is.null(no_cv_train_ind)){cat('\n\n###### mismatch in fold evaluation: total observation mismatch - ', algo_type, '\n')
+  if (nrow(fold_prediction) != fold_i * nrow(df_work) & is.null(no_cv_train_ind) & is.null(train_downsample_perc)){
+    cat('\n\n###### mismatch in fold evaluation: total observation mismatch - ', algo_type, '\n')
     print(unlist(parameter_set))}
   
   # select set to evaluate tuning_crit
@@ -2327,6 +2565,7 @@ fit_model_with_cv = function(df_work, cv_ind, algo_type, parameter_set, non_tuna
     }
   } # fold_i
   df_thresh = df_thresh %>%
+    drop_na() %>%
     mutate(perf = rowMeans(select(., -threshold), na.rm = T))
   df_thresh = df_thresh %>%
     filter(is.finite(perf)) %>%
@@ -2368,6 +2607,11 @@ fit_model_with_cv = function(df_work, cv_ind, algo_type, parameter_set, non_tuna
           )
       )
     
+    # evaluate predicted class for all folds
+    fold_prediction = fold_prediction %>%
+      mutate(y_pred = ifelse(Prob >= best_threshold, 1, 0) %>% as.character(),
+             threshold = best_threshold)
+    
     ROC_train = rocit(score= pred_train$Prob, class=pred_train$y_true)
     ROC_train = data.frame(x = ROC_train$FPR, y = ROC_train$TPR)
     if (nrow(pred_test) != 0){
@@ -2387,6 +2631,7 @@ fit_model_with_cv = function(df_work, cv_ind, algo_type, parameter_set, non_tuna
               optim_perf = df_thresh$perf[1],
               threshold_list = df_thresh,
               fold_all_performance = fold_all_performance,
+              fold_prediction = fold_prediction,
               list_ROC = list_ROC,
               fold_model_fit = fold_model_fit,
               parameter_set = parameter_set,
@@ -2397,7 +2642,8 @@ fit_model_with_cv = function(df_work, cv_ind, algo_type, parameter_set, non_tuna
 # Bayesian tuning machine learning
 ml_tuning = function(df_work, algo_type, cv_ind, prob_thresh_cv, tuning_crit = "F1_test", tuning_crit_minimize = F,
                      save_RDS_additional_lab = '',
-                     rds_folder = './Distance_to_Default/Checkpoints/ML_model/'){
+                     rds_folder = './Distance_to_Default/Checkpoints/ML_model/',
+                     balance_abi_ndg_fold = F, abi_ndg_row_reference_class1 = NULL, abi_ndg_row_index = NULL){
   
   # https://mlrmbo.mlr-org.com/articles/supplementary/mixed_space_optimization.html
   
@@ -2410,6 +2656,7 @@ ml_tuning = function(df_work, algo_type, cv_ind, prob_thresh_cv, tuning_crit = "
   # tuning_crit_minimize: whether to minimize or maximize tuning_crit
   # save_RDS_additional_lab: adds prefix to saved rds for parameters combination reloading
   # rds_folder: folder for checkpoints - should finish with "/"
+  # balance_abi_ndg_fold, abi_ndg_row_reference_class1, abi_ndg_row_index: balance abi_ndg when y=1. See fit_model_with_cv()
   
   # bayes_options: list of options
   #                - par.set: tunable parameters (makeParamSet)
@@ -2441,7 +2688,7 @@ ml_tuning = function(df_work, algo_type, cv_ind, prob_thresh_cv, tuning_crit = "
     
     Random_Forest = list(
       par.set = makeParamSet(
-        makeIntegerParam("num.trees", 50, 500),#makeIntegerParam("num.trees", 50, 1000),   # todo: rimetti
+        makeIntegerParam("num.trees", 50, 500),#makeIntegerParam("num.trees", 50, 500),   # todo: rimetti
         makeIntegerParam("mtry", 1, (n_vars - 1)),
         makeIntegerParam("min.node.size", 1, as.integer(n_obs / 2))
       ),
@@ -2457,6 +2704,16 @@ ml_tuning = function(df_work, algo_type, cv_ind, prob_thresh_cv, tuning_crit = "
       non_tunable_param = NULL,
       max_iter = 1,
       design_iter = 5
+    ),
+    
+    `SVM-RBF` = list(
+      par.set = makeParamSet(
+        makeNumericParam("sigma", 0.0001, 10),
+        makeNumericParam("C", 0.0001, 100)
+      ),
+      non_tunable_param = list(scaled = T),
+      max_iter = 20,
+      design_iter = 10
     )
   )
   bayes_options = bayes_parameter_set[[algo_type]]
@@ -2490,7 +2747,9 @@ ml_tuning = function(df_work, algo_type, cv_ind, prob_thresh_cv, tuning_crit = "
       model_fit = fit_model_with_cv(df_work = df_work, cv_ind = cv_ind, algo_type = algo_type,
                                     parameter_set = x, non_tunable_param = non_tunable_param,
                                     no_cv_train_ind = NULL, no_cv_test_ind = NULL,
-                                    prob_thresh_cv = prob_thresh_cv, tuning_crit = tuning_crit, tuning_crit_minimize = tuning_crit_minimize)
+                                    prob_thresh_cv = prob_thresh_cv, tuning_crit = tuning_crit, tuning_crit_minimize = tuning_crit_minimize,
+                                    balance_abi_ndg_fold = balance_abi_ndg_fold,
+                                    abi_ndg_row_reference_class1 = abi_ndg_row_reference_class1, abi_ndg_row_index = abi_ndg_row_index)
       model_fit[["fold_model_fit"]] = NULL  # remove fitted model to save space
       model_fit$param_compact_label = param_compact_label
       saveRDS(model_fit, paste0(rds_folder, out_label))
@@ -2558,7 +2817,7 @@ ml_tuning = function(df_work, algo_type, cv_ind, prob_thresh_cv, tuning_crit = "
     relocate(param_compact_label, .after = last_col()) %>%
     relocate(rds, .after = last_col()) %>%
     unique()
-
+  
   # save results
   optimization_results = as.data.frame(results$opt.path, stringsAsFactors = F) %>%
     mutate(
@@ -2580,8 +2839,8 @@ ml_tuning = function(df_work, algo_type, cv_ind, prob_thresh_cv, tuning_crit = "
     mutate_if(is.factor, as.character) %>%
     unique()
   
-  # write.table(optimization_results, paste0(rds_folder, '00_Optimization_list_', save_RDS_additional_lab, '.csv'), sep = ';', row.names = F, append = F)
-  # write.table(optimization_results_all_folds, paste0(rds_folder, '01_Optimization_list_ALLFOLDS_', save_RDS_additional_lab, '.csv'), sep = ';', row.names = F, append = F)
+  # write.table(optimization_results, paste0(rds_folder, '00_Optimization_list_', save_RDS_additional_lab, '.csv'), sep = ';', row.names = F, append = F, na = "")
+  # write.table(optimization_results_all_folds, paste0(rds_folder, '01_Optimization_list_ALLFOLDS_', save_RDS_additional_lab, '.csv'), sep = ';', row.names = F, append = F, na = "")
   
   # evaluate best parameters set
   optimization_results = optimization_results %>%
@@ -2598,4 +2857,780 @@ ml_tuning = function(df_work, algo_type, cv_ind, prob_thresh_cv, tuning_crit = "
               optimization_results_all_folds = optimization_results_all_folds,
               best_parameters = best_parameters,
               non_tunable_param = non_tunable_param))
+}
+
+# evaluate Shapley values
+evaluate_SHAP = function(dataSample, sample.size = 100, trained_model_prediction_function = NULL, obs_index_to_evaluate = NULL,
+                         obs_index_class = NULL, n_batch = 1, verbose = 1, n_workers = 5, seed = 66){
+  
+  # evaluate local SHAP values for single observations, global (signed) features effects, global SHAP features importance and input for plot_SHAP_summary().
+  # https://christophm.github.io/interpretable-ml-book/shapley.html
+  # https://christophm.github.io/interpretable-ml-book/shap.html
+  
+  # dataSample: data.frame of predictors ONLY.
+  # sample.size: sample size to generate shuffled instances (coalitions). The higher the more accurate the explanations become.
+  # trained_model_prediction_function: named list of function(predictors) -> prediction (vector of values for regression,
+  #                                   probabilities of "1" for binary classification).
+  #                                   E.g. function(x){predict(rf, newdata = x)}. List names will be used as output label for each model.
+  # obs_index_to_evaluate: integer vector - row index of observation to evaluate SHAP value. If NULL all observation will be used.
+  # obs_index_class: data.frame of "obs_index", "class". If not NULL contains class for each obs_index_to_evaluate. All output are then evaluated
+  #                 for each class and all observations.
+  # verbose: 1 to display calculation time, 0 for silent.
+  # n_batch: number of batch to split the evaluation. May speed uo evaluation and save memory.
+  # n_workers: number of workers for parallel calculation. Try not to exceed 30-40.
+  # seed: seed for reproducibility
+  
+  # Output:
+  #   list of:
+  #     - local_SHAP: complete list of SHAP values for each observation
+  #                     data.frame with "feature", "phi", "phi.std", "feature.value", "obs_index", "model_name", "predicted.val", "predicted.val.avg"
+  #                     "phi" and "phi.std" are the average and st.dev of SHAP values over all shuffled coalitions
+  #                     "feature" is feature name and "feature.value" is the corresponding value from the original instance (obs_index reference)
+  #                     "predicted.val" and "predicted.val.avg" are predicted value of single observation and columns average, respectively
+  #     - global_features_effect: simple average of all local (single observation) SHAP values over all observation.
+  #                              It is a signed features effect on predicted value.
+  #                              data.frame with "model_name", "feature", "phi"
+  #     - SHAP_feat_imp: SHAP feature importance. It's the average abs(SHAP values). Shows the magnitude of features effect on predicted value.
+  #                     data.frame with "model_name", "feature", "phi"
+  #     - summary_plot_data: input for plot_SHAP_summary()
+  #     - type: "SHAP". Used in plot_feat_imp().
+  # If obs_index_class != NULL additional nested list is returned for each class and all observations with global_features_effect and SHAP_feat_imp,
+  # local_SHAP and summary_plot_data have an additional column "class"
+  
+  # code adapted from https://github.com/christophM/iml/blob/master/R/Shapley.R  
+  
+  
+  # check for numeric predictors only
+  invalid_col_type = dataSample %>% select_if(negate(is.numeric)) %>% colnames()
+  if (length(invalid_col_type) > 0){
+    oo = capture.output(print(sapply(dataSample %>% select(all_of(invalid_col_type)), class)))
+    stop(paste0("Only numeric predictors supported:\n", paste0(oo, collapse = "\n")))
+  }
+  
+  dataSample = dataSample %>% setDT()
+  n.features = ncol(dataSample)
+  feature.names = colnames(dataSample)
+  if (is.null(obs_index_to_evaluate)){obs_index_to_evaluate = c(1:nrow(dataSample))}
+  
+  generate_data = function(obs_index){
+    # final sample will have ncol=n.features
+    #                        nrow=sample.size*n.features*2  - first half rows are data with features x_+j,
+    #                                                         second half is x_-j of algo definition at linked page
+    
+    # select instance
+    x.interest = dataSample[obs_index,] %>% as.data.frame()
+    
+    n_row = nrow(dataSample)
+    runs <- lapply(1:sample.size, function(m) {
+      
+      # randomly order features
+      set.seed(seed + obs_index*m)
+      new.feature.order <- sample(1:n.features)
+      
+      # randomly choose sample instance from dataSample and shuffle features order
+      set.seed(seed + obs_index*m)
+      sample.instance.shuffled <- dataSample[sample(1:n_row, 1),
+                                             new.feature.order,
+                                             with = FALSE
+      ]
+      # shuffle interest instance with same features order
+      x.interest.shuffled <- x.interest[, new.feature.order]
+      
+      # create new instances (with and without) for each feature
+      featurewise <- lapply(1:n.features, function(k) {
+        k.at.index <- which(new.feature.order == k)
+        # replace sample.instance.shuffled at features > k  (X_+j of algo definition at linked page "k" is "j")
+        instance.with.k <- x.interest.shuffled
+        if (k.at.index < ncol(x.interest)) {
+          instance.with.k[, (k.at.index + 1):ncol(instance.with.k)] <-
+            sample.instance.shuffled[, (k.at.index + 1):ncol(instance.with.k), with = FALSE]
+        }
+        # replace sample.instance.shuffled at features >= k  (X_-j of algo definition)
+        instance.without.k <- instance.with.k
+        instance.without.k[, k.at.index] <- sample.instance.shuffled[,k.at.index,with = FALSE]
+        cbind(instance.with.k[, feature.names],instance.without.k[, feature.names])
+      })
+      data.table::rbindlist(featurewise)
+    })
+    runs <- data.table::rbindlist(runs)
+    dat.with.k <- data.frame(runs[, 1:(ncol(runs) / 2)])
+    dat.without.k <- data.frame(runs[, (ncol(runs) / 2 + 1):ncol(runs)])
+    
+    return(rbind(dat.with.k, dat.without.k) %>% mutate(obs_index = obs_index))
+  }
+  
+  generate_phi_table = function(list_index, trained_model_name){
+    
+    # list_index: index of the list that contains all generate_data() and predictions "list_predicted_data". obs_index will be extracted inside so to avoid
+    #             index mismatch when list_generated_data doesn't keep the order.
+    # trained_model_name: model name from trained_model_prediction_function
+    #
+    # Output: data.frame with "feature", "phi", "phi.std", "feature.value", "obs_index", "model_name", "predicted.val", "predicted.val.avg"
+    #         "phi" and "phi.std" are the average and st.dev of SHAP values over all shuffled coalitions
+    #         "feature" is feature name and "feature.value" is the corresponding value from the original instance (obs_index reference)
+    #         "predicted.val" and "predicted.val.avg" are predicted value of single observation and columns average, respectively
+    
+    # select sampled data and predictions from generated list
+    data_predicted = list_predicted_data[[list_index]]
+    obs_index = data_predicted$obs_index %>% unique()
+    var_names = data_predicted %>% select(-obs_index, -Prediction) %>% colnames()
+    x.interest = dataSample[obs_index,] %>% as.data.frame()
+    data_predicted = data_predicted %>% select(Prediction)
+    
+    # evaluate Phi
+    # split prediction in yhat_x_+j and yhat_-j
+    y.hat.with.k <- data_predicted[1:(nrow(data_predicted) / 2), , drop = FALSE]
+    y.hat.without.k <- data_predicted[(nrow(data_predicted) / 2 + 1):nrow(data_predicted), , drop = FALSE]
+    y.hat.diff <- y.hat.with.k - y.hat.without.k   # these are Phi_j^m  -> will be averaged after (m=1,...,sample.size)
+    cnames <- colnames(y.hat.diff)
+    y.hat.diff <- cbind(
+      data.table(feature = rep(var_names, times = sample.size)),
+      y.hat.diff
+    )
+    # average over all sampled observation (for each feature) - also include std
+    y.hat.diff <- data.table::melt(y.hat.diff, variable.name = "class", value.name = "value", measure.vars = cnames)
+    y.hat.diff <- y.hat.diff[, list("phi" = mean(value), "phi.std" = sd(value)), by = c("feature", "class")]
+    y.hat.diff$class <- NULL
+    # x.original <- unlist(lapply(x.interest[1, ], as.character))
+    # y.hat.diff$feature.value <- rep(sprintf("%s=%s", colnames(x.interest), x.original), times = length(cnames))
+    y.hat.diff = y.hat.diff %>%
+      left_join(data.frame(unlist(x.interest[1, ]), stringsAsFactors = F) %>%
+                  setNames("feature.value") %>%
+                  rownames_to_column("feature"), by = "feature") %>%
+      mutate(obs_index = obs_index,
+             model_name = trained_model_name)
+    
+    return(y.hat.diff)
+  }
+  
+  # suppress messages
+  if (verbose == 0){sink(tempfile());on.exit(sink())}
+  
+
+  #### loop for each batch of obs_index_to_evaluate
+  
+  options(future.globals.maxSize = 8000 * 1024^2)
+  plan(multisession, workers = n_workers)
+  list_split = split(obs_index_to_evaluate, sort(obs_index_to_evaluate %% n_batch))
+  start_time = Sys.time()
+  split_time_val = local_SHAP = c()
+  cat('\nStart time:', as.character(Sys.time()), '\n')
+  for (split_name in names(list_split)){
+    
+    # check average batch time
+    split_time = Sys.time()
+    if (split_name != names(list_split)[1]){
+      avg_time = seconds_to_period(mean(split_time_val, na.rm = T))
+      avg_time_label = paste0('- batch avg time: ', lubridate::hour(avg_time), 'h:', lubridate::minute(avg_time), 'm:', round(lubridate::second(avg_time)))
+    } else {
+      avg_time_label = ''
+    }
+    cat('Generating coalitions and SHAP values for batch', paste0(as.numeric(split_name)+1, '/', length(list_split)),
+        ' | last timestamp:', as.character(Sys.time()), avg_time_label, end = '')
+    
+    # generate all sample to be used for all trained models
+    tic()
+    list_generated_data <- future_lapply(list_split[[split_name]], generate_data, future.packages = c("data.table"), future.seed = NULL)
+    gen_time = capture.output(toc()) %>% strsplit(" ") %>% .[[1]] %>% .[1] %>% as.numeric() %>% seconds_to_period()
+    cat(paste0('(generate: ', lubridate::hour(gen_time), 'h:', lubridate::minute(gen_time), 'm:', round(lubridate::second(gen_time))), end = '')
+    
+    # generate SHAP values for all observations and all trained models
+    tic()
+    for (tr_model in names(trained_model_prediction_function)){
+      
+      # select model from trained_model_prediction_function
+      trained_model = trained_model_prediction_function[[tr_model]]
+      
+      # predict trained model on list_generated_data
+      list_predicted_data = data.table::rbindlist(list_generated_data)
+      list_predicted_data = list_predicted_data %>%
+        mutate(Prediction = trained_model(list_predicted_data %>% as.data.frame() %>% select(all_of(colnames(dataSample)))))
+      list_predicted_data = split(list_predicted_data , f = list_predicted_data$obs_index)
+      
+      # evaluate SHAP values
+      list_generated_SHAP <- future_lapply(1:length(list_predicted_data), generate_phi_table, trained_model_name = tr_model, future.seed = NULL)
+      
+      # add observation predicted values and average observation predicted value
+      predicted_obs = data.frame(obs_index = obs_index_to_evaluate,
+                                 predicted.val = trained_model(dataSample[obs_index_to_evaluate, ] %>% as.data.frame()))
+      predicted_obs_avg = trained_model(dataSample %>% summarise_all(mean))
+      
+      # append results
+      local_SHAP = local_SHAP %>%
+        bind_rows(data.table::rbindlist(list_generated_SHAP) %>%
+                    left_join(predicted_obs, by = "obs_index") %>%
+                    mutate(predicted.val.avg = predicted_obs_avg))
+    } # tr_model
+    pred_time = capture.output(toc()) %>% strsplit(" ") %>% .[[1]] %>% .[1] %>% as.numeric() %>% seconds_to_period()
+    cat(paste0(' - predict: ', lubridate::hour(pred_time), 'h:', lubridate::minute(pred_time), 'm:', round(lubridate::second(pred_time)), ')'), end = '\r')
+    
+    split_time_val = c(split_time_val, difftime(Sys.time(), split_time, units='secs'))
+  } # split_name
+  future:::ClusterRegistry("stop")
+  tot_diff=seconds_to_period(difftime(Sys.time(), start_time, units='secs'))
+  cat('\nTotal elapsed time', paste0(lubridate::hour(tot_diff), 'h:', lubridate::minute(tot_diff), 'm:', round(lubridate::second(tot_diff))), ' ', as.character(Sys.time()), '\n')
+  if (n.features * length(obs_index_to_evaluate) * length(trained_model_prediction_function) != nrow(local_SHAP)){
+    warning("Expected number of rows in generated local SHAP values doesn't match")
+  }
+  local_SHAP = local_SHAP %>%
+    arrange(model_name, obs_index, feature)
+  
+  #### loop for all classes (if any) to create global_features_effect and SHAP_feat_imp
+  
+  class_set = data.frame(set = 'All observations', class = '', stringsAsFactors = F)
+  if (!is.null(obs_index_class)){
+    obs_index_class = obs_index_class %>% mutate(class = as.character(class))  # remove factors
+    class_set = class_set %>%
+      bind_rows(data.frame(set = paste0("class ", obs_index_class$class %>% unique() %>% sort()),
+                           class = obs_index_class$class %>% unique() %>% sort(), stringsAsFactors = F))
+    local_SHAP = local_SHAP %>%
+      left_join(obs_index_class, by = "obs_index")
+  }
+  list_output = list()
+  for (class_i in 1:nrow(class_set)){
+    
+    if (class_set$set[class_i] != 'All observations'){
+      tt_local_SHAP = local_SHAP %>%
+        filter(class == class_set$class[class_i])
+    } else {
+      tt_local_SHAP = local_SHAP
+    }
+    
+    # evaluate average of SHAP values. Proxy for GLOBAL signed impact on predictions
+    global_features_effect = tt_local_SHAP %>%
+      group_by(model_name, feature) %>%
+      summarize(phi = mean(phi), .groups = "drop") %>%
+      arrange(model_name, desc(abs(phi)))
+    
+    
+    # evaluate SHAP feature importance. Average of SHAP values absolute value
+    SHAP_feat_imp = tt_local_SHAP %>%
+      group_by(model_name, feature) %>%
+      summarize(phi = mean(abs(phi)), .groups = "drop") %>%
+      arrange(model_name, desc(phi))
+    
+    list_output[[class_set$set[class_i]]] = list(global_features_effect = global_features_effect,
+                                                 SHAP_feat_imp = SHAP_feat_imp)
+    
+  } # class_i
+  features_level = list_output$`All observations`$SHAP_feat_imp
+  if (length(list_output) == 1){list_output = list_output[[1]]}   # remove "All observations" level if it is the only available
+  
+  # evaluate input for plot_SHAP_summary()
+  scaled_features = dataSample %>%    # scale input features in [0,1]
+    as.data.frame() %>%
+    mutate_all(~scale_range(., a=0, b=1)) %>%
+    mutate(obs_index = 1:n()) %>%
+    gather(key = "feature", value = "value_color", -obs_index)
+  
+  summary_plot_data = c()
+  for (tr_model in names(trained_model_prediction_function)){
+    
+    summary_plot_data = summary_plot_data %>%
+      bind_rows(
+        local_SHAP %>%
+          filter(model_name == tr_model) %>%
+          left_join(scaled_features, by = c("feature", "obs_index")) %>%
+          mutate(feature = factor(feature, levels = features_level %>% filter(model_name == tr_model) %>% pull(feature)))
+      )
+  } # tr_model
+  
+  list_output = c(list(type = "SHAP",
+                       local_SHAP = local_SHAP,
+                       summary_plot_data = summary_plot_data),
+                  list_output)
+  
+  return(list_output)
+}
+
+# evaluate Permutation Feature Importance
+evaluate_Perm_Feat_Imp = function(dataSample, trained_model_prediction_function = NULL, n_repetitions = 5, compare = "difference",
+                                  obs_index_to_evaluate = NULL, obs_index_to_shuffle = NULL, obs_index_class = NULL,
+                                  perf_metric = NULL, perf_metric_add_pars = NULL, true_val_name = NULL, prediction_name = NULL, perf_metric_minimize = F,
+                                  package_to_load = c("glmnet", "ranger", "earth", "kernlab"), n_workers = 5, seed = 66){
+  
+  # evaluate Permutation Feature Importance.
+  
+  # dataSample: data.frame of predictors AND target variable as "y". For classification task, "y" must be character
+  # trained_model_prediction_function: named list of function(predictors) -> prediction (vector of values for regression,
+  #                                   probabilities of "1" for binary classification).
+  #                                   E.g. function(x){predict(rf, newdata = x)}. List names will be used as output label for each model.
+  # n_repetitions: how many times permutation importance must be evaluated with different seeds and then averaged.
+  # compare: "difference" or "ratio" to compare permutation performance with original input performance. See perf_metric_minimize.
+  # obs_index_to_evaluate: integer vector - row index of observation to evaluate feature importance value. If NULL all observation will be used.
+  # obs_index_to_shuffle: integer vector of index of rows to be used when shuffling each feature. obs_index_to_evaluate must be a partition of obs_index_to_shuffle.
+  #                      If NULL all observation will be used.
+  # obs_index_class: data.frame of "obs_index", "class". If not NULL contains class for each obs_index_to_evaluate. All output are then evaluated
+  #                 for each class and all observations. Meaningless for classification problem and class-specific perf_metric (such as F1)
+  # perf_metric, perf_metric_add_pars: function to predict performance. E.g. MLmetrics::F1_Score. If user defined, must return a single value
+  #                                   and must have named input arguments. Additional parameters can be passed by named list perf_metric_add_pars. See next.
+  # prediction_name, true_val_name: string - expected column name for predicted and true values in perf_metric. Predicted and true values of each shuffled
+  #                                set will be assigned prediction_name and true_val_name column name.
+  # perf_metric_minimize: whether optimal value of perf_metric should be minimized or not. E.g. TRUE for RMSE, FALSE for Accuracy or F1.
+  #                      Used to set right order of "compare" method. For "difference", if FALSE then Imp = Perf_original - Perf_permutation, else reverse order.
+  #                      For "ratio", if FALSE then Imp = Perf_original / Perf_permutation, else reverse order.
+  # package_to_load: vector of strings. Include packages used to predict trained_model_prediction_function. Needed in future_lapply() todo: vedi se si risolve con loadedNamespaces()
+  # n_workers: number of workers for parallel calculation. Try not to exceed 30-40.
+  # seed: seed for reproducibility
+  
+  # Output:
+  #   list of:
+  #     - Permutation_feat_imp: permutation feature importance.
+  #                           data.frame with "model_name", "feature", "importance", "importance.std", "importance.5", "importance.95"
+  #                           "importance", ".std", ".5" and ".95" are the average, st.dev, 5th and 95th percentile of feature importance over repetitions.
+  #     - type: "SHAP". Used in plot_feat_imp().
+  # If obs_index_class != NULL additional nested list is returned for each class and all observations with Permutation_feat_imp
+  
+  # check input index and target variable
+  if (is.null(obs_index_to_evaluate)){obs_index_to_evaluate = c(1:nrow(dataSample))}
+  if (is.null(obs_index_to_shuffle)){obs_index_to_shuffle = c(1:nrow(dataSample))}
+  if (length(intersect(obs_index_to_evaluate, obs_index_to_shuffle)) != length(obs_index_to_evaluate)){
+    stop('"obs_index_to_evaluate" must be a partition of "obs_index_to_shuffle"')
+  }
+  if (!is.null(obs_index_class) & sum(obs_index_class$obs_index %>% sort() == obs_index_to_evaluate) != length(obs_index_to_evaluate)){
+    stop('"obs_index_class" must have same obs_index of "obs_index_to_evaluate"')
+  }
+  if (!"y" %in% colnames(dataSample)){
+    stop('Target variable "y" not found')
+  }
+  if (is.null(true_val_name) | is.null(prediction_name)){
+    stop('Please provide "true_val_name" and "prediction_name"')
+  }
+  
+  # set additional parameters to performance metric
+  perf_metric_work = function(...){perf_metric(..., perf_metric_add_pars)}
+  
+  feat_names = setdiff(colnames(dataSample), "y")
+  tot_features = ncol(dataSample) - 1
+  dataSample = dataSample %>%
+    mutate(obs_index = 1:n())
+  
+  generate_data = function(k){    # k = feature
+    
+    f_name = feat_names[k]
+    
+    runs <- lapply(1:n_repetitions, function(m){ # m = repetitions
+      
+      # shuffle k-th column
+      df_temp = dataSample[obs_index_to_shuffle, ]
+      set.seed(seed + k*m*(k+m))
+      df_temp[, f_name] = sample(df_temp[, f_name], nrow(df_temp))
+      df_temp = df_temp[obs_index_to_evaluate, ]
+      
+      return(df_temp %>% mutate(obs_index = obs_index_to_evaluate,
+                                rep_num = m))
+    })
+    data.table::rbindlist(runs)%>% mutate(feature = f_name)
+  }
+  
+  options(future.globals.maxSize = 8000 * 1024^2)
+  plan(multisession, workers = n_workers)
+  start_time = Sys.time()
+  cat('Evaluating feature importance...', end = '\r')
+  
+  #### generate shuffled data for all features and repetitions
+  list_generated_data <- future_lapply(1:tot_features, generate_data, future.seed = NULL)
+  
+  
+  #### loop for all classes (if any) to create global_features_effect and SHAP_feat_imp
+  
+  class_set = data.frame(set = 'All observations', class = '', stringsAsFactors = F)
+  if (!is.null(obs_index_class)){
+    obs_index_class = obs_index_class %>% mutate(class = as.character(class))  # remove factors
+    class_set = class_set %>%
+      bind_rows(data.frame(set = paste0("class ", obs_index_class$class %>% unique() %>% sort()),
+                           class = obs_index_class$class %>% unique() %>% sort(), stringsAsFactors = F))
+  }
+  
+  list_output = list()
+  for (class_i in 1:nrow(class_set)){
+    
+    if (class_set$set[class_i] == 'All observations'){
+      class_index = obs_index_to_evaluate
+    } else {
+      class_index = obs_index_class %>%
+        filter(class == class_set$class[class_i]) %>%
+        pull(obs_index)
+    }
+    
+    Permutation_feat_imp = c()
+    for (tr_model in names(trained_model_prediction_function)){
+      
+      # select model from trained_model_prediction_function
+      trained_model = trained_model_prediction_function[[tr_model]]
+      
+      # predict for all features and repetitions
+      pred_function = function(x){
+        x %>% mutate(!!sym(prediction_name) := trained_model(x %>% as.data.frame() %>% select(all_of(feat_names)))) %>%
+          rename(!!sym(true_val_name) := y) %>%
+          select(obs_index, feature, rep_num, all_of(c(true_val_name, prediction_name)))
+      }
+      
+      list_predicted_data = future_lapply(list_generated_data, future.packages = loadedNamespaces(), pred_function, future.seed = NULL)
+      
+      # evaluate performance for all features and repetitions
+      perf_function = function(x){
+        f_name = x$feature %>% unique()
+        out = c()
+        for (i in unique(x$rep_num)){
+          tt = x %>%
+            filter(rep_num == i) %>%
+            filter(obs_index %in% class_index)
+          arg_list = list(tt %>% pull(true_val_name), tt %>% pull(prediction_name))
+          names(arg_list) = c(true_val_name, prediction_name)
+          out = out %>%
+            bind_rows(data.frame(feature = f_name, rep_num = i, perf = do.call(perf_metric_work, args = arg_list), stringsAsFactors = F))
+        }
+        return(out)
+      }
+      df_final_perf = future_lapply(list_predicted_data, perf_function, future.seed = NULL) %>% data.table::rbindlist()
+      
+      # original performance
+      original_pred = pred_function(dataSample %>%
+                                      filter(obs_index %in% class_index) %>%
+                                      mutate(feature = "Orginal_perf",
+                                             rep_num = -99))
+      original_perf = perf_function(original_pred)
+      
+      # evaluate feature importance
+      Permutation_feat_imp = Permutation_feat_imp %>%
+        bind_rows(
+          df_final_perf %>%
+            mutate(perf_original = original_perf$perf )%>%
+            rowwise() %>%
+            mutate(importance_val = ifelse(compare == "difference",
+                                           ifelse(perf_metric_minimize, perf - perf_original, perf_original - perf), # for "difference"
+                                           ifelse(perf_metric_minimize, perf / perf_original, perf_original / perf))) %>% # for "ratio"
+            as.data.frame() %>%
+            group_by(feature) %>%
+            summarise(importance = mean(importance_val),     # todo: capisci cosa fare con i valori negativi o < 1 (migliorano le performance)
+                      importance.std = sd(importance_val),
+                      importance.5 = quantile(importance_val, 0.05),
+                      importance.95 = quantile(importance_val, 0.95), .groups = "drop") %>%
+            mutate(model_name = tr_model) %>%
+            select(model_name, everything())
+        )
+      
+    } # tr_model
+    
+    list_output[[class_set$set[class_i]]] = list(Permutation_feat_imp = Permutation_feat_imp %>%
+                                                   arrange(model_name, desc(abs(importance))))
+    
+  } # class_i
+  future:::ClusterRegistry("stop")
+  tot_diff=seconds_to_period(difftime(Sys.time(), start_time, units='secs'))
+  cat('Done in', paste0(lubridate::hour(tot_diff), 'h:', lubridate::minute(tot_diff), 'm:', round(lubridate::second(tot_diff))), ' ', as.character(Sys.time()), '\n')
+  if (tot_features * length(trained_model_prediction_function) != nrow(list_output$`All observations`$Permutation_feat_imp)){
+    warning("Expected number of rows in generated Permutation_feat_imp doesn't match")
+  }
+  if (length(list_output) == 1){list_output = list_output[[1]]}   # remove "All observations" level if it is the only available
+  
+  list_output = c(list(type = "PFI"),
+                  list_output)
+  
+  return(list_output)
+}
+
+# Plot Shapley summary
+plot_SHAP_summary = function(list_input, sina_method = "counts", sina_bins = 20, sina_size = 2, sina_alpha = 0.7, plot_model_set = NULL, plot_class_set = NULL,
+                             SHAP_axis_lower_limit = 0, magnify_text = 1.4, color_range = c("blue", "red"),
+                             save_path = '', plot_width = 12, plot_height = 12){
+  
+  # Plot Shapley summary. Returns plots for all trained model and 'All observations' and 'class ...' if any.
+  # list_input: output of evaluate_SHAP()
+  # plot_model_set: if not NULL plot only provided trained model results.
+  # plot_class_set: if not NULL and if 'All observations', 'class ...' available plot only provided class.
+  # sina_ : options of geom_sina (sina plot)
+  # SHAP_axis_lower_limit: value to add to minimum value of x-axis (SHAP). Also moves SHAP's magnitude column
+  # magnify_text: magnify all text font in plot
+  # color_range: legend color of Low and High value of features
+  # save_path: if not '', save all plots. Only modelName_Class.png will be added. "_" at the end of save_path is automatically added if not provided.
+  # plot_width, plot_height: width and height of saved plot
+  
+  # check last character of save_path
+  if (substr(save_path, nchar(save_path), nchar(save_path)) != "_"){save_path = paste0(save_path, "_")}
+  
+  # check if class plots are available
+  summary_plot_data = list_input$summary_plot_data
+  if ("All observations" %in% names(list_input)){
+    class_set = setdiff(names(list_input), c("local_SHAP", "summary_plot_data", "type"))
+  } else {
+    class_set = c('No class')
+  }
+  if (is.null(plot_class_set)){
+    plot_class_set = class_set
+  } else if (!is.null(plot_class_set) & class_set == 'No class'){
+    plot_class_set = 'No class'
+  }
+  
+  plot_list = list()
+  for (class_i in plot_class_set){
+    
+    # extract data
+    if (class_i == 'No class'){
+      data_plot = summary_plot_data %>%
+        left_join(list_input$SHAP_feat_imp %>% rename(abs.phi = phi), by = c("model_name", "feature"))
+    } else if (class_i == 'All observations'){
+      data_plot = summary_plot_data %>%
+        left_join(list_input[[class_i]]$SHAP_feat_imp %>% rename(abs.phi = phi), by = c("model_name", "feature"))
+    } else {
+      data_plot = summary_plot_data %>%
+        filter(class == class_i %>% gsub("class ", "", .)) %>%
+        left_join(list_input[[class_i]]$SHAP_feat_imp %>% rename(abs.phi = phi), by = c("model_name", "feature"))
+    }
+    
+    if (is.null(plot_model_set)){plot_model_set_work = unique(data_plot$model_name)}
+    # loop models
+    for (tr_model in plot_model_set_work){
+      data_plot_tt = data_plot %>%
+        filter(model_name == tr_model)
+      y_lim = range(data_plot_tt$phi)
+      
+      additional_top_rows = 3   # adds fake features to increase y-axis (features) limits
+      feature_order = data_plot_tt %>%
+        select(feature, abs.phi) %>%
+        unique() %>%
+        mutate(abs.phi.perc = abs.phi / sum(abs.phi),
+               lab = paste0(' ', round(abs.phi, 3), ' (', round(abs.phi.perc * 100, 2), '%)')) %>%
+        arrange(desc(abs.phi)) %>%
+        mutate(feature_ref = c(1:n())*2) %>%
+        bind_rows(data.frame(feature = paste0("xxx_", 1:nrow(.))) %>%
+                    mutate(feature_ref = c(1:n())*2-1),
+                  data.frame(feature = paste0("xxx_", c(-additional_top_rows:0))) %>%
+                    mutate(feature_ref = c(-additional_top_rows:0))) %>%
+        arrange(feature_ref)
+      
+      SHAP_limits = c(y_lim[1] * (1 - sign(y_lim[1]) * 1.5) + SHAP_axis_lower_limit, # lower x-axis value (added to make room for SHAP magnitude)
+                      y_lim[2] * (1 + sign(y_lim[2]) * 0.1))
+      SHAP_breaks = c(0, seq(y_lim[1], y_lim[2], length.out = 6)) %>% unique() %>% sort()  # ticks from data
+      ticks_spacing = diff(SHAP_breaks)
+      # if tick before/after 0 is too close, shift it a bit left by 50%
+      tick_before_0_spacing = ticks_spacing[which(SHAP_breaks == 0) - 1]
+      if (tick_before_0_spacing < max(ticks_spacing) * 0.3){SHAP_breaks[which(SHAP_breaks == 0) - 1] = SHAP_breaks[which(SHAP_breaks == 0) - 1] * 1.5}
+      tick_before_1_spacing = ticks_spacing[which(SHAP_breaks == 0)]
+      if (tick_before_1_spacing < max(ticks_spacing) * 0.3){SHAP_breaks[which(SHAP_breaks == 0) + 1] = SHAP_breaks[which(SHAP_breaks == 0) + 1] * 3}
+      SHAP_labels = as.character(SHAP_breaks %>% round(2))
+      
+      data_plot_tt = data_plot_tt %>%  # add fake points to add space between features
+        bind_rows(data.frame(feature = paste0("xxx_", min(feature_order$feature_ref):uniqueN(data_plot_tt$feature))) %>%
+                    mutate(phi = min(data_plot_tt$phi)))
+      out_plot = ggplot(data_plot_tt %>%
+                          group_by(feature) %>%
+                          # filter(row_number() <= 200) %>%   # todo: remove
+                          mutate(feature = factor(feature, levels = rev(feature_order$feature))),
+                        aes(x = feature, y = phi, color = value_color)) +
+        # scale_y_continuous(expand = c(0, 0), limits = c(SHAP_position_work * SHAP_axis_lower_limit, y_lim[2])) +    # SHAP    expand = (expansion between ticks, expansion outside limits)
+        scale_y_continuous(expand = c(0, 0), limits = SHAP_limits, breaks = SHAP_breaks, labels = SHAP_labels) +    # SHAP    expand = (expansion between ticks, expansion outside limits)
+        scale_x_discrete(expand=c(0.02, 0), labels = feature_order %>%  # 0.11
+                           mutate(feature = ifelse(grepl("xxx_", feature), "", feature)) %>%
+                           pull(feature) %>%
+                           rev(), limits = feature_order %>%  # 0.11
+                           pull(feature) %>%
+                           rev(),
+                         breaks = feature_order %>%  # 0.11
+                           pull(feature) %>%
+                           rev()) +     # features
+        labs(title = paste0("SHAP summary plot for ",
+                            ifelse(class_i %in% c('No class', 'All observations'), 'all classes', class_i)),
+             x = "Feature", y = "SHAP value (impact on model predictions)", color = "Feature value") +
+        coord_flip() + 
+        geom_sina(size = sina_size, bins = sina_bins, method = sina_method, alpha = sina_alpha) +
+        geom_hline(yintercept = 0) +
+        geom_text(data = feature_order %>%
+                    filter(!grepl("xxx_", feature)), aes(x = feature, y=-Inf, label = lab),
+                  size = 4 * magnify_text, hjust = 0, color = "black") +
+        annotate("text", x = feature_order$feature[1], y = -Inf, label = " SHAP abs", size = 5 * magnify_text, hjust = 0, fontface = "bold") +
+        annotate("text", x = feature_order$feature[3], y = -Inf, label = " magnitude", size = 5 * magnify_text, hjust = 0, fontface = "bold") +
+        scale_color_gradient(low=color_range[1], high=color_range[2], 
+                             breaks=c(0,1), labels=c("Low","High"), na.value="white") +
+        theme_bw() +
+        theme(axis.line.y = element_blank(),
+              axis.ticks.y = element_blank(),
+              axis.text.y = element_text(size = 13 * magnify_text, vjust = 0.5),   # features
+              axis.text.x = element_text(size = 16),   # SHAP
+              axis.title = element_text(size = 20),
+              plot.title = element_text(size=30),
+              plot.subtitle = element_text(size=25),
+              legend.title=element_text(size=18),
+              legend.text=element_text(size=15),
+              legend.position="bottom") +
+        guides(colour = guide_colourbar(title.position="left", title.vjust = 1))
+      
+      # todo: rimuovi
+      # {
+      # png("./Distance_to_Default/Results/000p.png",
+      #     width = plot_height, height = plot_height, units = 'in', res=300)
+      # plot(out_plot)
+      # dev.off()
+      #   }
+      
+      plot_list[[class_i]][[tr_model]] = out_plot
+      
+      # save plot
+      if (save_path != ''){
+        png(paste0(save_path, tr_model, ifelse(class_i == "No class", "", paste0("_", gsub(" ", "_", class_i))), ".png"),
+            width = plot_height, height = plot_height, units = 'in', res=300)
+        plot(out_plot)
+        dev.off()
+      }
+      
+    } # tr_model
+  } # class_i
+  if (class_i == "No class"){plot_list = plot_list[[1]]}
+  
+  return(plot_list)
+}
+
+# Plot feature importance
+plot_feat_imp = function(list_input, normalize = F, color_pos = "blue", color_neg = "red", plot_model_set = NULL, plot_class_set = NULL,
+                         magnify_text = 1, color_range = c("blue", "red"),
+                         save_path = '', plot_width = 12, plot_height = 12){
+  
+  # Plot feature importance. Returns plots for all trained model and 'All observations' and 'class ...' if any. If input is from evaluate_SHAP() plots
+  # global (signed) features effects and global SHAP features importance. If input is from evaluate_Perm_Feat_Imp() simply plots feature importance.
+  # All input elements must be data.frame with "model_name", "feature" and "phi"/"importance"
+  
+  # list_input: output of evaluate_SHAP() or evaluate_Perm_Feat_Imp()
+  # normalize: if TRUE normalize importance in 0-100%
+  # color_pos, color_neg: color for positive and negative (if any) bars
+  # plot_model_set: if not NULL plot only provided trained model results.
+  # plot_class_set: if not NULL and if 'All observations', 'class ...' available plot only provided class.
+  # magnify_text: magnify all text font in plot
+  # save_path: if not '', save all plots. Only modelName_Class.png will be added. "_" at the end of save_path is automatically added if not provided.
+  # plot_width, plot_height: width and height of saved plot
+  
+  # todo: aggiungi le barre di errore nel caso della PFI e capisci cosa viene fuori se la PFI è negativa
+  
+  # check last character of save_path
+  if (substr(save_path, nchar(save_path), nchar(save_path)) != "_"){save_path = paste0(save_path, "_")}
+  
+  # check if class plots are available
+  if (list_input$type == "SHAP"){
+    if ("All observations" %in% names(list_input)){
+      class_set = setdiff(names(list_input), c("local_SHAP", "summary_plot_data", "type"))
+    } else {
+      class_set = c('No class')
+    }
+    plot_loop = c("global_features_effect", "SHAP_feat_imp")
+    feat_name = "phi"
+    normalize = F
+  } else if (list_input$type == "PFI"){
+    if ("All observations" %in% names(list_input)){
+      class_set = names(list_input)
+    } else {
+      class_set = c('No class')
+    }
+    plot_loop = "Permutation_feat_imp"
+    feat_name = "importance"
+  }
+  
+  if (is.null(plot_class_set)){
+    plot_class_set = class_set
+  } else if (!is.null(plot_class_set) & class_set == 'No class'){
+    plot_class_set = 'No class'
+  }
+  
+  plot_list = list()
+  for (class_i in plot_class_set){
+    
+    for (plot_type in plot_loop){  # "global_features_effect", "SHAP_feat_imp", "feature_importance"
+      
+      # set importance axis label
+      normalize_work = normalize
+      if (plot_type == "global_features_effect"){
+        imp_axis_label = "Average absolute SHAP value\n(impact on model predictions)"
+        plot_title = "Average absolute SHAP"
+      } else if (plot_type == "SHAP_feat_imp"){
+        imp_axis_label = "Average signed SHAP value\n(impact on model predictions)"
+        plot_title = "Average signed SHAP"
+      } else if (plot_type == "Permutation_feat_imp"){
+        imp_axis_label = "Feature importance"
+        if (normalize_work){imp_axis_label = paste0(imp_axis_label, " (normalized)")}
+        plot_title = "Permutation Feature Importance"
+      }
+      
+      # extract data
+      if (class_i == 'No class'){
+        data_plot = list_input[[plot_type]]
+      } else {
+        data_plot = list_input[[class_i]][[plot_type]]
+      }
+      
+      if (is.null(plot_model_set)){plot_model_set_work = unique(data_plot$model_name)}
+      # loop models
+      for (tr_model in plot_model_set_work){
+        data_plot_tt = data_plot %>%
+          rename(importance = !!sym(feat_name)) %>%
+          filter(model_name == tr_model) %>%
+          # mutate(importance = ifelse(feature == "BILA_roa", -importance, importance)) %>%  # todo: rimuovi
+          mutate(value_color = ifelse(importance >= 0, "pos", "neg"),
+                 importance = signif(importance, 2)) %>%
+          rowwise() %>%
+          mutate(max_digits = importance  %>% as.character() %>% strsplit("\\.") %>% .[[1]] %>% .[2] %>% nchar())
+        max_digits = max(data_plot_tt$max_digits, na.rm = T)
+        max_span = max(abs(data_plot_tt$importance)) * (1 + max_digits / 10)
+        
+        if (normalize_work){
+          data_plot_tt = data_plot_tt %>%
+            mutate(importance = round(importance / sum(abs(importance)) * 100, 1))
+          max_span = max(abs(data_plot_tt$importance)) * 1.3
+        }
+        
+        
+        out_plot = ggplot(data_plot_tt %>%
+                            mutate(feature = factor(feature, levels = rev(data_plot_tt$feature))),
+                          aes(x = feature, y = importance)) +
+          geom_bar(stat = "identity", aes(fill = value_color), width=0.9, position = position_dodge(width=0.5)) +
+          scale_fill_manual(values = c("pos" = color_pos, "neg" = color_neg)) +
+          labs(title = paste0(plot_title, " for ",
+                              ifelse(class_i %in% c('No class', 'All observations'), 'all classes', class_i)),
+               x = "Feature", y = imp_axis_label) +
+          scale_y_continuous(limits = c(min(c(min(data_plot_tt$importance) - max_span, 0)), max(data_plot_tt$importance) + max_span)) +
+          geom_hline(yintercept = 0) +
+          coord_flip() +
+          theme_bw() +
+          theme(axis.line.y = element_blank(),
+                axis.ticks = element_blank(),
+                axis.text.y = element_text(size = 13 * magnify_text, vjust = 0.5),   # features
+                axis.text.x = element_blank(),   # SHAP
+                axis.title = element_text(size = 20),
+                plot.title = element_text(size=30),
+                plot.subtitle = element_text(size=25),
+                legend.title=element_text(size=18),
+                legend.text=element_text(size=15),
+                legend.position="none")
+        if (normalize_work){
+          out_plot = out_plot +
+            geom_text(aes(label = ifelse(importance == 0, "", paste0(" ", importance, "%")),
+                          vjust = 0.5, hjust = ifelse(importance >= 0, 0, 1)), size = 6 * magnify_text)
+        } else {
+          out_plot = out_plot +
+            geom_text(aes(label = ifelse(importance == 0, "", ifelse(importance > 0, paste0(" ", importance), paste0(importance, " "))),
+                          vjust = 0.5, hjust = ifelse(importance >= 0, 0, 1)), size = 6 * magnify_text)
+        }
+        
+        # todo: rimuovi
+        # {
+        # png("./Distance_to_Default/Results/000p.png",
+        #     width = plot_height, height = plot_height, units = 'in', res=300)
+        # plot(out_plot)
+        # dev.off()
+        #   }
+        
+        plot_list[[class_i]][[tr_model]][[plot_type]] = out_plot
+        
+        # save plot
+        if (save_path != ''){
+          png(paste0(save_path, plot_type, "_", tr_model, ifelse(class_i == "No class", "", paste0("_", gsub(" ", "_", class_i))), ".png"),
+              width = plot_height, height = plot_height, units = 'in', res=300)
+          plot(out_plot)
+          dev.off()
+        }
+        
+      } # tr_model
+    } # plot_type
+  } # class_i
+  if (class_i == "No class"){plot_list = plot_list[[1]]}
+  
+  return(plot_list)
 }
