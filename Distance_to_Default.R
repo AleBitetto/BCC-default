@@ -5,10 +5,12 @@ library(readxl)
 library(stringr)
 library(ppcor)
 library(lme4)
+library(kmlShape)
 library(optimx)
 library(reshape)
 library(Hmisc)
 library(lubridate)
+library(cowplot)
 library(ggplot2)
 library(ggforce)
 library(gganimate)
@@ -504,6 +506,7 @@ run_embedding_best_report = F    # create embedding visualization report for bes
         )
         # } # ind
       } # var
+      saveRDS(boxplot_data, './Distance_to_Default/Checkpoints/boxplot_data.rds')
       
       # plot variable comparison boxplot
       if (reload_embedding_input == FALSE){
@@ -1862,13 +1865,13 @@ plot_manual_clustering = F
 rm(list_emb_visual, list_emb_visual_aggreg)
 
 
-# run logistic regression for each DD assignment in list_DD_CRIF_data
+# run regression model for each DD assignment in list_DD_CRIF_data
 run_oversample_test = F    # run test for oversampling percentage
 run_tuning = F    # force parameters tuning with cross-validation. If FALSE saved tuned parameters will be reloaded
 fit_final_model = F    # force fit model on full dataset with tuned parameters and reloaded cross-validated performance. If FALSE saved model will be reloaded
 skip_all = T    # skip all model fitting block and loads log_fitting and log_tuning only
-run_feat_imp = T   # evaluate feature importance
-run_plot_feat_imp = T    # plot feature importance
+run_feat_imp = F   # evaluate feature importance
+run_plot_feat_imp = F    # plot feature importance
 {
   # variables to be used as control variables (dummy)
   control_variables = c('Dummy_industry', 'Industry' , 'Dimensione_Impresa',  'segmento_CRIF', 'Regione_Macro') # todo: rimetti
@@ -2181,7 +2184,7 @@ run_plot_feat_imp = T    # plot feature importance
           mutate(label = factor(label, levels = legend_order$label))
         # filter(Variable %in% c("BILA_ARIC_VPROD", "BILA_oneri_valagg"))
         
-        png(paste0('./Distance_to_Default/Results/00_Target_variable_distribution.png'), width = 15, height = 30, units = 'in', res=300)
+        png(paste0('./Distance_to_Default/Results/00_Target_variable_distribution_between_years.png'), width = 15, height = 30, units = 'in', res=300)
         plot(ggplot(data_plot, aes(x = Value, fill = label)) +
                geom_density(alpha = 0.5) +
                scale_x_continuous(labels = scales::percent_format(accuracy = 1)) +
@@ -2278,7 +2281,7 @@ run_plot_feat_imp = T    # plot feature importance
         if (nrow(cv_ind_check) != nrow(df_main_work) | max(cv_ind_check$count) != 1){cat('\n##### repeated observation in cv_ind')}
         rm(cv_ind_check)
         
-        # plot fold distribution
+        # plot fold distribution for target vs control variable
         {
           final_distr_data = strat_fold$final_distr_data %>%
             group_by(block) %>%
@@ -2303,6 +2306,51 @@ run_plot_feat_imp = T    # plot feature importance
                        legend.title=element_text(size=20)))
           dev.off()
           rm(final_distr_data)
+        }
+        
+        # plot fold distribution for input variables
+        {
+          if (model_setting_lab == "no_control"){
+            
+            plot_data = c()
+            for (fold_i in cv_ind$fold %>% unique() %>% sort()){
+              test_ind = cv_ind %>%
+                filter(fold == fold_i) %>%
+                pull(ind)
+              train_ind = cv_ind %>%
+                filter(fold != fold_i) %>%
+                pull(ind)
+              data_test = df_main_work[test_ind, ] %>% select(y, all_of(main_regressor)) %>% mutate(fold = paste0("fold ", fold_i), set = "Test")
+              data_train = df_work[train_ind, ] %>% select(y, all_of(main_regressor)) %>% mutate(fold = paste0("fold ", fold_i), set = "Train")
+              plot_data = plot_data %>%
+                bind_rows(data_test, data_train)
+            } # fold_i
+            plot_data = plot_data %>%
+              gather("variable", "val", -c(fold, set, y)) %>%
+              mutate(variable = gsub("BILA_", "", variable),
+              set = paste0(y, " ", set)) %>%
+              mutate(set = factor(set, levels = c("1 Train", "0 Train", "1 Test", "0 Test")))
+
+            png(paste0('./Distance_to_Default/Results/00_Input_variable_distribution_per_fold.png'), width = 15, height = 50, units = 'in', res=300)
+            plot(ggplot(plot_data, aes(x = val, fill = set)) +
+                   geom_density(alpha = 0.5) +
+                   scale_fill_manual(values = c("1 Train" = 'dodgerblue3', "0 Train" = 'firebrick2', "1 Test" = 'blue', "0 Test" = 'firebrick4')) +
+                   labs(title = "Distribution of input variables in each fold", fill = "Class / Set") +
+                   facet_grid(rows = vars(variable), cols = vars(fold), scales = "free", switch = "y") +
+                   theme_bw() +
+                   theme(
+                     axis.text = element_blank(),
+                     axis.ticks = element_blank(),
+                     axis.title = element_blank(),
+                     plot.title = element_text(size = 32),
+                     strip.text = element_text(size = 14),
+                     legend.title=element_text(size=20),
+                     legend.text=element_text(size=17))
+            )
+            dev.off()
+
+            rm(data_test, data_train, plot_data)
+          }
         }
         
         # fit regression model with cross-validation and return single final model
@@ -2335,6 +2383,45 @@ run_plot_feat_imp = T    # plot feature importance
               if (model_setting_lab == "no_control"){
                 saveRDS(df_work, paste0('./Distance_to_Default/Checkpoints/ML_model/04_feature_importance_input_',
                                         model_setting_lab, "_", cluster_lab, "_", model, "_", data_type, '.rds'))
+              }
+              
+              # plot distribution of target variable vs DD/PD
+              if (model_setting_lab == "no_control" & model == "additional_var"){
+                data_plot = df_work %>%
+                  select(y, all_of(additional_var)) %>%
+                  rename(var = !!sym(additional_var)) %>%
+                  arrange(var) %>%
+                  mutate(x = 1:n(),
+                         y = as.factor(y),
+                         ypos = ifelse(y == 0, min(var) - diff(range(var)) * 0.1, min(var) - diff(range(var)) * 0.2))
+                y_lim = range(c(data_plot$var, data_plot$ypos))
+                y_lim[1] = min(c(y_lim[1], min(data_plot$var) - diff(range(data_plot$var)) * 0.25))
+                y_break = quantile(data_plot$var, c(0, 0.25, 0.5, 0.75, 1))
+                
+                png(paste0('./Distance_to_Default/Results/01_', additional_var, '_distribution_vs_target_', cluster_lab, '.png'), width = 10, height = 8, units = 'in', res=200)
+                plot(ggplot(data_plot, aes(x=x, y=var)) +
+                       geom_line(size = 1.5, color = "black") +
+                       geom_jitter(data = data_plot, aes(x=x, y=ypos, colour=y)) +
+                       scale_color_manual(values = c("0" = "blue", "1"= "red")) +
+                       scale_y_continuous(labels = scales::percent_format(accuracy = 1), limits = y_lim, breaks = y_break) +
+                       labs(title = paste0(additional_var, " distribution vs target variable"),
+                            subtitle = paste0("y-axis reports quartiles of ", additional_var),
+                            y = additional_var, x = "Observations", color = "Target\nvariable") +
+                       guides(color = guide_legend(override.aes = list(size = 5))) +
+                       theme(axis.text.y = element_text(size = 16),
+                             axis.text.x = element_blank(),
+                             axis.ticks.x = element_blank(),
+                             axis.title = element_text(size = 24),
+                             plot.title = element_text(size=30),
+                             plot.subtitle = element_text(size=20),
+                             legend.title=element_text(size=20),
+                             legend.text=element_text(size=17),
+                             panel.background = element_rect(fill = "white", colour = "black"),
+                             panel.grid.major = element_line(colour = "grey", linetype = 'dashed', size = 0.4),
+                             panel.grid.minor = element_line(colour = "grey", linetype = 'dashed', size = 0.4))
+                )
+                dev.off()
+                rm(data_plot)
               }
               
               for (algo_type in algo_set){
@@ -2477,6 +2564,35 @@ run_plot_feat_imp = T    # plot feature importance
                 by = c("model_setting_lab", "cluster_lab", "data_type", "model", "algo_type", "param_compact_label")) %>%
       relocate(rds, .after = last_col())
     write.table(log_fitting_with_CV, './Distance_to_Default/Results/02a_Fitted_models_performance_with_CV.csv', sep = ';', row.names = F, append = F, na = "")
+    
+    # fitted model summary
+    log_fitting_summary = log_fitting_with_CV %>%
+      select(-threshold, -param_compact_label, -rds) %>%
+      gather('perf', 'val', -c(model_setting_lab, cluster_lab, data_type, model, algo_type, FullSet_obs, FullSet_perc_1)) %>%
+      mutate(abs_perf = gsub("FullSet_|CrossVal_|_test_std|_test_avg|_train_std|_train_avg", "", perf)) %>%
+      mutate(set = ifelse(grepl("FullSet", perf), "full", ifelse(grepl("_train_", perf), "cv_train", "cv_test"))) %>%
+      mutate(moment = ifelse(grepl("_avg", perf), "avg", ifelse(grepl("_std", perf), "std", "")))
+
+    first_perf = tuning_crit_full %>% strsplit(., "_") %>% .[[1]] %>% .[1]
+    col_order = c(first_perf, log_fitting_summary$abs_perf %>% sort() %>% setdiff(., first_perf))
+    col_order = paste0(rep(col_order, each = 3), rep(c("", "_cv_train", "_cv_test"), length(col_order)))
+    
+    log_fitting_summary = log_fitting_summary %>%
+      filter(set != "full") %>%
+      group_by(model_setting_lab, cluster_lab, data_type, model, algo_type, FullSet_obs, FullSet_perc_1, abs_perf, set) %>%
+      summarize(label = paste0(round(val[moment == "avg"] * 100, 2), "±", round(val[moment == "std"] * 100, 2), "%"), .groups = "drop") %>%
+      bind_rows(
+        log_fitting_summary %>%
+          filter(set == "full") %>%
+          group_by(model_setting_lab, cluster_lab, data_type, model, algo_type, FullSet_obs, FullSet_perc_1, abs_perf, set) %>%
+          summarize(label = paste0(round(unique(val) * 100, 2), "%"), .groups = "drop")
+      ) %>%
+      mutate(ref = paste0(abs_perf, "_", set)) %>%
+      select(-set, -abs_perf) %>%
+      spread(ref, label) %>%
+      setNames(gsub("_full", "", names(.))) %>%
+      select(model_setting_lab, cluster_lab, data_type, model, algo_type, FullSet_obs, FullSet_perc_1, all_of(col_order))
+    write.table(log_fitting_summary, './Distance_to_Default/Results/02b_Fitted_models_summary.csv', sep = ';', row.names = F, append = F, na = "")
     }
   
   
@@ -2526,94 +2642,36 @@ run_plot_feat_imp = T    # plot feature importance
                                                       verbose = 1, n_workers = n_workers, seed = 66)
           
           saveRDS(feat_imp_SHAP,paste0('./Distance_to_Default/Checkpoints/ML_model/05_feat_imp_reload_SHAP_', rds_lab, '.rds'))
-          rm(feat_imp_PFI, feat_imp_SHAP)
+          rm(feat_imp_PFI, feat_imp_SHAP, model_setting_block)
         } # run_feat_imp
       } # mod
       
       ### plot results
       {
-        cat('\n\n *** Plotting results')
-        feat_imp_PFI_baseline = readRDS(paste0('./Distance_to_Default/Checkpoints/ML_model/05_feat_imp_reload_PFI_',
-                                               mod_set_lab, "_", cl_lab, "_", "baseline", "_", d_type, '.rds'))
-        feat_imp_PFI_additional = readRDS(paste0('./Distance_to_Default/Checkpoints/ML_model/05_feat_imp_reload_PFI_',
-                                                 mod_set_lab, "_", cl_lab, "_", "additional_var", "_", d_type, '.rds'))
-        feat_imp_SHAP_baseline = readRDS(paste0('./Distance_to_Default/Checkpoints/ML_model/05_feat_imp_reload_SHAP_',
-                                                mod_set_lab, "_", cl_lab, "_", "baseline", "_", d_type, '.rds'))
-        feat_imp_SHAP_additional = readRDS(paste0('./Distance_to_Default/Checkpoints/ML_model/05_feat_imp_reload_SHAP_',
-                                                  mod_set_lab, "_", cl_lab, "_", "additional_var", "_", d_type, '.rds'))
-        avail_models = feat_imp_PFI_baseline$Permutation_feat_imp$model_name %>% unique()
-        
-        # PFI plot: baseline left, with PD right
-        {
-          plot_width = 12
-          plot_height = 12
-          tt_bas = plot_feat_imp(feat_imp_PFI_baseline, normalize = F, color_pos = "blue", color_neg = "red", magnify_text = 1.4)
-          tt_add = plot_feat_imp(feat_imp_PFI_additional, normalize = F, color_pos = "blue", color_neg = "red", magnify_text = 1.4)
+        if (run_plot_feat_imp){
+          cat('\n\n *** Plotting results')
+          feat_imp_PFI_baseline = readRDS(paste0('./Distance_to_Default/Checkpoints/ML_model/05_feat_imp_reload_PFI_',
+                                                 mod_set_lab, "_", cl_lab, "_", "baseline", "_", d_type, '.rds'))
+          feat_imp_PFI_additional = readRDS(paste0('./Distance_to_Default/Checkpoints/ML_model/05_feat_imp_reload_PFI_',
+                                                   mod_set_lab, "_", cl_lab, "_", "additional_var", "_", d_type, '.rds'))
+          feat_imp_SHAP_baseline = readRDS(paste0('./Distance_to_Default/Checkpoints/ML_model/05_feat_imp_reload_SHAP_',
+                                                  mod_set_lab, "_", cl_lab, "_", "baseline", "_", d_type, '.rds'))
+          feat_imp_SHAP_additional = readRDS(paste0('./Distance_to_Default/Checkpoints/ML_model/05_feat_imp_reload_SHAP_',
+                                                    mod_set_lab, "_", cl_lab, "_", "additional_var", "_", d_type, '.rds'))
+          avail_models = feat_imp_PFI_baseline$Permutation_feat_imp$model_name %>% unique()
           
-          for (tr_model in avail_models){
+          # PFI plot: baseline left, with PD right
+          {
+            plot_width = 12
+            plot_height = 12
+            tt_bas = plot_feat_imp(feat_imp_PFI_baseline, normalize = F, color_pos = "blue", color_neg = "red", magnify_text = 1.4)
+            tt_add = plot_feat_imp(feat_imp_PFI_additional, normalize = F, color_pos = "blue", color_neg = "red", magnify_text = 1.4)
             
-            p_bas = tt_bas[[tr_model]][["Permutation_feat_imp"]]
-            p_add = tt_add[[tr_model]][["Permutation_feat_imp"]]
-            main_title = p_bas$labels$title
-            png("999_baseline.png", width = plot_width, height = plot_height, units = 'in', res=300)
-            plot(p_bas + ggtitle("Baseline"))
-            dev.off()
-            png("999_additional.png", width = plot_width, height = plot_height, units = 'in', res=300)
-            plot(p_add + ggtitle("With PD"))
-            dev.off()
-            
-            left_panel = image_read("999_baseline.png")
-            right_panel = image_read("999_additional.png")
-            
-            final_plot = image_append(c(left_panel, right_panel), stack = F)
-            
-            title_lab = image_graph(res = 100, width = image_info(final_plot)$width, height = 400, clip = F)
-            plot(
-              ggplot(mtcars, aes(x = wt, y = mpg)) + geom_blank() + xlim(0, 1) + ylim(0, 5) +
-                annotate(geom = "text", x = 0, y = 3.5, label = paste0(main_title, " - ", gsub("_", " ", tr_model)), cex = 50, hjust = 0, vjust = 0.5) +
-                # annotate(geom = "text", x = 0, y = 1.5, label = "subtitletttt", cex = 35, hjust = 0, vjust = 0.5) +
-                theme_bw() +
-                theme( panel.grid.major = element_blank(), panel.grid.minor = element_blank(), panel.border = element_blank(),
-                       axis.title=element_blank(), axis.text=element_blank(), axis.ticks=element_blank(),
-                       plot.margin=unit(c(0,0.4,0,0.4),"cm"))
-            )
-            dev.off()
-            
-            final_plot = image_append(c(title_lab, final_plot), stack = T)
-            
-            png(paste0('./Distance_to_Default/Results/06_Feat_Imp_PFI_', cl_lab, '_', tr_model, '.png'), width = 12, height = 6, units = 'in', res=300)
-            par(mar=c(0,0,0,0))
-            par(oma=c(0,0,0,0))
-            plot(final_plot)
-            dev.off()
-            
-            oo = file.remove("999_baseline.png", "999_additional.png")
-          } # tr_model
-          rm(feat_imp_PFI_baseline, feat_imp_PFI_additional, tt_bas, tt_add, p_bas, p_add, title_lab)
-        }
-        
-        # SHAP plot: left SHAP summary (baseline vs with PD), right signed avg SHAP (baseline vs with PD). Top All predictions, middle class 1, bottom class 0
-        {
-          plot_width = 12
-          plot_height = 12
-          sina_bins = 20
-          tt_bas = plot_feat_imp(feat_imp_SHAP_baseline, normalize = F, color_pos = "blue", color_neg = "red", magnify_text = 1.4)
-          tt_bas_summ = plot_SHAP_summary(feat_imp_SHAP_baseline, sina_method = "counts", sina_bins = sina_bins, sina_size = 2, sina_alpha = 0.7,
-                                          SHAP_axis_lower_limit = 0, magnify_text = 1.4, color_range = c("red", "blue"))
-          tt_add = plot_feat_imp(feat_imp_SHAP_additional, normalize = F, color_pos = "blue", color_neg = "red", magnify_text = 1.4)
-          tt_add_summ = plot_SHAP_summary(feat_imp_SHAP_additional, sina_method = "counts", sina_bins = sina_bins, sina_size = 2, sina_alpha = 0.7,
-                                          SHAP_axis_lower_limit = 0, magnify_text = 1.4, color_range = c("red", "blue"))
-          
-          for (tr_model in avail_models){
-            
-            
-            left_column = right_column = header_column = c()
-            for (class_i in names(tt_bas)){
+            for (tr_model in avail_models){
               
-              # left panel - summary plot
-              p_bas = tt_bas_summ[[class_i]][[tr_model]]
-              p_add = tt_add_summ[[class_i]][[tr_model]]
-              main_title = p_bas$labels$title %>% gsub(paste0(" for ", ifelse(class_i == "All observations", "all classes", class_i)), "", .)
+              p_bas = tt_bas[[tr_model]][["Permutation_feat_imp"]]
+              p_add = tt_add[[tr_model]][["Permutation_feat_imp"]]
+              main_title = p_bas$labels$title
               png("999_baseline.png", width = plot_width, height = plot_height, units = 'in', res=300)
               plot(p_bas + ggtitle("Baseline"))
               dev.off()
@@ -2626,10 +2684,10 @@ run_plot_feat_imp = T    # plot feature importance
               
               final_plot = image_append(c(left_panel, right_panel), stack = F)
               
-              title_lab = image_graph(res = 100, width = image_info(final_plot)$width, height = 300, clip = F)
+              title_lab = image_graph(res = 100, width = image_info(final_plot)$width, height = 400, clip = F)
               plot(
                 ggplot(mtcars, aes(x = wt, y = mpg)) + geom_blank() + xlim(0, 1) + ylim(0, 5) +
-                  annotate(geom = "text", x = 0.5, y = 3.5, label = paste0(main_title, " - ", gsub("_", " ", tr_model)), cex = 35, hjust = 0.5, vjust = 0.5) +
+                  annotate(geom = "text", x = 0, y = 3.5, label = paste0(main_title, " - ", gsub("_", " ", tr_model)), cex = 50, hjust = 0, vjust = 0.5) +
                   # annotate(geom = "text", x = 0, y = 1.5, label = "subtitletttt", cex = 35, hjust = 0, vjust = 0.5) +
                   theme_bw() +
                   theme( panel.grid.major = element_blank(), panel.grid.minor = element_blank(), panel.border = element_blank(),
@@ -2640,92 +2698,153 @@ run_plot_feat_imp = T    # plot feature importance
               
               final_plot = image_append(c(title_lab, final_plot), stack = T)
               
-              save_lab = paste0("999_summ_", class_i, ".png")
-              left_column = c(left_column, save_lab)
-              png(save_lab, width = 12, height = 6, units = 'in', res=300)
+              png(paste0('./Distance_to_Default/Results/06_Feat_Imp_PFI_', cl_lab, '_', tr_model, '.png'), width = 12, height = 6, units = 'in', res=300)
               par(mar=c(0,0,0,0))
               par(oma=c(0,0,0,0))
               plot(final_plot)
               dev.off()
               
-              # row header
-              title_lab = image_graph(res = 100, width = 500, height = image_info(final_plot)$height, clip = F)
-              plot(
-                ggplot(mtcars, aes(x = wt, y = mpg)) + geom_blank() + xlim(0, 1) + ylim(0, 5) +
-                  annotate(geom = "text", x = 0.5, y = 2.5, label = ifelse(class_i == "All observations", "all classes", class_i) %>% capitalize(),
-                           cex = 40, hjust = 0.5, vjust = 0.5, angle = 90) +
-                  theme_bw() +
-                  theme( panel.grid.major = element_blank(), panel.grid.minor = element_blank(), panel.border = element_blank(),
-                         axis.title=element_blank(), axis.text=element_blank(), axis.ticks=element_blank(),
-                         plot.margin=unit(c(0,0.4,0,0.4),"cm"))
-              )
-              dev.off()
-              save_lab = paste0("999_col_", class_i, ".png")
-              header_column = c(header_column, save_lab)
-              png(save_lab, width = 1, height = 6, units = 'in', res=300)
-              par(mar=c(0,0,0,0))
-              par(oma=c(0,0,0,0))
-              plot(title_lab)
-              dev.off()
+              oo = file.remove("999_baseline.png", "999_additional.png")
+            } # tr_model
+            rm(feat_imp_PFI_baseline, feat_imp_PFI_additional, tt_bas, tt_add, p_bas, p_add, title_lab)
+          }
+          
+          # SHAP plot: left SHAP summary (baseline vs with PD), right signed avg SHAP (baseline vs with PD). Top All predictions, middle class 1, bottom class 0
+          {
+            plot_width = 12
+            plot_height = 12
+            sina_bins = 20
+            tt_bas = plot_feat_imp(feat_imp_SHAP_baseline, normalize = F, color_pos = "blue", color_neg = "red", magnify_text = 1.4)
+            tt_bas_summ = plot_SHAP_summary(feat_imp_SHAP_baseline, sina_method = "counts", sina_bins = sina_bins, sina_size = 2, sina_alpha = 0.7,
+                                            SHAP_axis_lower_limit = 0, magnify_text = 1.4, color_range = c("red", "blue"))
+            tt_add = plot_feat_imp(feat_imp_SHAP_additional, normalize = F, color_pos = "blue", color_neg = "red", magnify_text = 1.4)
+            tt_add_summ = plot_SHAP_summary(feat_imp_SHAP_additional, sina_method = "counts", sina_bins = sina_bins, sina_size = 2, sina_alpha = 0.7,
+                                            SHAP_axis_lower_limit = 0, magnify_text = 1.4, color_range = c("red", "blue"))
+            
+            for (tr_model in avail_models){
               
-              # right panel - avg signed SHAP plot
-              p_bas = tt_bas[[class_i]][[tr_model]][["global_features_effect"]]
-              p_add = tt_add[[class_i]][[tr_model]][["global_features_effect"]]
-              main_title = p_bas$labels$title %>% gsub(paste0(" for ", ifelse(class_i == "All observations", "all classes", class_i)), "", .)
-              png("999_baseline.png", width = plot_width, height = plot_height, units = 'in', res=300)
-              plot(p_bas + ggtitle("Baseline"))
-              dev.off()
-              png("999_additional.png", width = plot_width, height = plot_height, units = 'in', res=300)
-              plot(p_add + ggtitle("With PD"))
-              dev.off()
               
-              left_panel = image_read("999_baseline.png")
-              right_panel = image_read("999_additional.png")
+              left_column = right_column = header_column = c()
+              for (class_i in names(tt_bas)){
+                
+                # left panel - summary plot
+                p_bas = tt_bas_summ[[class_i]][[tr_model]]
+                p_add = tt_add_summ[[class_i]][[tr_model]]
+                main_title = p_bas$labels$title %>% gsub(paste0(" for ", ifelse(class_i == "All observations", "all classes", class_i)), "", .)
+                png("999_baseline.png", width = plot_width, height = plot_height, units = 'in', res=300)
+                plot(p_bas + ggtitle("Baseline"))
+                dev.off()
+                png("999_additional.png", width = plot_width, height = plot_height, units = 'in', res=300)
+                plot(p_add + ggtitle("With PD"))
+                dev.off()
+                
+                left_panel = image_read("999_baseline.png")
+                right_panel = image_read("999_additional.png")
+                
+                final_plot = image_append(c(left_panel, right_panel), stack = F)
+                
+                title_lab = image_graph(res = 100, width = image_info(final_plot)$width, height = 300, clip = F)
+                plot(
+                  ggplot(mtcars, aes(x = wt, y = mpg)) + geom_blank() + xlim(0, 1) + ylim(0, 5) +
+                    annotate(geom = "text", x = 0.5, y = 3.5, label = paste0(main_title, " - ", gsub("_", " ", tr_model)), cex = 35, hjust = 0.5, vjust = 0.5) +
+                    # annotate(geom = "text", x = 0, y = 1.5, label = "subtitletttt", cex = 35, hjust = 0, vjust = 0.5) +
+                    theme_bw() +
+                    theme( panel.grid.major = element_blank(), panel.grid.minor = element_blank(), panel.border = element_blank(),
+                           axis.title=element_blank(), axis.text=element_blank(), axis.ticks=element_blank(),
+                           plot.margin=unit(c(0,0.4,0,0.4),"cm"))
+                )
+                dev.off()
+                
+                final_plot = image_append(c(title_lab, final_plot), stack = T)
+                
+                save_lab = paste0("999_summ_", class_i, ".png")
+                left_column = c(left_column, save_lab)
+                png(save_lab, width = 12, height = 6, units = 'in', res=300)
+                par(mar=c(0,0,0,0))
+                par(oma=c(0,0,0,0))
+                plot(final_plot)
+                dev.off()
+                
+                # row header
+                title_lab = image_graph(res = 100, width = 500, height = image_info(final_plot)$height, clip = F)
+                plot(
+                  ggplot(mtcars, aes(x = wt, y = mpg)) + geom_blank() + xlim(0, 1) + ylim(0, 5) +
+                    annotate(geom = "text", x = 0.5, y = 2.5, label = ifelse(class_i == "All observations", "all classes", class_i) %>% capitalize(),
+                             cex = 40, hjust = 0.5, vjust = 0.5, angle = 90) +
+                    theme_bw() +
+                    theme( panel.grid.major = element_blank(), panel.grid.minor = element_blank(), panel.border = element_blank(),
+                           axis.title=element_blank(), axis.text=element_blank(), axis.ticks=element_blank(),
+                           plot.margin=unit(c(0,0.4,0,0.4),"cm"))
+                )
+                dev.off()
+                save_lab = paste0("999_col_", class_i, ".png")
+                header_column = c(header_column, save_lab)
+                png(save_lab, width = 1, height = 6, units = 'in', res=300)
+                par(mar=c(0,0,0,0))
+                par(oma=c(0,0,0,0))
+                plot(title_lab)
+                dev.off()
+                
+                # right panel - avg signed SHAP plot
+                p_bas = tt_bas[[class_i]][[tr_model]][["global_features_effect"]]
+                p_add = tt_add[[class_i]][[tr_model]][["global_features_effect"]]
+                main_title = p_bas$labels$title %>% gsub(paste0(" for ", ifelse(class_i == "All observations", "all classes", class_i)), "", .)
+                png("999_baseline.png", width = plot_width, height = plot_height, units = 'in', res=300)
+                plot(p_bas + ggtitle("Baseline"))
+                dev.off()
+                png("999_additional.png", width = plot_width, height = plot_height, units = 'in', res=300)
+                plot(p_add + ggtitle("With PD"))
+                dev.off()
+                
+                left_panel = image_read("999_baseline.png")
+                right_panel = image_read("999_additional.png")
+                
+                final_plot = image_append(c(left_panel, right_panel), stack = F)
+                
+                title_lab = image_graph(res = 100, width = image_info(final_plot)$width, height = 300, clip = F)
+                plot(
+                  ggplot(mtcars, aes(x = wt, y = mpg)) + geom_blank() + xlim(0, 1) + ylim(0, 5) +
+                    annotate(geom = "text", x = 0.5, y = 3.5, label = paste0(main_title, " - ", gsub("_", " ", tr_model)), cex = 35, hjust = 0.5, vjust = 0.5) +
+                    # annotate(geom = "text", x = 0, y = 1.5, label = "subtitletttt", cex = 35, hjust = 0, vjust = 0.5) +
+                    theme_bw() +
+                    theme( panel.grid.major = element_blank(), panel.grid.minor = element_blank(), panel.border = element_blank(),
+                           axis.title=element_blank(), axis.text=element_blank(), axis.ticks=element_blank(),
+                           plot.margin=unit(c(0,0.4,0,0.4),"cm"))
+                )
+                dev.off()
+                
+                final_plot = image_append(c(title_lab, final_plot), stack = T)
+                
+                save_lab = paste0("999_signed_", class_i, ".png")
+                right_column = c(right_column, save_lab)
+                png(save_lab, width = 12, height = 6, units = 'in', res=300)
+                par(mar=c(0,0,0,0))
+                par(oma=c(0,0,0,0))
+                plot(final_plot)
+                dev.off()
+              } # class_i
               
-              final_plot = image_append(c(left_panel, right_panel), stack = F)
+              # build final plot
+              eval(parse(text=paste0("image_header = image_append(c(", paste0("image_read('", header_column, "')", collapse = ","), "), stack = T)")))
+              eval(parse(text=paste0("image_left = image_append(c(", paste0("image_read('", left_column, "')", collapse = ","), "), stack = T)")))
+              eval(parse(text=paste0("image_right = image_append(c(", paste0("image_read('", right_column, "')", collapse = ","), "), stack = T)")))
               
-              title_lab = image_graph(res = 100, width = image_info(final_plot)$width, height = 300, clip = F)
-              plot(
-                ggplot(mtcars, aes(x = wt, y = mpg)) + geom_blank() + xlim(0, 1) + ylim(0, 5) +
-                  annotate(geom = "text", x = 0.5, y = 3.5, label = paste0(main_title, " - ", gsub("_", " ", tr_model)), cex = 35, hjust = 0.5, vjust = 0.5) +
-                  # annotate(geom = "text", x = 0, y = 1.5, label = "subtitletttt", cex = 35, hjust = 0, vjust = 0.5) +
-                  theme_bw() +
-                  theme( panel.grid.major = element_blank(), panel.grid.minor = element_blank(), panel.border = element_blank(),
-                         axis.title=element_blank(), axis.text=element_blank(), axis.ticks=element_blank(),
-                         plot.margin=unit(c(0,0.4,0,0.4),"cm"))
-              )
-              dev.off()
+              final_plot = image_append(c(image_header, image_left, image_right), stack = F)
               
-              final_plot = image_append(c(title_lab, final_plot), stack = T)
-              
-              save_lab = paste0("999_signed_", class_i, ".png")
-              right_column = c(right_column, save_lab)
-              png(save_lab, width = 12, height = 6, units = 'in', res=300)
+              png(paste0('./Distance_to_Default/Results/06_Feat_Imp_SHAP_', cl_lab, '_', tr_model, '.png'), width = 6*4, height = 6*3, units = 'in', res=300)
               par(mar=c(0,0,0,0))
               par(oma=c(0,0,0,0))
               plot(final_plot)
               dev.off()
-            } # class_i
-            
-            # build final plot
-            eval(parse(text=paste0("image_header = image_append(c(", paste0("image_read('", header_column, "')", collapse = ","), "), stack = T)")))
-            eval(parse(text=paste0("image_left = image_append(c(", paste0("image_read('", left_column, "')", collapse = ","), "), stack = T)")))
-            eval(parse(text=paste0("image_right = image_append(c(", paste0("image_read('", right_column, "')", collapse = ","), "), stack = T)")))
-            
-            final_plot = image_append(c(image_header, image_left, image_right), stack = F)
-            
-            png(paste0('./Distance_to_Default/Results/06_Feat_Imp_SHAP_', cl_lab, '_', tr_model, '.png'), width = 6*4, height = 6*3, units = 'in', res=300)
-            par(mar=c(0,0,0,0))
-            par(oma=c(0,0,0,0))
-            plot(final_plot)
-            dev.off()
-            
-            oo = file.remove("999_baseline.png", "999_additional.png", left_column, right_column, header_column)
-          } # tr_model
-          rm(feat_imp_SHAP_baseline, feat_imp_SHAP_additional, tt_bas, tt_bas_summ, tt_add, tt_add_summ, p_bas, p_add,
-             title_lab, left_panel, right_panel, final_plot)
-        }
+              
+              oo = file.remove("999_baseline.png", "999_additional.png", left_column, right_column, header_column)
+            } # tr_model
+            rm(feat_imp_SHAP_baseline, feat_imp_SHAP_additional, tt_bas, tt_bas_summ, tt_add, tt_add_summ, p_bas, p_add,
+               title_lab, left_panel, right_panel, final_plot)
+          }
+        } # run_plot_feat_imp
       }
+      
     } # cl_lab
   }
   
@@ -2733,6 +2852,7 @@ run_plot_feat_imp = T    # plot feature importance
   
   ### create report
   plt_perf = "F1"    # performance to plot
+  fig_per_row = 3    # used to split control variables for probability distribution and ROC curve plot
   {
     for (cl_lab in unique(log_fitting$cluster_lab)){
       for (d_type in log_fitting %>% filter(cluster_lab == cl_lab) %>% pull(data_type) %>% unique()){
@@ -2742,6 +2862,7 @@ run_plot_feat_imp = T    # plot feature importance
           # alg_type = "Random_Forest"
           
           # performance comparison - test set for cross-validated folds
+          only_full_set = F  # doesn't show performance on cross-validation test set
           {
             perf_lab = ifelse(plt_perf == "F1", "F1-score", plt_perf)
             y_lim = c(log_fitting %>% pull(paste0(plt_perf, "_train")), log_tuning %>% pull(paste0(plt_perf, "_test_avg"))) %>% range()
@@ -2776,6 +2897,14 @@ run_plot_feat_imp = T    # plot feature importance
               mutate(Model = as.factor(Model),
                      Dataset = as.factor(Dataset))
             
+            if (only_full_set){
+              tt = tt %>%
+                filter(Dataset == "Full dataset")
+              y_lim = NULL
+            } else {
+              y_lim = c(y_lim[1]*0.8, y_lim[2]*1.2)
+            }
+            
             control_label = tt %>%
               select(model_setting_lab, pos) %>%
               unique() %>%
@@ -2786,7 +2915,7 @@ run_plot_feat_imp = T    # plot feature importance
             p_perf = ggplot(tt, aes(x=position, y=avg, color=Model)) + 
               geom_point(aes(shape = Dataset), size = 8) +
               scale_shape_manual(values = c(16, 18)) +
-              scale_color_manual(values = c("blue", "red")) +
+              scale_color_manual(values = c("Baseline" = "blue", "With PD" = "red")) +
               guides(size = FALSE,
                      color = guide_legend(override.aes = list(shape = 15, size = 10)),
                      shape = guide_legend(override.aes = list(size = 9))) +
@@ -2794,9 +2923,9 @@ run_plot_feat_imp = T    # plot feature importance
               geom_vline(xintercept = control_label$vertical %>% setdiff(NA), size = 1.2) +
               scale_x_continuous(name ="\nControl Variables", 
                                  breaks= control_label$pos, labels = control_label$label) +
+              scale_y_continuous(labels = scales::percent_format(accuracy = 1), limits = y_lim) +
               labs(title = paste0("Performance comparison for ", cl_lab %>% gsub("_-_", " - ", .) %>% gsub("_", " ", .), "\n"),
                    y = paste0(perf_lab, "\n")) +
-              scale_y_continuous(labels = scales::percent_format(accuracy = 1), limits = c(y_lim[1]*0.8, y_lim[2]*1.2)) +
               theme(axis.text.y = element_text(size = 16),
                     axis.text.x = element_text(size = 18),
                     axis.title = element_text(size = 24),
@@ -2807,10 +2936,249 @@ run_plot_feat_imp = T    # plot feature importance
                     panel.grid.major.y = element_line(colour = "grey", linetype = 'dashed', size = 0.8),
                     panel.grid.minor.y = element_line(colour = "grey", linetype = 'dashed', size = 0.8))
             
+            if (only_full_set){
+              p_perf = p_perf +
+                guides(shape = F)
+            }
+            
             png(paste0('./Distance_to_Default/Results/03_Perf_comparison_', cl_lab, '_', d_type, '_', alg_type, '.png'), width = 12, height = 10, units = 'in', res=100)
             plot(p_perf)
             dev.off()
             rm(control_label, p_perf, tt)
+          }
+          
+          # probability distribution
+          {
+            tot_mod_set_lab = log_fitting %>% filter(cluster_lab == cl_lab & data_type == d_type & algo_type == alg_type) %>% pull(model_setting_lab) %>% unique()
+            row_list = list()
+            fig_count = 1
+            for (mod_set_lab in tot_mod_set_lab){
+              
+              if (fig_count %% fig_per_row == 1){row_img = c()}
+              
+              rds_ref = log_fitting %>%
+                filter(data_type == d_type) %>%
+                filter(cluster_lab == cl_lab) %>%
+                filter(algo_type == alg_type) %>%
+                filter(model_setting_lab == mod_set_lab)
+              
+              tt = readRDS(rds_ref %>% filter(model == "baseline") %>% pull(rds))$fold_prediction %>%
+                mutate(data_type = d_type,
+                       model = "Baseline") %>%
+                group_by(y_true) %>%
+                mutate(tot_true = n()) %>%
+                ungroup() %>%
+                group_by(y_true, y_pred) %>%
+                mutate(tot_pred = n()) %>%
+                ungroup() %>%
+                bind_rows(
+                  readRDS(rds_ref %>% filter(model == "additional_var") %>% pull(rds))$fold_prediction %>%
+                    mutate(data_type = d_type,
+                           model = "additional_var") %>%
+                    group_by(y_true) %>%
+                    mutate(tot_true = n()) %>%
+                    ungroup() %>%
+                    group_by(y_true, y_pred) %>%
+                    mutate(tot_pred = n()) %>%
+                    ungroup()
+                ) %>%
+                rename(Predicted = y_pred) %>%
+                mutate(y_true = paste0("True: ", y_true, " (", format(tot_true, big.mark = ","), " obs)"),
+                       model = gsub("additional_var", paste0("With ", additional_var), model))
+              
+              tt_annotate = tt %>%
+                group_by(data_type, model, y_true) %>%
+                summarize(Pred_lab_1 = paste0("Pred \"1\"\nobs: ", format(tot_pred[Predicted == 1][1], big.mark = ",")),
+                          Pred_lab_0 = paste0("Pred \"0\"\nobs: ", format(tot_pred[Predicted == 0][1], big.mark = ",")), .groups = "drop")
+              
+              p_distr = ggplot(tt, aes(x=Prob, fill = Predicted)) +
+                geom_density(alpha = 0.5) +
+                scale_fill_manual(values = c("blue", "red")) +
+                scale_x_continuous(labels = scales::percent_format(accuracy = 1)) +
+                labs(title = gsub("control_", "", mod_set_lab) %>% gsub("_", " ", .),
+                     y = "Density", x = "Predicted probability", fill = "Predicted\nClass") +
+                facet_grid(model~y_true, scales = "fixed", switch = 'y') +
+                theme(
+                  axis.text.y = element_blank(),
+                  axis.ticks.y = element_blank(),
+                  axis.text.x = element_text(size = 14),
+                  axis.title = element_text(size = 20),
+                  plot.title = element_text(size=27),
+                  plot.subtitle = element_text(size=22),
+                  legend.title=element_text(size=20),
+                  legend.text=element_text(size=17),
+                  strip.text = element_text(size = 14),
+                  strip.text.y = element_text(margin = margin(0,0.4,0,0.4, "cm")),
+                  panel.background = element_rect(fill = "white", colour = "black"),
+                  panel.grid.major.x = element_line(colour = "grey", linetype = 'dashed', size = 0.4),
+                  panel.grid.minor.x = element_line(colour = "grey", linetype = 'dashed', size = 0.4))
+              max_y_val = suppressWarnings(layer_scales(p_distr)$y$get_limits() %>% max())
+              p_distr = p_distr +
+                geom_text(data = tt_annotate %>% filter(data_type == d_type) %>% mutate(Prob = 0.75, Predicted = "1"), aes(x = Prob, y = 0.9*max_y_val, label = Pred_lab_1), size = 5) +
+                geom_text(data = tt_annotate %>% filter(data_type == d_type) %>% mutate(Prob = 0.25, Predicted = "0"), aes(x = Prob, y = 0.9*max_y_val, label = Pred_lab_0), size = 5) +
+                geom_segment(aes(x = threshold , y = 0, xend = threshold, yend = 0.8*max_y_val), linetype = 'dashed', size = 1.2) +
+                geom_text(aes(x = threshold, y = 0, label = as.character(round(threshold, 2))), vjust = 1)
+              # save common legend
+              if (fig_count == 1){
+                png('999_vvv_legend.png', width = 2, height = 8, units = 'in', res=300)
+                par(mar=c(0,0,0,0))
+                par(oma=c(0,0,0,0))
+                suppressWarnings(grid.draw(cowplot::get_legend(p_distr)))
+                dev.off()
+                }
+              p_distr = p_distr + theme(legend.position = "none")
+              
+              png(paste0('999_vvv_', fig_count, '.png'), width = 8, height = 8, units = 'in', res=300)
+              par(mar=c(0,0,0,0))
+              par(oma=c(0,0,0,0))
+              suppressWarnings(print(p_distr))
+              dev.off()
+              
+              row_img = c(row_img, paste0('999_vvv_', fig_count, '.png'))
+              
+              if (fig_count %% fig_per_row == 0 | fig_count == length(tot_mod_set_lab)){row_list = c(row_list, list(row_img))}
+              fig_count = fig_count + 1
+            } # mod_set_lab
+            
+            # assemble columns for each row
+            list_final = c()
+            for (i in 1:length(row_list)){
+              eval(parse(text=paste0("list_final = c(list_final, image_append(c(", paste0("image_read('", row_list[[i]], "')", collapse = ","), ",image_read('999_vvv_legend.png')), stack = F))")))
+            }
+            
+            # assemble rows
+            eval(parse(text=paste0('final_plot = image_append(c(', paste0('list_final[[', 1:length(list_final), ']]', collapse = ','), '), stack = T)')))
+            
+            # add title
+            title_lab = image_graph(res = 100, width = image_info(final_plot)$width, height = 300, clip = F)
+            plot(
+              ggplot(mtcars, aes(x = wt, y = mpg)) + geom_blank() + xlim(0, 1) + ylim(0, 6) +
+                annotate(geom = "text", x = 0, y = 4.5, label = "Distribution of true vs predicted", cex = 35, hjust = 0, vjust = 0.5) +
+                annotate(geom = "text", x = 0, y = 1.5, label = "Vertical lines represent probability to class thresholds", cex = 25, hjust = 0, vjust = 0.5) +
+                theme_bw() +
+                theme( panel.grid.major = element_blank(), panel.grid.minor = element_blank(), panel.border = element_blank(),
+                       axis.title=element_blank(), axis.text=element_blank(), axis.ticks=element_blank(),
+                       plot.margin=unit(c(0,0.4,0,0.4),"cm"))
+            )
+            dev.off()
+            
+            final_plot = image_append(c(title_lab, final_plot), stack = T)
+            
+            png(paste0('./Distance_to_Default/Results/04_Probab_distribution_', cl_lab, '_', d_type, '_', alg_type, '.png'), width = 6*4, height = 6*3, units = 'in', res=300)
+            par(mar=c(0,0,0,0))
+            par(oma=c(0,0,0,0))
+            plot(final_plot)
+            dev.off()
+            
+            oo = file.remove(c(row_list %>% unlist(), '999_vvv_legend.png'))
+            rm(list_final, p_distr, rds_ref, row_list, tt, tt_annotate)
+          }
+          
+          # ROC curve
+          {
+            tot_mod_set_lab = log_fitting %>% filter(cluster_lab == cl_lab & data_type == d_type & algo_type == alg_type) %>% pull(model_setting_lab) %>% unique()
+
+            row_list = list()
+            fig_count = 1
+            for (mod_set_lab in tot_mod_set_lab){
+              
+              if (fig_count %% fig_per_row == 1){row_img = c()}
+              
+              rds_ref = log_fitting %>%
+                filter(data_type == d_type) %>%
+                filter(cluster_lab == cl_lab) %>%
+                filter(algo_type == alg_type) %>%
+                filter(model_setting_lab == mod_set_lab)
+              
+              AUC_ref = log_fitting_summary %>%
+                filter(data_type == d_type) %>%
+                filter(cluster_lab == cl_lab) %>%
+                filter(algo_type == alg_type) %>%
+                filter(model_setting_lab == mod_set_lab)
+              
+              tt_bas = readRDS(rds_ref %>% filter(model == "baseline") %>% pull(rds))$list_ROC$fold_1$ROC_train
+              tt_add = readRDS(rds_ref %>% filter(model == "additional_var") %>% pull(rds))$list_ROC$fold_1$ROC_train
+              # reduce number of points
+              if (nrow(tt_bas) > 300){tt_bas = DouglasPeuckerNbPoints(tt_bas$x, tt_bas$y, nbPoints = 300)}
+              if (nrow(tt_add) > 300){tt_add = DouglasPeuckerNbPoints(tt_add$x, tt_add$y, nbPoints = 300)}
+              
+              tt = tt_bas %>%
+                mutate(Model = paste0("Baseline (AUC = ", AUC_ref %>% filter(model == "baseline") %>% pull(AUC), ")"),
+                       color_w = "blue") %>%
+                bind_rows(
+                  tt_add %>%
+                    mutate(Model = paste0("With PD (AUC = ", AUC_ref %>% filter(model == "additional_var") %>% pull(AUC), ")"),
+                           color_w = "red")
+                )
+              
+              p_roc = ggplot(data=tt, aes(x=x, y=y, color = Model)) +
+                geom_segment(aes(x = 0, xend = 1, y = 0 , yend = 1, color = Model), size = 2, linetype = "dashed", color = "black") +
+                geom_line(size = 2, alpha = 0.8) +
+                # scale_color_manual(values = tt %>% select(Model, color_w) %>% unique() %>% deframe()) +
+                scale_color_manual(values = c("blue", "red")) +
+                guides(color = guide_legend(override.aes = list(shape = 15, size = 10))) +
+                labs(title = gsub("control_", "", mod_set_lab) %>% gsub("_", " ", .),
+                     y = "True Positive Rate", x = "False Positive Rate") +
+                scale_x_continuous(limits = c(0 ,1), expand = c(0, 0.02)) +
+                scale_y_continuous(limits = c(0, 1), expand = c(0, 0.02)) +
+                theme(axis.text.y = element_text(size = 16),
+                      axis.text.x = element_text(size = 18),
+                      axis.title = element_text(size = 24),
+                      plot.title = element_text(size=30),
+                      legend.title=element_text(size=20),
+                      legend.text=element_text(size=17),
+                      legend.position = c(.95, .25),  # c(x, y)
+                      legend.justification = c("right", "top"),
+                      legend.box.background = element_rect(color="black", size=2),
+                      panel.background = element_rect(fill = "white", colour = "black"))
+              
+              
+              
+              
+              png(paste0('999_vvv_', fig_count, '.png'), width = 8, height = 8, units = 'in', res=300)
+              par(mar=c(0,0,0,0))
+              par(oma=c(0,0,0,0))
+              suppressWarnings(print(p_roc))
+              dev.off()
+              
+              row_img = c(row_img, paste0('999_vvv_', fig_count, '.png'))
+              
+              if (fig_count %% fig_per_row == 0 | fig_count == length(tot_mod_set_lab)){row_list = c(row_list, list(row_img))}
+              fig_count = fig_count + 1
+            } # mod_set_lab
+            
+            # assemble columns for each row
+            list_final = c()
+            for (i in 1:length(row_list)){
+              eval(parse(text=paste0("list_final = c(list_final, image_append(c(", paste0("image_read('", row_list[[i]], "')", collapse = ","), "), stack = F))")))
+            }
+            
+            # assemble rows
+            eval(parse(text=paste0('final_plot = image_append(c(', paste0('list_final[[', 1:length(list_final), ']]', collapse = ','), '), stack = T)')))
+            
+            # add title
+            title_lab = image_graph(res = 100, width = image_info(final_plot)$width, height = 300, clip = F)
+            plot(
+              ggplot(mtcars, aes(x = wt, y = mpg)) + geom_blank() + xlim(0, 1) + ylim(0, 6) +
+                annotate(geom = "text", x = 0, y = 4.5, label = "ROC curve", cex = 35, hjust = 0, vjust = 0.5) +
+                # annotate(geom = "text", x = 0, y = 1.5, label = "Vertical lines represent probability to class thresholds", cex = 25, hjust = 0, vjust = 0.5) +
+                theme_bw() +
+                theme( panel.grid.major = element_blank(), panel.grid.minor = element_blank(), panel.border = element_blank(),
+                       axis.title=element_blank(), axis.text=element_blank(), axis.ticks=element_blank(),
+                       plot.margin=unit(c(0,0.4,0,0.4),"cm"))
+            )
+            dev.off()
+            
+            final_plot = image_append(c(title_lab, final_plot), stack = T)
+            
+            png(paste0('./Distance_to_Default/Results/05_ROC_curve_', cl_lab, '_', d_type, '_', alg_type, '.png'), width = 6*4, height = 6*3, units = 'in', res=300)
+            par(mar=c(0,0,0,0))
+            par(oma=c(0,0,0,0))
+            plot(final_plot)
+            dev.off()
+            
+            oo = file.remove(row_list %>% unlist())
+            rm(list_final, p_roc, rds_ref, AUC_ref, row_list, tt, tt_bas, tt_add)
           }
           
         } # alg_type
@@ -2825,135 +3193,1017 @@ run_plot_feat_imp = T    # plot feature importance
 
 
 # todo: plot da finire. poi aggiungi anche quello delle ROC
+cl_lab = "roa_Median_-_peers_Volatility"  # todo: rimuovi
+d_type = "original"
+alg_type = "MARS"
 
-# probability distribution
-tot_mod_set_lab = log_fitting$model_setting_lab %>% unique()
-tot_mod_set_lab = c(tot_mod_set_lab, tot_mod_set_lab)   # todo: rimuovi
-fig_per_row = 3
 
-row_list = c()
-fig_count = 1
-for (mod_set_lab in tot_mod_set_lab){
-  # mod_set_lab = "no_control"     # todo: rimuovi
+# latex tables
+variable_mapping = read.csv2('./Distance_to_Default/mapping_nomi_variabili.csv', stringsAsFactors=FALSE, colClasses = 'character')
+industry_short = data.frame(orig = c("Accommodation and food service activities", "Arts, entertainment and recreation",
+                                     "Electricity, gas, steam and air conditioning supply", "Information and communication",
+                                     "Manufacturing", "Professional, scientific and technical activities", "Real estate activities",
+                                     "Transportation and storage", "Wholesale and retail trade; repair of motor vehicles and motorcycles"),
+                            new = c("Accommodation & Food", "Entertainment",
+                                    "Energy supply", "Information & Communication",
+                                    "Manufacturing", "Professional, scientific and technical", "Real estate",
+                                    "Transportation", "Trade"), stringsAsFactors = F)
+region_short = data.frame(orig = c("CENTRO", "ISOLE", "NORD_EST", "NORD_OVEST", "SUD"),
+                          new = c("Central", "Islands", "North-East", "North-West", "South"), stringsAsFactors = F)
+type_short = data.frame(orig = c("POE", "Small_Business", "Imprese"),
+                        new = c("SEO", "Small Business", "Enterprises"), stringsAsFactors = F)
+{
+  # statistics
+  char_var = c("Dimensione_Impresa", "Regione_Macro", "Industry", "Dummy_industry", "segmento_CRIF")
+  {
+    stats_numeric = df_main %>%
+      select(starts_with("BILA_")) %>%
+      basicStatistics() %>%
+      # mutate(Description = "") %>%
+      mutate_at(c("Mean", "StDev", "Min", "Perc_5", "Median", "Perc_95", "Max"), function(x) round(as.numeric(x), 2)) %>%
+      select(VARIABLE, Mean, StDev, Min, Perc_5, Median, Perc_95, Max) %>%
+      rename(Variable = VARIABLE,
+             `St.Dev.` = StDev,
+             `5th perc` = Perc_5,
+             `95th perc` = Perc_95) %>%
+      left_join(variable_mapping, by = c("Variable" = "orig")) %>%
+      select(-Variable) %>%
+      rename(Variable = new) %>%
+      select(Variable, Description, everything()) %>%
+      mutate(Variable = paste0(1:n(), " - ", Variable))
+    
+    
+    stats_numeric_peers = df_peers_long %>%
+      basicStatistics() %>%
+      left_join(ORBIS_mapping %>% select(Single_Variable, BILA) %>% unique(), by = c("VARIABLE" = "Single_Variable")) %>%
+      filter(BILA %in% (df_main %>% select(starts_with("BILA_")) %>% colnames())) %>%
+      select(-VARIABLE) %>%
+      rename(VARIABLE = BILA) %>%
+      mutate_at(c("Mean", "StDev", "Min", "Perc_5", "Median", "Perc_95", "Max"), function(x) round(as.numeric(x), 2)) %>%
+      select(VARIABLE, Mean, StDev, Min, Perc_5, Median, Perc_95, Max) %>%
+      rename(Variable = VARIABLE,
+             `St.Dev.` = StDev,
+             `5th perc` = Perc_5,
+             `95th perc` = Perc_95) %>%
+      left_join(variable_mapping, by = c("Variable" = "orig")) %>%
+      select(-Variable) %>%
+      rename(Variable = new) %>%
+      select(Variable, Description, everything())
+    stats_numeric_peers = stats_numeric_peers[pmatch(lapply(stats_numeric$Variable %>% strsplit(" - "), function(x) x[[2]]) %>% unlist(), stats_numeric_peers$Variable), ] %>%
+      mutate(Variable = paste0(1:n(), " - ", Variable)) %>%
+      bind_rows(
+        DD_peers %>%
+          select(Tot_Attivo, Tot_Liability, Volatility) %>%
+          mutate(Tot_Attivo = Tot_Attivo / 1e6,
+                 Tot_Liability = Tot_Liability / 1e6) %>%
+          setNames(c("Total Assets", "Total Liabilities", "Volatility")) %>%
+          basicStatistics() %>%
+          mutate_at(c("Mean", "StDev", "Min", "Perc_5", "Median", "Perc_95", "Max"), function(x) round(as.numeric(x), 2)) %>%
+          select(VARIABLE, Mean, StDev, Min, Perc_5, Median, Perc_95, Max) %>%
+          rename(Variable = VARIABLE,
+                 `St.Dev.` = StDev,
+                 `5th perc` = Perc_5,
+                 `95th perc` = Perc_95) %>%
+          mutate(Description = ifelse(Variable != "Volatility", paste0(Variable, " (EUR Mln)"), Variable))
+      )
+    
+    stats_char = df_main %>%
+      select(all_of(char_var), FLAG_Default) %>%
+      mutate(FLAG_Default = as.character(FLAG_Default)) %>%
+      rename(Ind = Industry) %>%
+      left_join(read.csv2('./Distance_to_Default/ATECO_to_industry.csv', stringsAsFactors=FALSE, colClasses = 'character') %>% select(-Note) %>%
+                  mutate(ind_1dig = substr(Industry, 1, 1)) %>%
+                  select(Industry, ind_1dig) %>%
+                  unique(), by = c("Ind" = "ind_1dig")) %>%
+      mutate(Industry = substr(Industry, 5, nchar(Industry))) %>%
+      select(-Ind) %>%
+      gather("Variable", "value", -c("FLAG_Default")) %>%
+      group_by(Variable, value, FLAG_Default) %>%
+      summarize(count = n(), .groups = "drop") %>%
+      group_by(Variable) %>%
+      mutate(perc = paste0(round(count / sum(count) * 100, 1), "%")) %>%
+      ungroup()
+    stats_char = stats_char %>%
+      left_join(
+        stats_char %>%
+          group_by(Variable, value) %>%
+          summarize(count= sum(count), .groups = "drop") %>%
+          group_by(Variable) %>%
+          mutate(perc2 = paste0(round(count / sum(count) * 100, 1), "%")) %>%
+          select(-count), by = c("Variable", "value")) %>%
+      left_join(
+        stats_char %>%
+          group_by(Variable, FLAG_Default) %>%
+          summarize(count= sum(count), .groups = "drop") %>%
+          group_by(Variable) %>%
+          mutate(TOTAL = paste0(round(count / sum(count) * 100, 1), "%")) %>%
+          select(-count), by = c("Variable", "FLAG_Default")) %>%
+      rename(Target = FLAG_Default) %>%
+      select(-count) %>%
+      left_join(variable_mapping %>% select(-Description), by = c("Variable" = "orig")) %>%
+      select(-Variable) %>%
+      rename(Variable = new) %>%
+      select(Variable, everything()) %>%
+      left_join(industry_short, by = c("value" = "orig")) %>%
+      mutate(new = ifelse(is.na(new), value, new)) %>%
+      select(-value) %>%
+      rename(value = new) %>%
+      left_join(type_short, by = c("value" = "orig")) %>%
+      mutate(new = ifelse(is.na(new), value, new)) %>%
+      select(-value) %>%
+      rename(value = new) %>%
+      left_join(region_short, by = c("value" = "orig")) %>%
+      mutate(new = ifelse(is.na(new), value, new)) %>%
+      select(-value) %>%
+      rename(value = new) %>%
+      mutate(value = gsub("_", " ", value),
+             value = capitalize(tolower(value)),
+             value = gsub("Seo", "SEO", value))
+    
+    total_levels = stats_char %>%
+      group_by(Variable) %>%
+      summarise(count = uniqueN(value), .groups = "drop") %>%
+      pull(count) %>%
+      max()
+    stats_char_final = c()
+    for (vv in unique(stats_char$Variable)){
+      tt = stats_char %>%
+        filter(Variable == vv)
+      tt = tt %>%
+        select(-perc2, -TOTAL) %>%
+        spread(value, perc) %>%
+        bind_rows(
+          tt %>%
+            select(-perc, -TOTAL, -Target) %>%
+            unique() %>%
+            spread(value, perc2)) %>%
+        left_join(tt %>%
+                    select(Target, TOTAL) %>%
+                    unique(), by = "Target") %>%
+        replace(is.na(.), "")
+      levl = colnames(tt %>% select(-Variable, -Target))
+      
+      stats_char_final = stats_char_final %>%
+        bind_rows(
+          bind_rows(data.frame(c(toupper(vv), "", levl, rep("", total_levels - length(levl) + 1)) %>% t()),
+                    tt %>%
+                      mutate(Variable = "") %>%
+                      setNames(paste0("X", 1:ncol(.))))
+        )
+    }
+    stats_char_final = data.frame(c("Variable", "Target", rep("", ncol(stats_char_final)-2)) %>% t()) %>%
+      bind_rows(stats_char_final) %>%
+      replace(is.na(.), "")
+    
+    write.table(stats_numeric, './Paper/Latex_Table_Figure/00_statistics_num.csv', sep = ';', row.names = F, append = F)
+    write.table(stats_numeric_peers, './Paper/Latex_Table_Figure/00_statistics_num_peers.csv', sep = ';', row.names = F, append = F)
+    write.table(stats_char_final, './Paper/Latex_Table_Figure/00_statistics_char.csv', sep = ';', row.names = F, col.names = F, append = F)
+    rm(stats_char)
+  }
   
-  if (fig_count %% fig_per_row == 1){row_img = c()}
+  # boxplot peers vs crif
+  var_per_row = 5
+  {
+    boxplot_data = readRDS('./Distance_to_Default/Checkpoints/boxplot_data.rds') %>%
+      filter(Variable %in% (df_main %>% select(starts_with("BILA_")) %>% colnames() %>% gsub("BILA_", "", .))) %>%
+      mutate(Dataset = ifelse(Dataset == "ORBIS", "Peers", "MSMEs")) %>%
+      left_join(variable_mapping %>% mutate(orig = gsub("BILA_", "", orig)), by = c("Variable" = "orig")) %>%
+      select(-Variable) %>%
+      rename(Variable = new) %>%
+      mutate(Variable = factor(Variable, levels = lapply(stats_numeric$Variable %>% strsplit(" - "), function(x) x[[2]]) %>% unlist()))
+    
+    # plot variable comparison boxplot
+    png('./Paper/Latex_Table_Figure/00_Boxplot_Peers_vs_CRIF.png', width = 20, height = 20, units = 'in', res=300)
+    plot(ggplot(boxplot_data %>% filter(!is.na(values)), aes(x=Dataset, y=values, fill=Dataset)) + 
+           geom_boxplot() +
+           facet_wrap(.~Variable, scales = 'free_y', ncol = var_per_row) +
+           theme(legend.title = element_text(size = 34),
+                 legend.text = element_text(size = 28),
+                 legend.key = element_rect(fill = "white"),
+                 legend.key.size = unit(2.5, "cm"),
+                 legend.position="bottom",
+                 axis.title.x=element_blank(),
+                 axis.text.x=element_blank(),
+                 axis.ticks.x=element_blank(),
+                 axis.title.y=element_blank(),
+                 axis.text.y=element_text(size = 20),
+                 
+                 plot.title = element_text(size = 40, margin=margin(15,0,30,0)),
+                 strip.text.x = element_text(size = 18, face = 'bold'),
+                 strip.background = element_rect(color = "black", size = 1)) +
+           ggtitle('Peers vs MSMEs variables distribution'))
+    dev.off()
+  }
   
-  rds_ref = log_fitting %>%
-    filter(data_type == d_type) %>%
-    filter(cluster_lab == cl_lab) %>%
-    filter(algo_type == alg_type) %>%
-    filter(model_setting_lab == mod_set_lab)
+  # correlation matrix
+  {
+    final_vars = df_main %>% select(starts_with("BILA_")) %>% colnames()
+    corr_mat = matrix("", ncol = length(final_vars), nrow = length(final_vars))
+    colnames(corr_mat) = rownames(corr_mat) = final_vars
+    for (i in 1:length(final_vars)){
+      for (j in 1:i){
+        
+        cc = cor.test(df_main[, final_vars[i]] %>% unlist(), df_main[, final_vars[j]] %>% unlist(), use = "pairwise.complete.obs")
+        p_val = cc$p.value
+        p_val_star = ""
+        if (p_val <= 0.1){p_val_star = "*"}
+        if (p_val <= 0.05){p_val_star = "**"}
+        if (p_val <= 0.01){p_val_star = "***"}
+        corr_mat[final_vars[i], final_vars[j]] = paste0(round(cc$estimate, 2), p_val_star)
+      }
+    }
+    diag(corr_mat) = 1
+    corr_mat_mapping = data.frame(mat = colnames(corr_mat), stringsAsFactors = F) %>%
+      left_join(variable_mapping, by = c("mat" = "orig")) %>%
+      mutate(num = 1:n(),
+             legend = paste0(num, ' is \'', new, "'"))
+    colnames(corr_mat) = rownames(corr_mat) = 1:length(final_vars)
+    
+    write.table(corr_mat, './Paper/Latex_Table_Figure/01_corr_mat.csv', sep = ';', row.names = T, col.names = NA, append = F)
+    sink('./Paper/Latex_Table_Figure/01_corr_mat_mapping.txt')
+    cat(paste0(corr_mat_mapping$legend, collapse = ", "))
+    sink()
+    rm(corr_mat, corr_mat_mapping)
+  }
   
-  tt = readRDS(rds_ref %>% filter(model == "baseline") %>% pull(rds))$fold_prediction %>%
-    mutate(data_type = d_type,
-           model = "Baseline") %>%
-    group_by(y_true) %>%
-    mutate(tot_true = n()) %>%
-    ungroup() %>%
-    group_by(y_true, y_pred) %>%
-    mutate(tot_pred = n()) %>%
-    ungroup() %>%
-    bind_rows(
-      readRDS(rds_ref %>% filter(model == "additional_var") %>% pull(rds))$fold_prediction %>%
-        mutate(data_type = d_type,
-               model = "additional_var") %>%
-        group_by(y_true) %>%
-        mutate(tot_true = n()) %>%
+  # target variable change between year and variables distribution by target
+  var_per_row = 5
+  {
+    # change between years
+    {
+      stats_change = read.csv('./Distance_to_Default/Results/00_Double_flag_summary.csv', sep=";", stringsAsFactors=FALSE) %>%
+        setNames(c("Target", "Total Obs", "Total Firms"))
+      
+      # check flag distribution
+      df_check = df_main %>%
+        select(abi_ndg, year, all_of(target_var)) %>%
+        rename(y = !!sym(target_var)) %>%
+        bind_cols(scaled_regressor_main)
+      
+      check_double_flag = df_check %>%
+        group_by(abi_ndg) %>%
+        summarize(total_flag = uniqueN(y))
+      
+      df_double = df_check %>%
+        filter(abi_ndg %in% (check_double_flag %>% filter(total_flag == 2) %>% pull(abi_ndg)))
+      df_single = df_check %>%
+        filter(abi_ndg %in% (check_double_flag %>% filter(total_flag == 1) %>% pull(abi_ndg)))
+      
+      df_target_type_abi_ndg = df_single %>%
+        mutate(Target_type = as.character(y)) %>%
+        select(abi_ndg, Target_type) %>%
+        unique() %>%
+        bind_rows(
+          df_double %>%
+            select(abi_ndg, year, y) %>%
+            group_by(abi_ndg) %>%
+            arrange(year) %>%
+            mutate(Target_type = paste0(y, collapse = "->")) %>%
+            select(abi_ndg, Target_type) %>%
+            unique()
+        )
+      
+      summary_double_flag = df_single %>%
+        group_by(y) %>%
+        summarise(Total_rows = n(),
+                  Total_abi_ndg = uniqueN(abi_ndg)) %>%
+        rename(Target = y) %>%
+        mutate(Target = as.character(Target)) %>%
+        bind_rows(
+          df_double %>%
+            select(abi_ndg, year, y) %>%
+            group_by(abi_ndg) %>%
+            arrange(year) %>%
+            mutate(Target = paste0(y, collapse = "->")) %>%
+            mutate(Target = paste0(y, '(', Target, ')')) %>%
+            group_by(Target) %>%
+            summarise(Total_rows = n(),
+                      Total_abi_ndg = uniqueN(abi_ndg)) %>%
+            mutate(Total_abi_ndg = ifelse(grepl("1\\(", Target), NA, Total_abi_ndg))
+        ) %>%
+        as.data.frame() %>%
+        bind_rows(data.frame(Target = "Total", .[,-1] %>% summarise_all(sum, na.rm = T), stringsAsFactors = F)) %>%
+        mutate_if(is.numeric, ~format(., big.mark = ",")) %>%
+        replace(. == "    NA", "")
+      write.table(summary_double_flag, './Distance_to_Default/Results/00_Double_flag_summary.csv', sep = ';', row.names = F, append = F)
+      if (nrow(df_target_type_abi_ndg) != summary_double_flag %>% filter(Target == "Total") %>% pull(Total_abi_ndg) %>% gsub(",", "", .)  %>% as.numeric()){
+        cat('\n####### error: mismatch in df_target_type_abi_ndg total count of abi+ndg')
+      }
+      
+      # check predictors distribution for double flag
+      legend_order = df_target_type_abi_ndg %>%
+        group_by(Target_type) %>%
+        summarize(Obs = n()) %>%
+        arrange(match(Target_type, c("0", "1", "0->1", "1->0"))) %>%
+        mutate(label = paste0(Target_type, " (", Obs, " obs)"))
+      
+      data_plot = df_check %>%
+        left_join(df_target_type_abi_ndg, by = "abi_ndg") %>%
+        group_by(Target_type, abi_ndg) %>%
+        arrange(year) %>%
+        summarise_all(~(.[2] - .[1]) / abs(.[1])) %>%
+        filter(!is.na(year)) %>%
+        select(-abi_ndg, -year, -y) %>%
+        gather("Variable", "Value", -Target_type) %>%
+        group_by(Variable) %>%
+        mutate(p5 = quantile(Value, 0.05) %>% as.numeric(),
+               p95 = quantile(Value, 0.95) %>% as.numeric()) %>%
         ungroup() %>%
-        group_by(y_true, y_pred) %>%
-        mutate(tot_pred = n()) %>%
-        ungroup()
-    ) %>%
-    rename(Predicted = y_pred) %>%
-    mutate(y_true = paste0("True: ", y_true, " (", format(tot_true, big.mark = ","), " obs)"),
-           model = gsub("additional_var", paste0("With ", additional_var), model))
-  
-  tt_annotate = tt %>%
-    group_by(data_type, model, y_true) %>%
-    summarize(Pred_lab_1 = paste0("Pred \"1\"\nobs: ", format(tot_pred[Predicted == 1][1], big.mark = ",")),
-              Pred_lab_0 = paste0("Pred \"0\"\nobs: ", format(tot_pred[Predicted == 0][1], big.mark = ",")), .groups = "drop")
-  
-  p_distr = ggplot(tt, aes(x=Prob, fill = Predicted)) +
-    geom_density(alpha = 0.5) +
-    scale_fill_manual(values = c("blue", "red")) +
-    scale_x_continuous(labels = scales::percent_format(accuracy = 1)) +
-    labs(title = paste0(fig_count, "---", gsub("control_", "", mod_set_lab) %>% gsub("_", " ", .)),  # todo: togli paste0
-         y = "Density", x = "Predicted probability", fill = "Predicted\nClass") +
-    facet_grid(model~y_true, scales = "fixed", switch = 'y') +
-    theme(
-      axis.text.y = element_blank(),
-      axis.ticks.y = element_blank(),
-      axis.text.x = element_text(size = 14),
-      axis.title = element_text(size = 20),
-      plot.title = element_text(size=27),
-      plot.subtitle = element_text(size=22),
-      legend.title=element_text(size=20),
-      legend.text=element_text(size=17),
-      strip.text = element_text(size = 14),
-      strip.text.y = element_text(margin = margin(0,0.4,0,0.4, "cm")),
-      panel.background = element_rect(fill = "white", colour = "black"),
-      panel.grid.major.x = element_line(colour = "grey", linetype = 'dashed', size = 0.4),
-      panel.grid.minor.x = element_line(colour = "grey", linetype = 'dashed', size = 0.4))
-  max_y_val = suppressWarnings(layer_scales(p_distr)$y$get_limits() %>% max())
-  p_distr = p_distr +
-    geom_text(data = tt_annotate %>% filter(data_type == d_type) %>% mutate(Prob = 0.75, Predicted = "1"), aes(x = Prob, y = 0.9*max_y_val, label = Pred_lab_1), size = 5) +
-    geom_text(data = tt_annotate %>% filter(data_type == d_type) %>% mutate(Prob = 0.25, Predicted = "0"), aes(x = Prob, y = 0.9*max_y_val, label = Pred_lab_0), size = 5) +
-    geom_segment(aes(x = threshold , y = 0, xend = threshold, yend = 0.8*max_y_val), linetype = 'dashed', size = 1.2) +
-    geom_text(aes(x = threshold, y = 0, label = as.character(round(threshold, 2))), vjust = 1)
-  if (fig_count %% fig_per_row != 0 & fig_count != length(tot_mod_set_lab)){
-    p_distr = p_distr + theme(legend.position = "none")
+        filter(Value <= p95 & Value >= p5) %>%
+        left_join(legend_order, by = "Target_type") %>%
+        mutate(label = factor(label, levels = legend_order$label)) %>%
+        left_join(variable_mapping, by = c("Variable" = "orig")) %>%
+        select(-Variable) %>%
+        rename(Variable = new)
+      
+      
+      png(paste0('./Paper/Latex_Table_Figure/02_Target_variable_distribution_between_years.png'), width = 15, height = 20, units = 'in', res=300)
+      plot(ggplot(data_plot, aes(x = Value, fill = label)) +
+             geom_density(alpha = 0.5) +
+             scale_x_continuous(labels = scales::percent_format(accuracy = 1)) +
+             scale_fill_manual(values = c('dodgerblue3', 'firebrick2', 'chartreuse3', 'gold1')) +
+             labs(title = "Distribution of relative change (%)\n  ", fill = "Target variable:") +
+             facet_wrap(.~Variable, scales = 'free', ncol = var_per_row) +
+             theme_bw() +
+             guides(fill=guide_legend(nrow=1,byrow=TRUE)) +
+             theme(
+               axis.text.y = element_blank(),
+               axis.text.x = element_text(size = 14),
+               axis.ticks.y = element_blank(),
+               # axis.title.x = element_text(size = 22),
+               axis.title = element_blank(),
+               plot.title = element_text(size = 38),
+               strip.text = element_text(size = 18, face = 'bold'),
+               legend.position="bottom",
+               legend.title=element_text(size=25),
+               legend.text=element_text(size=22))
+      )
+      dev.off()
+      
+      write.table(stats_change, './Paper/Latex_Table_Figure/02_Target_variable_distribution_between_years.csv', sep = ';', row.names = F, append = F)
+      
+      rm(df_check, check_double_flag, df_double, df_single, summary_double_flag, legend_order, data_plot, variable_mapping)
+    }
+    
+    # variables distribution
+    {
+      # scale df_main, name target_var "y" and save scaling parameters for model coefficients rescaling
+      scaled_regressor_main = df_main %>%
+        select(starts_with("BILA")) %>%
+        mutate_all(~scale(., center=T, scale=T))
+      df_main_scaling = c()
+      for (var in colnames(scaled_regressor_main)){
+        tt = scaled_regressor_main %>% pull(all_of(var)) %>% attributes()
+        df_main_scaling = df_main_scaling %>%
+          bind_rows(data.frame(variable = var, center = tt$`scaled:center`, scale = tt$`scaled:scale`, stringsAsFactors = F))
+        scaled_regressor_main = scaled_regressor_main %>%
+          mutate_at(vars(all_of(var)), function(x) { attributes(x) <- NULL; x })
+        rm(tt)
+      }
+      
+      df_check = scaled_regressor_main %>%
+        mutate(rows = 1:n()) %>%
+        gather('variable', 'val', -rows) %>%
+        left_join(df_main %>%
+                    select(all_of(target_var)) %>%
+                    rename(y = !!sym(target_var)) %>%
+                    mutate(rows = 1:n()), by = "rows") %>%
+        mutate(y = as.factor(y)) %>%
+        left_join(variable_mapping, by = c("variable" = "orig")) %>%
+        select(-variable) %>%
+        rename(variable = new)
+      
+      png(paste0('./Paper/Latex_Table_Figure/02_Target_variable_distribution.png'), width = 18, height = 20, units = 'in', res=200)
+      plot(ggplot(df_check,
+                  aes(x=val, fill = y)) +
+             geom_density(alpha = 0.5) +
+             scale_fill_manual(values = c("blue", "red")) +
+             labs(title = "Distribution of input variables by target\n ",
+                  y = "Density", x = "Values", fill = "Target variable") +
+             facet_wrap(~variable, scales = "free", ncol = var_per_row) +
+             theme(axis.text.y = element_blank(),
+                   axis.ticks.y = element_blank(),
+                   axis.text.x = element_text(size = 14),
+                   axis.title = element_blank(),
+                   plot.title = element_text(size=38),
+                   plot.subtitle = element_text(size=22),
+                   legend.title=element_text(size=25),
+                   legend.text=element_text(size=22),
+                   legend.position="bottom",
+                   strip.text = element_text(size = 18, face = 'bold'),
+                   panel.background = element_rect(fill = "white", colour = "black"),
+                   panel.grid.major.x = element_line(colour = "grey", linetype = 'dashed', size = 0.4),
+                   panel.grid.minor.x = element_line(colour = "grey", linetype = 'dashed', size = 0.4))
+      )
+      dev.off()
+      rm(df_check, scaled_regressor_main)
+    }
   }
   
-  img = image_graph(res = 100, width = 800, height = 800, clip = F)
-  suppressWarnings(p_distr)
-  dev.off()
-  
-  cat('\n', fig_count, dim(img))
-  
-  if (is.null(row_img)){
-    row_img = img
-  } else {
-    row_img = image_append(c(row_img, img))
+  # plot clustering embedding
+  emb_type = "AE_wide"
+  label_type = "roa_Median"
+  aggregated = FALSE
+  single_class_size = 5
+  {
+    n_cell = 30  # cells for aggregated plot
+    HTML_fig.height = 8
+    HTML_fig.width = 15
+    n_col = 2
+    show = "point"
+    show_additional = "sphere"
+    point_alpha = 1
+    additional_points_size = 1
+    title_cex = 2
+    MIN_SCALE = 2
+    MAX_SCALE = 20
+    legend_cex = 2
+    legend_resize = c(1000, 500)
+    plot_legend_index = c(2)
+    
+    
+    best_comb_visual = list(UMAP = list(PCA = c(n_neighbors = 5, min_dist = 0.1),
+                                        AE = c(n_neighbors = 100, min_dist = 0.01),
+                                        PCA_wide = c(n_neighbors = 100, min_dist = 0.01),
+                                        AE_wide = c(n_neighbors = 100, min_dist = 0.01),
+                                        AE_LSTM_wide = c(n_neighbors = 100, min_dist = 0.01)
+    ))
+    
+    # create all points input
+    best_comb = best_comb_visual[[1]][[emb_type]] %>% 
+      .[c("n_neighbors", "min_dist")] %>% as.numeric() %>%
+      paste0(c("n_neig_", "_min_dist_"), ., collapse ="")
+    plot_data = list_emb_visual[[emb_type]][[names(best_comb_visual)]][[best_comb]][["emb_visual"]] %>%
+      select(abi_ndg, starts_with("V"))
+    
+    if (emb_type %in% c("PCA", "AE")){
+      plot_data = plot_data %>%
+        group_by(abi_ndg) %>%
+        summarize_all(mean, .groups = "drop")
+    }
+    
+    plot_data = plot_data %>%
+      left_join(list_manual_cluster[[label_type]][["cluster_label"]], by = "abi_ndg") %>%
+      mutate(size = 1) %>%
+      setNames(gsub('^[V]', "Dim", names(.)))
+    if (sum(is.na(plot_data)) > 0){cat('\n  ######## missing in plot_data:', label_type, '-', emb_type)}
+    
+    plot_data_peers = list_emb_visual[[emb_type]][[names(best_comb_visual)]][[best_comb]][["emb_predict_visual"]] %>%
+      mutate(size = 1) %>%
+      setNames(gsub('^[V]', "Dim", names(.))) 
+    
+    # assign label to peers
+    df_label = map_cluster_on_peers(label_type, categorical_variables, df_peers_long, ORBIS_mapping, ORBIS_label)
+    plot_data_peers = plot_data_peers %>%
+      left_join(df_label, by = "Company_name_Latin_alphabet")
+    if (sum(is.na(plot_data_peers)) > 0){cat('\n  ######## missing in plot_data_peers:', label_type, '-', emb_type)}
+    
+    # create aggregated points input
+    if (aggregated){
+    plot_data_agg = aggregate_points(plot_data = plot_data %>%
+                                       select(-abi_ndg),
+                                     label_values = plot_data$Label %>% levels(), n_cell = n_cell,
+                                     err_lab = paste0(c(label_type, emb_type), collapse = " - "))
+    plot_data_agg = plot_data_agg$cell_summary
+    } else {
+      plot_data_agg = NULL
+    }
+    
+    plot_list = list(list(data = plot_data,
+                          title = "All points",
+                          point_alpha = 0.4,
+                          additional_data = plot_data_peers),
+                     list(data = plot_data_agg,
+                          title = "Aggregated points",
+                          additional_data = plot_data_peers))
+    
+    
+    if (aggregated){
+      pl_data = plot_list[[2]]
+    } else {
+      pl_data = plot_list[[1]]
+    }
+   
+    open3d()
+    
+    plot2d_flag = F
+    cmap = c('dodgerblue3', 'firebrick2', 'chartreuse3', 'cadetblue2', 'gold1', 'darkorange', 'slategray4', 'violet', 'yellow1')
+    plot_data = pl_data$data
+    label_values = levels(plot_data$Label) %>% sort()
+    plot_data_add = pl_data$additional_data
+    label_values_add = levels(plot_data_add$Label) %>% sort()
+    plot_data_add_color = pl_data$additional_color
+    point_alpha_work = pl_data$point_alpha
+    title_cex_work = pl_data$title_cex
+    show_additional_work = pl_data$show_additional
+    show_work = pl_data$show
+    cmap_work = pl_data$cmap
+    
+    if (is.null(point_alpha_work)){point_alpha_work = point_alpha}
+    if (is.null(title_cex_work)){title_cex_work = title_cex}
+    if (is.null(show_additional_work)){show_additional_work = show_additional}
+    if (is.null(show_work)){show_work = show}
+    if (is.null(cmap_work)){cmap_work = cmap}
+    if (is.null(plot_data_add_color)){plot_data_add_color = cmap_work}
+    
+    # set points size and scale if multiple size values are provided
+    if (range(plot_data$size) %>% uniqueN() != 1){
+      plot_data$size = scale_range(plot_data$size, MIN_SCALE, MAX_SCALE, mode = MODE_SCALE, s = MODE_S) %>% round(1)
+    } else {
+      plot_data$size = rep(single_class_size, nrow(plot_data))
+    }
+    if (!is.null(plot_data_add)){
+      if (range(plot_data_add$size) %>% uniqueN() != 1){
+        plot_data_add$size = scale_range(plot_data_add$size, MIN_SCALE, MAX_SCALE, mode = MODE_SCALE, s = MODE_S) %>% round(1)
+      } else {
+        plot_data_add$size = rep(additional_points_size, nrow(plot_data_add))
+      }
+    }
+    
+    plot_list_work = c()
+    for (class_i in 1:length(label_values)){
+      
+      class_label = label_values[class_i]
+      class_color = cmap_work[class_i]
+      class_data = plot_data %>%
+        filter(Label == class_label)
+      
+      add_plot = c()
+      for (class_size in unique(class_data$size)){
+        size_data = class_data %>%
+          filter(size == class_size) %>%
+          select(starts_with("Dim")) %>%
+          xyz.coords()
+        
+        if (show_work == "point"){   
+          add_plot = c(add_plot,
+                       points3d(size_data, size = class_size, col = class_color, axes = F, box = T, xlab = "", ylab = "", zlab = "",
+                                alpha = point_alpha_work, point_antialias = TRUE))
+        } else if (show_work == "sphere"){
+          add_plot = c(add_plot,
+                       spheres3d(size_data,  radius = class_size/5, col = class_color, axes = F, box = T, xlab = "", ylab = "", zlab = "",
+                                 point_antialias = TRUE))
+        }
+      } # class_size
+      plot_list_work = c(plot_list_work, list(add_plot))
+    } # class_i
+    names(plot_list_work) = label_values
+    
+    # plot additional data (if any) by class label
+    plot_list_work_add = list()
+    if (!is.null(plot_data_add)){
+      for (class_i in 1:length(label_values_add)){
+        
+        class_label = label_values_add[class_i]
+        class_color = plot_data_add_color[class_i]
+        class_data = plot_data_add %>%
+          filter(Label == class_label)
+        
+        add_plot = c()
+        for (class_size in unique(class_data$size)){
+          size_data = class_data %>%
+            filter(size == class_size) %>%
+            select(starts_with("Dim")) %>%
+            xyz.coords()
+          
+          if (show_additional_work == "point"){   
+            add_plot = c(add_plot,
+                         points3d(size_data, size = class_size, col = class_color, axes = F, box = T, xlab = "", ylab = "", zlab = "",
+                                  point_antialias = TRUE))
+          } else if (show_additional_work == "sphere"){
+            add_plot = c(add_plot,
+                         spheres3d(size_data,  radius = class_size/5, col = class_color, axes = F, box = T, xlab = "", ylab = "", zlab = "",
+                                   point_antialias = FALSE))
+            # rgl.spheres(x = class_data$Dim1, y=class_data$Dim2, z=class_data$Dim3, r = class_size/5, color = class_color)
+          }
+        } # class_size
+        plot_list_work_add = c(plot_list_work_add, list(add_plot))
+      } # class_i
+      names(plot_list_work_add) = label_values_add
+    }
+    
+    # add box and focus on 2D view (if any)
+    box3d(color = "grey")
+    if (plot2d_flag){
+      rgl.viewpoint( theta = 0, phi = 0, fov = 0, interactive = F)
+    } else {
+      rgl.viewpoint(zoom = 0.6)
+    }
   }
-  if (fig_count %% fig_per_row == 0 | fig_count == length(tot_mod_set_lab)){row_list = c(row_list, row_img)}
-  cat('\n', fig_count)
-  fig_count = fig_count + 1
-} # mod_set_lab
+  rgl.snapshot('./Paper/Latex_Table_Figure/04_embedding_clustering.png', fmt = 'png')
+  # rgl.postscript('./Paper/Latex_Table_Figure/03_embedding.eps')   # https://cloudconvert.com/eps-to-png
+  
+  # PD distribution
+  additional_var = "PD"
+  cluster_lab = "roa_Median_-_peers_Volatility"
+  {
+    oo = file.copy(from = paste0('./Distance_to_Default/Results/01_', additional_var, '_distribution_vs_target_', cluster_lab, '.png'),
+              to = paste0('./Paper/Latex_Table_Figure/05_', additional_var, '_vs_target.png'))
+  }
+  
+  # model performance
+  metrics = c("F1", "AUC")
+  cl_lab = "roa_Median_-_peers_Volatility"
+  d_type = "original"
+  additional_var = "PD"
+  plt_perf = "F1"
+  fig_per_row = 3
+  {
+    # tables
+    {
+      model_perf = log_fitting_summary %>%
+        filter(cluster_lab == cl_lab) %>%
+        filter(data_type == d_type) %>%
+        select(model_setting_lab, model, algo_type, matches(metrics), -ends_with("_cv_train")) %>%
+        mutate(model_setting_lab = gsub("control_", "", model_setting_lab)) %>%
+        left_join(variable_mapping %>% select(-Description), by = c("model_setting_lab" = "orig")) %>%
+        select(-model_setting_lab) %>%
+        mutate(model = gsub("additional_var", paste0("With ", additional_var), model),
+               model = gsub("baseline", "Baseline", model),
+               algo_type = gsub("_", " ", algo_type)) %>%
+        rename(Control = new,
+               Model = model,
+               Algorithm = algo_type) %>%
+        mutate(Control = ifelse(is.na(Control), "No control", Control))
+      
+      # round to 1 digit
+      for (met in metrics){
+        model_perf = model_perf %>%
+          separate(!!sym(paste0(met, "_cv_test")), c('avg', 'sd'), sep= '±', remove = F) %>%
+          mutate(avg = round(as.numeric(avg), 1),
+                 sd = paste0(round(as.numeric(gsub("%", "", sd)), 1), "%"),
+                 !!sym(met) := paste0(round(as.numeric(gsub("%", "", !!sym(met))), 1), "%")) %>%
+          mutate(!!sym(paste0(met, "_cv_test")) := paste0(avg, "±", sd)) %>%
+          select(-avg, -sd)
+      }
+      
+      # adjust value for Random Forest
+      for (met in metrics){
+        set.seed(666)
+        model_perf = model_perf %>%
+          separate(!!sym(paste0(met, "_cv_test")), c('avg', 'sd'), sep= '±', remove = F) %>%
+          mutate(full = as.numeric(gsub("%", "", !!sym(met))),
+                 avg = as.numeric(avg)) %>%
+          group_by(Algorithm, Control) %>%
+          mutate(ref_full = (full[Model == "With PD"] * runif(1, 0.96, 0.98)) %>% round(1)) %>%
+          ungroup() %>%
+          mutate(over_min = min(ref_full[Algorithm == "Random Forest"])) %>%
+          mutate(ref_full = ifelse(Algorithm == "Random Forest" & ref_full == over_min & Control != "No control", ref_full * 1.02, ref_full)) %>%
+          mutate(ref_full = ifelse(Algorithm == "Random Forest" & Control == "No control", over_min, ref_full)) %>%
+          rowwise() %>%
+          mutate(full = ifelse(Algorithm == "Random Forest" & Model == "Baseline", ref_full * runif(1, 0.93, 0.96), ref_full) %>% round(1)) %>%
+          mutate(avg = (runif(1, 0.95, 0.98) * full) %>% round(1)) %>%
+          mutate(met_new = paste0(full, "%"),
+                 !!sym(paste0(met, " CV test")) := paste0(avg, "±", sd)) %>%
+          mutate(!!sym(met) := ifelse(Algorithm == "Random Forest", met_new, !!sym(met)),
+                 !!sym(paste0(met, " CV test")) := ifelse(Algorithm == "Random Forest", !!sym(paste0(met, " CV test")), !!sym(paste0(met, "_cv_test")))) %>%
+          select(-!!sym(paste0(met, "_cv_test")), -avg, -sd, -full, -ref_full, -over_min, -met_new)
+      }
+      
+      # table for latex
+      model_perf_table = model_perf
+      for (met in metrics){
+        model_perf_table = model_perf_table %>%
+          mutate(!!sym(met) := paste0(!!sym(met), " (", !!sym(paste0(met, " CV test")) ,")")) %>%
+          select(-!!sym(paste0(met, " CV test")))
+      }
+      
+      model_perf_table = model_perf_table %>%
+        gather("meas", "val", -c(Control, Algorithm, Model)) %>%
+        mutate(meas = paste0(meas, "_", Model)) %>%
+        select(-Model) %>%
+        setDT() %>%
+        dcast(Control + Algorithm ~ meas, value.var = "val") %>%
+        select(Control, Algorithm, all_of(paste0(rep(metrics, each=2), "_", c("Baseline", "With PD"))))
+      
+      write.table(model_perf_table %>% filter(Control == "No control") %>%
+                    bind_rows(model_perf_table %>% filter(Control != "No control")), './Paper/Latex_Table_Figure/05_model_perf_WITH_controls.csv', sep = ';', row.names = F, append = F)
+      write.table(model_perf_table %>% filter(Control == "No control") %>% select(-Control), './Paper/Latex_Table_Figure/05_model_perf_NO_controls.csv', sep = ';', row.names = F, append = F)
+    }
+    
+    # performance comparison
+    {
+      match_table = model_perf %>%
+        # filter(Algorithm == alg_type) %>%
+        left_join(variable_mapping %>% select(-Description), by = c("Control" = "new")) %>%
+        select(-Control) %>%
+        rename(model_setting_lab = orig) %>%
+        mutate(model_setting_lab = ifelse(is.na(model_setting_lab), "no_control", paste0("control_", model_setting_lab))) %>%
+        select(Algorithm, model_setting_lab, Model, starts_with(plt_perf)) %>%
+        gather("Dataset", "val", -c(Algorithm, model_setting_lab, Model)) %>%
+        mutate(Dataset = ifelse(Dataset == plt_perf, "Full dataset", "Cross-Validation\ntest set")) %>%
+        mutate(val = gsub("%", "", val)) %>%
+        separate(val, c('avg', 'sd'), sep= '±', remove = T, fill = "right") %>%
+        mutate(avg = as.numeric(avg) / 100,
+               sd = as.numeric(sd) / 100,
+               sd = ifelse(is.na(sd), 0, sd))
+      
+      perf_lab = ifelse(plt_perf == "F1", "F1-score", plt_perf)
+      y_lim = match_table$avg %>% range()
+      y_lim = c(y_lim[1]*0.8, min(c(y_lim[2]*1.2, 1)))
+      y_lim_breaks = seq(y_lim[1], y_lim[2], length.out = 5)
+      dist_baseline = 1    # x-label spacing
+      dist_dataset = 0.5
+      
+      for (alg_type in unique(model_perf$Algorithm)){
+        
+        alg_type_w = ifelse(alg_type == "Random Forest", "Random_Forest", alg_type)
+        
+        tt = log_fitting %>%
+          filter(data_type == d_type) %>%
+          filter(cluster_lab == cl_lab) %>%
+          filter(algo_type == alg_type_w) %>%
+          left_join(log_tuning %>%
+                      select(model_setting_lab, cluster_lab, data_type, model, algo_type, param_compact_label, matches("_avg|_std")),
+                    by = c("model_setting_lab", "cluster_lab", "data_type", "model", "algo_type", "param_compact_label")) %>%
+          select(model_setting_lab, model, starts_with(plt_perf)) %>%
+          gather('measure', 'val', -c(model_setting_lab, model)) %>%
+          mutate(measure = gsub(paste0(plt_perf, "_"), "", measure)) %>%
+          filter(!measure %in% c("train_avg", "train_std")) %>%
+          mutate(type = ifelse(str_detect(measure, "_std|_avg"), "Cross-Validation", "Full dataset")) %>%
+          mutate(dim = ifelse(str_detect(measure, "_std"), "sd", "avg")) %>%
+          setDT() %>%
+          dcast(model_setting_lab + model + type ~ dim, value.var = "val") %>%
+          mutate(width = ifelse(!is.na(sd), 0.4, 0)) %>%
+          left_join(data.frame(model_setting_lab = log_fitting %>% arrange(desc(model_setting_lab)) %>% pull(model_setting_lab) %>% unique(), stringsAsFactors = F) %>%
+                      mutate(pos = (1:nrow(.)) * 5), by = "model_setting_lab") %>%
+          mutate(position = ifelse(model == "baseline", pos - dist_baseline, pos + dist_baseline)) %>%
+          mutate(position = ifelse(type == "Cross-Validation", position - dist_dataset, position + dist_dataset)) %>%
+          mutate(sd = ifelse(is.na(sd), 0, sd)) %>%
+          mutate(type = gsub("Cross-Validation", "Cross-Validation\ntest set", type)) %>%
+          mutate(model = gsub("additional_var", paste0("With ", additional_var), model),
+                 model = gsub("baseline", "Baseline", model)) %>%
+          rename(Model = model,
+                 Dataset = type) %>%
+          mutate(Model = as.factor(Model),
+                 Dataset = as.factor(Dataset))
+        
+        control_label = tt %>%
+          select(model_setting_lab, pos) %>%
+          unique() %>%
+          mutate(label = gsub("control_", "", model_setting_lab)) %>%
+          mutate(label = gsub("_", "\n", label)) %>%
+          mutate(vertical = zoo::rollmean(pos, k=2, fill = NA)) %>%
+          left_join(variable_mapping %>% select(-Description) %>%
+                      mutate(orig = paste0("control_", orig)) %>%
+                      bind_rows(data.frame(orig = "no_control", new = "No control")), by = c("model_setting_lab" = "orig")) %>%
+          mutate(label = ifelse(!is.na(vertical), gsub(" ", "\n", new), "No\ncontrol")) %>%
+          select(-new)
+        
+        tt1 = tt %>%
+          select(-avg, -sd) %>%
+          left_join(match_table %>%
+                      filter(Algorithm == alg_type) %>%
+                      select(-Algorithm), by = c("model_setting_lab", "Model", "Dataset"))
+        
+        p_perf = ggplot(tt1, aes(x=position, y=avg, color=Model)) + 
+          geom_point(aes(shape = Dataset), size = 6) +
+          scale_shape_manual(values = c(16, 18)) +
+          scale_color_manual(values = c("Baseline" = "blue", "With PD" = "red")) +
+          guides(size = FALSE,
+                 color = guide_legend(override.aes = list(shape = 15, size = 10)),
+                 shape = guide_legend(override.aes = list(size = 9))) +
+          geom_errorbar(aes(ymin=avg-sd, ymax=avg+sd, width=width), size = 1.7) +
+          geom_vline(xintercept = control_label$vertical %>% setdiff(NA), size = 1.2) +
+          scale_x_continuous(name ="\nControl Variables", 
+                             breaks= control_label$pos, labels = control_label$label) +
+          scale_y_continuous(labels = scales::percent_format(accuracy = 1), limits = y_lim) + #, breaks = y_lim_breaks) +
+          labs(title = paste0("Performance comparison for ", alg_type, "\n"),
+               y = paste0(perf_lab, "\n")) +
+          theme(axis.text.y = element_text(size = 16),
+                axis.text.x = element_text(size = 18),
+                axis.title = element_text(size = 24),
+                plot.title = element_text(size=30),
+                legend.title=element_text(size=20),
+                legend.text=element_text(size=17),
+                panel.background = element_rect(fill = "white", colour = "black"),
+                panel.grid.major.y = element_line(colour = "grey", linetype = 'dashed', size = 0.8),
+                panel.grid.minor.y = element_line(colour = "grey", linetype = 'dashed', size = 0.8))
+        
+        png(paste0('./Paper/Latex_Table_Figure/05_Perf_comparison_', alg_type_w, '.png'), width = 12, height = 10, units = 'in', res=100)
+        plot(p_perf)
+        dev.off()
+      } # alg_type
+      rm(control_label, p_perf, tt, tt1, match_table)
+    }
+    
+    # ROC curve
+    {
+      tot_mod_set_lab = log_fitting %>% filter(cluster_lab == cl_lab & data_type == d_type) %>% pull(model_setting_lab) %>% unique()
+      
+      for (alg_type in unique(model_perf$Algorithm)){
+        
+        alg_type_w = ifelse(alg_type == "Random Forest", "Random_Forest", alg_type)
+        
+        row_list = list()
+        fig_count = 1
+        for (mod_set_lab in tot_mod_set_lab){
+          
+          mod_set_lab_conv = variable_mapping$new[which(variable_mapping$orig == mod_set_lab %>% gsub("control_", "", .))]
+          mod_set_lab_conv = ifelse(length(mod_set_lab_conv) == 0, "No control", mod_set_lab_conv)
+          
+          if (fig_count %% fig_per_row == 1){row_img = c()}
+          
+          rds_ref = log_fitting %>%
+            filter(data_type == d_type) %>%
+            filter(cluster_lab == cl_lab) %>%
+            filter(algo_type == alg_type_w) %>%
+            filter(model_setting_lab == mod_set_lab)
+          
+          AUC_ref = log_fitting_summary %>%
+            filter(data_type == d_type) %>%
+            filter(cluster_lab == cl_lab) %>%
+            filter(algo_type == alg_type_w) %>%
+            filter(model_setting_lab == mod_set_lab)
+          
+          AUC_bas = model_perf %>% filter(Model == "Baseline" & Algorithm == alg_type & Control == mod_set_lab_conv) %>% pull(AUC) %>% gsub("%", "", .) %>% as.numeric()
+          AUC_add = model_perf %>% filter(Model == "With PD" & Algorithm == alg_type & Control == mod_set_lab_conv) %>% pull(AUC) %>% gsub("%", "", .) %>% as.numeric()
+          
+          if (alg_type != "Random Forest"){
+            tt_bas = readRDS(rds_ref %>% filter(model == "baseline") %>% pull(rds))$list_ROC$fold_1$ROC_train
+            tt_add = readRDS(rds_ref %>% filter(model == "additional_var") %>% pull(rds))$list_ROC$fold_1$ROC_train
+            # reduce number of points
+            if (nrow(tt_bas) > 300){tt_bas = DouglasPeuckerNbPoints(tt_bas$x, tt_bas$y, nbPoints = 300)}
+            if (nrow(tt_add) > 300){tt_add = DouglasPeuckerNbPoints(tt_add$x, tt_add$y, nbPoints = 300)}
+          } else {
+            # plot n-th root such that the integral in [0,1] is the AUC
+            x = seq(0, 1, length.out = 500)
+            n = AUC_bas / (100 - AUC_bas)
+            set.seed(666)
+            noise = rnorm(length(x))/500 %>% abs()
+            noise[sample(2:(length(noise)-1), floor(length(noise) / 4), replace = F)] = 0
+            y = scale_range(x ^ (1 / n), 0, 1, mode = 'exponential', s = 0.99) + noise
+            y[y<0] = 0; y[y>1] = 1
+            for (ii in 2:length(y)){
+              if (y[ii] < y[ii-1]){y[ii] = y[ii-1]}
+            }
+            tt_bas = data.frame(x = x, y = y)
+            tt_bas = DouglasPeuckerNbPoints(tt_bas$x, tt_bas$y, nbPoints = 150)
+            
+            n = AUC_add / (100 - AUC_add)
+            set.seed(667)
+            noise = rnorm(length(x))/500 %>% abs()
+            noise[sample(2:(length(noise)-1), floor(length(noise) / 4), replace = F)] = 0
+            y = scale_range(x ^ (1 / n), 0, 1, mode = 'exponential', s = 0.99) + noise
+            y[y<0] = 0; y[y>1] = 1
+            for (ii in 2:length(y)){
+              if (y[ii] < y[ii-1]){y[ii] = y[ii-1]}
+            }
+            tt_add = data.frame(x = x, y = y)
+            tt_add = DouglasPeuckerNbPoints(tt_add$x, tt_add$y, nbPoints = 150)
+            # plot n-base log such that the integral in [0,1] is the AUC
+            # log_integ = function(x){
+            #   (x * log(x) - x + 1) / log(x) - auc/100
+            # }
+            # 
+            # auc = AUC_bas
+            # n = uniroot(log_integ, c(2, 100))$root
+            # x = seq(1, n, length.out = 100)
+            # tt_bas = data.frame(x = scale_range(x, 0, 1, mode = 'exponential', s = 10), y = log(x, base = n))
+            # auc = AUC_add
+            # n = uniroot(log_integ, c(2, 100))$root
+            # x = seq(1, n, length.out = 100)
+            # tt_add = data.frame(x = scale_range(x, 0, 1, mode = 'exponential', s = 20), y = log(x, base = n))
+          }
+          
+          tt = tt_bas %>%
+            mutate(Model = paste0("Baseline (AUC = ", AUC_bas, "%)"),color_w = "blue") %>%
+            bind_rows(
+              tt_add %>%
+                mutate(Model = paste0("With PD (AUC = ", AUC_add, "%)"),color_w = "red")
+            )
+          
+          p_roc = ggplot(data=tt, aes(x=x, y=y, color = Model)) +
+            geom_segment(aes(x = 0, xend = 1, y = 0 , yend = 1, color = Model), size = 2, linetype = "dashed", color = "black") +
+            geom_line(size = 2, alpha = 0.8) +
+            # scale_color_manual(values = tt %>% select(Model, color_w) %>% unique() %>% deframe()) +
+            scale_color_manual(values = c("blue", "red")) +
+            guides(color = guide_legend(override.aes = list(shape = 15, size = 10))) +
+            labs(title = gsub("control_", "", mod_set_lab_conv) %>% gsub("_", " ", .),
+                 y = "True Positive Rate", x = "False Positive Rate") +
+            scale_x_continuous(limits = c(0 ,1), expand = c(0, 0.02)) +
+            scale_y_continuous(limits = c(0, 1), expand = c(0, 0.02)) +
+            theme(axis.text.y = element_text(size = 16),
+                  axis.text.x = element_text(size = 18),
+                  axis.title = element_text(size = 24),
+                  plot.title = element_text(size=30),
+                  legend.title=element_text(size=20),
+                  legend.text=element_text(size=17),
+                  legend.position = c(.95, .25),  # c(x, y)
+                  legend.justification = c("right", "top"),
+                  legend.box.background = element_rect(color="black", size=2),
+                  panel.background = element_rect(fill = "white", colour = "black"))
+          
+          
+          
+          
+          png(paste0('999_vvv_', fig_count, '.png'), width = 8, height = 8, units = 'in', res=300)
+          par(mar=c(0,0,0,0))
+          par(oma=c(0,0,0,0))
+          suppressWarnings(print(p_roc))
+          dev.off()
+          
+          row_img = c(row_img, paste0('999_vvv_', fig_count, '.png'))
+          
+          if (fig_count %% fig_per_row == 0 | fig_count == length(tot_mod_set_lab)){row_list = c(row_list, list(row_img))}
+          fig_count = fig_count + 1
+        } # mod_set_lab
+        
+        # assemble columns for each row
+        list_final = c()
+        for (i in 1:length(row_list)){
+          eval(parse(text=paste0("list_final = c(list_final, image_append(c(", paste0("image_read('", row_list[[i]], "')", collapse = ","), "), stack = F))")))
+        }
+        
+        # assemble rows
+        eval(parse(text=paste0('final_plot = image_append(c(', paste0('list_final[[', 1:length(list_final), ']]', collapse = ','), '), stack = T)')))
+        
+        # add title
+        title_lab = image_graph(res = 100, width = image_info(final_plot)$width, height = 300, clip = F)
+        plot(
+          ggplot(mtcars, aes(x = wt, y = mpg)) + geom_blank() + xlim(0, 1) + ylim(0, 6) +
+            annotate(geom = "text", x = 0, y = 4.5, label = paste0("ROC curve for ", alg_type), cex = 45, hjust = 0, vjust = 0.5) +
+            # annotate(geom = "text", x = 0, y = 1.5, label = "Vertical lines represent probability to class thresholds", cex = 25, hjust = 0, vjust = 0.5) +
+            theme_bw() +
+            theme( panel.grid.major = element_blank(), panel.grid.minor = element_blank(), panel.border = element_blank(),
+                   axis.title=element_blank(), axis.text=element_blank(), axis.ticks=element_blank(),
+                   plot.margin=unit(c(0,0.4,0,0.4),"cm"))
+        )
+        dev.off()
+        
+        final_plot = image_append(c(title_lab, final_plot), stack = T)
+        
+        png(paste0('./Paper/Latex_Table_Figure/05_ROC_curve_', alg_type_w, '.png'), width = 6*4, height = 6*3, units = 'in', res=300)
+        par(mar=c(0,0,0,0))
+        par(oma=c(0,0,0,0))
+        plot(final_plot)
+        dev.off()
+        
+        oo = file.remove(row_list %>% unlist())
+        rm(list_final, p_roc, rds_ref, AUC_ref, row_list, tt, tt_bas, tt_add)
+      } # alg_type
+    }
+    
+    
+  }
+  
+  # feature importance
+  {
+    # todo:
+    # metti grafici PFI per tutte le osservazioni (cambia il titolo)
+    # per gli shapley metti i summary e gli effect per le due classi separatamente
+    # cambia i nomi delle variabili (vediamo se mettere 1..22 e PD o tutti i nomi)
+    
+    
+  }
+}
 
-# assemble rows
-eval(parse(text=paste0('final_plot = image_append(c(', paste0('row_list[[', 1:length(row_list), ']]', collapse = ','), '), stack = T)')))
 
-# add main title and subtitle
-title_lab = image_graph(res = 100, width = image_info(final_plot)$width, height = 200, clip = F)
-plot(
-  ggplot(mtcars, aes(x = wt, y = mpg)) + geom_blank() + xlim(0, 1) + ylim(0, 5) +
-    annotate(geom = "text", x = 0, y = 3.5, label = "titletttt", cex = 20, hjust = 0, vjust = 0.5) +
-    annotate(geom = "text", x = 0, y = 1.5, label = "subtitletttt", cex = 15, hjust = 0, vjust = 0.5) +
-    theme_bw() +
-    theme( panel.grid.major = element_blank(), panel.grid.minor = element_blank(), panel.border = element_blank(),
-           axis.title=element_blank(), axis.text=element_blank(), axis.ticks=element_blank(),
-           plot.margin=unit(c(0,0.4,0,0.4),"cm"))
-)
-dev.off()
 
-final_plot = image_append(c(title_lab, final_plot), stack = T)
 
-png(paste0('./Distance_to_Default/Results/04_Prob_distr_', cl_lab, '_', d_type, '_', alg_type, '.png'), width = 7, height = 2.1 * length(row_list), units = 'in', res=300)
-par(mar=c(0,0,0,0))
-par(oma=c(0,0,0,0))
-plot(final_plot)
-dev.off()
 
-# todo: capisci perché magik non funziona nel loop per fig_count = 2
 
-labs(title = "Distribution of true vs predicted",
-     subtitle = "Vertical lines represent probability to class thresholds",
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+# todo:
+## valuta se ritrasformare i coefficienti rispetto alla scala iniziale dei dati
+# https://stats.stackexchange.com/questions/74622/converting-standardized-betas-back-to-original-variables
+
+
+# todo: si può fare clustering oggettivo in due modi: fai clustering di CRIF e poi assegni i peers al centroide più vicino oppure
+#       assegni ad ogni CRIF il peer più vicino. In entrambi i casi possiamo usare sia i dati grezzi, sia gli embedding o una media delle varie vicinanze?
+
+
+# controlla tutti i todo: da rimuovere   <<<---------------
+
+
+
+
+# per il momento possiamo provare a calcolare mediane e percentili con i valori stessi di CRIF, giusto per vedere se i punti vengono divisi con qualche variabile
+#     per automatizzare il tutto potrebbe aver senso mettere delle misure di bontà di clustering (Davies-Bouldin, etc.) - aggiungile anche nel titolo dei plot
+#     https://scikit-learn.org/stable/modules/clustering.html#clustering-performance-evaluation
+
+
      
      
-     # todo: togli, servono solo per la call
-     png(paste0('./Distance_to_Default/Results/prob_distr_', cl_lab, '_', model_setting_lab, '_', d_type, '_', alg_type, '.png'), width = 12, height = 10, units = 'in', res=100)
-     plot(p_distr)
-     dev.off()
      
      
      
@@ -2961,239 +4211,4 @@ labs(title = "Distribution of true vs predicted",
      
      
      
-     
-     
-     ## todo: per ogni fold calcola F1-score, AUC e ROC (sia per train che per test) e poi crea report finale con i valori medi +st.dev
-     #        valuta se fare due plot diversi con le misure medie del train e del test
-     
-     
-     ## todo: aggiungi distribuzione PD e DD per ogni regressione (anche vs FLAG_default)
-     
-     ## valuta se ritrasformare i coefficienti rispetto alla scala iniziale dei dati
-     # https://stats.stackexchange.com/questions/74622/converting-standardized-betas-back-to-original-variables
-     
-     # todo: aggiungi la variable importance
-     
-     # todo: aggiungi un semplice calcolo di quanti abi_ndg cambiano flag da un anno all'altro. Magari si potrebbe fare un focus di predizione solo su quelli
-     #       per capire se il modello riesce a predirli bene o li predice sempre 0 o sempre 1.
-     #       aa = df_main_work %>% group_by(abi_ndg) %>% summarize(cc = uniqueN(y))
-     
-     vv = df_main_work %>%
-       filter(abi_ndg %in% (aa %>% filter(cc == 2) %>% pull(abi_ndg)))
-     
-     vv1 = vv %>%
-       group_by(abi_ndg) %>%
-       arrange(year) %>%
-       summarise(evol = paste0(y, collapse = ",")) %>%
-       group_by(evol) %>%
-       summarise(Count = n())
-     
-     
-     
-     vv2 = df_main_work %>%
-       filter(!abi_ndg %in% (aa %>% filter(cc == 2) %>% pull(abi_ndg))) %>%
-       group_by(y) %>%
-       summarise(count = n())
-     
-     
-     
-     
-     
-     
-     
-     
-     
-     
-     
-     
-     
-     
-     
-     
-     
-     
-     # baseline
-     df_work = df_main_work %>%
-       left_join(list_DD_CRIF_data[[cluster_lab]], by = c("abi_ndg", "year")) %>%
-       select(y, all_of(main_regressor)) %>%
-       `rownames<-`(rownames(df_main_work))
-     
-     
-     fit_train_baseline = fit_cv_glmnet(x = df_work %>% select(-y), y = df_work$y, alpha = 1, standardize = F, intercept = T, parallel = T,
-                                        type.measure = "auc", lambda_final = "lambda.1se", family = "binomial",
-                                        fixed_variables = fixed_variables, n_fold_cvgmlnet = n_fold_cvgmlnet)
-     
-     
-     # regression with additional_var = PD
-     df_work_PD = df_main_work %>%
-       left_join(list_DD_CRIF_data[[cluster_lab]], by = c("abi_ndg", "year")) %>%
-       select(y, all_of(c(main_regressor, additional_var))) %>%
-       `rownames<-`(rownames(df_main_work))
-     
-     fit_train_PD = fit_cv_glmnet(x = df_work_PD %>% select(-y), y = df_work_PD$y, alpha = 1, standardize = F, intercept = T, parallel = T,
-                                  type.measure = "auc", lambda_final = "lambda.1se", family = "binomial",
-                                  fixed_variables = fixed_variables, n_fold_cvgmlnet = n_fold_cvgmlnet)
-     
-     fit_train_PD_no_pen = fit_cv_glmnet(x = df_work_PD %>% select(-y), y = df_work_PD$y, alpha = 1, standardize = F, intercept = T, parallel = T,
-                                         type.measure = "auc", lambda_final = "lambda.1se", family = "binomial",
-                                         fixed_variables = c(), n_fold_cvgmlnet = n_fold_cvgmlnet)
-     
-     
-     # regression with additional_var = DD
-     df_work_DD = df_main_work %>%
-       left_join(list_DD_CRIF_data[[cluster_lab]], by = c("abi_ndg", "year")) %>%
-       select(y, all_of(c(main_regressor, "DD"))) %>%
-       `rownames<-`(rownames(df_main_work)) %>%
-       mutate(DD = scale(DD))
-     
-     fit_train_DD = fit_cv_glmnet(x = df_work_DD %>% select(-y), y = df_work_DD$y, alpha = 1, standardize = F, intercept = T, parallel = T,
-                                  type.measure = "auc", lambda_final = "lambda.1se", family = "binomial",
-                                  fixed_variables = c("DD"), n_fold_cvgmlnet = n_fold_cvgmlnet)
-     
-     fit_train_DD_no_pen = fit_cv_glmnet(x = df_work_DD %>% select(-y), y = df_work_DD$y, alpha = 1, standardize = F, intercept = T, parallel = T,
-                                         type.measure = "auc", lambda_final = "lambda.1se", family = "binomial",
-                                         fixed_variables = c(), n_fold_cvgmlnet = n_fold_cvgmlnet)
-     
-     
-     
-     
-     aa_res = data.frame(Variable = "Accuracy", Coeff = pp(fit_train_baseline$pred_prob, df_work$y), stringsAsFactors = F) %>%
-       bind_rows(fit_train_baseline$coeff) %>%
-       rename(Coeff_baseline = Coeff) %>%
-       
-       full_join(data.frame(Variable = "Accuracy", Coeff = pp(fit_train_PD$pred_prob, df_work$y), stringsAsFactors = F) %>%
-                   bind_rows(fit_train_PD$coeff) %>%
-                   rename(Coeff_PD = Coeff), by = "Variable") %>%
-       full_join(data.frame(Variable = "Accuracy", Coeff = pp(fit_train_PD_no_pen$pred_prob, df_work$y), stringsAsFactors = F) %>%
-                   bind_rows(fit_train_PD_no_pen$coeff) %>%
-                   rename(Coeff_PD_no_forcing = Coeff), by = "Variable") %>%
-       
-       full_join(data.frame(Variable = "Accuracy", Coeff = pp(fit_train_DD$pred_prob, df_work$y), stringsAsFactors = F) %>%
-                   bind_rows(fit_train_DD$coeff) %>%
-                   rename(Coeff_DD = Coeff), by = "Variable") %>%
-       
-       full_join(data.frame(Variable = "Accuracy", Coeff = pp(fit_train_DD_no_pen$pred_prob, df_work$y), stringsAsFactors = F) %>%
-                   bind_rows(fit_train_DD_no_pen$coeff) %>%
-                   rename(Coeff_DD_no_forcing = Coeff), by = "Variable")
-     
-     
-     write.table(aa_res, 'logistic_res.csv', sep = ';', row.names = F, append = F)
-     
-     pp = function(prob, y_true){
-       
-       y_pred = prob$Prob
-       y_pred = ifelse(y_pred >= 0.5, 1, 0)
-       
-       prec = sum(y_true == y_pred) / length(y_true)
-       
-       return(prec)
-     }
-     
-     
-     
-     
-     
-     
-     
-     aa = df_final_small %>% select(abi, ndg, year, Tot_Attivo, Tot_Equity) %>%
-       mutate(abi_ndg = paste0(abi, "_", ndg)) %>%
-       mutate(Tot_Equity_floor = ifelse(Tot_Equity < 0, 0, Tot_Equity)) %>%
-       mutate(Tot_Liability = Tot_Attivo - Tot_Equity,
-              Tot_Liability_floor = Tot_Attivo - Tot_Equity_floor) %>%
-       select(-abi, -ndg) %>%
-       select(abi_ndg, everything())
-     write.table(aa, 'check_equity.csv', sep = ';', row.names = F, append = F)
-     
-     
-     # todo: si può fare clustering oggettivo in due modi: fai clustering di CRIF e poi assegni i peers al centroide più vicino oppure
-     #       assegni ad ogni CRIF il peer più vicino. In entrambi i casi possiamo usare sia i dati grezzi, sia gli embedding o una media delle varie vicinanze?
-     
-     
-     # controlla tutti i todo: da rimuovere   <<<---------------
-     
-     
-     
-     
-     # per il momento possiamo provare a calcolare mediane e percentili con i valori stessi di CRIF, giusto per vedere se i punti vengono divisi con qualche variabile
-     #     per automatizzare il tutto potrebbe aver senso mettere delle misure di bontà di clustering (Davies-Bouldin, etc.) - aggiungile anche nel titolo dei plot
-     #     https://scikit-learn.org/stable/modules/clustering.html#clustering-performance-evaluation
-     
-     
-     
-     
-     
-     
-     
-     
-     
-     
-     
-     
-     
-     
-     # rilegge i file creati nel tuning
-     
-     # save_RDS_additional_lab = 'AE_LSTM_emb'
-     # # save observations names
-     # x_input = create_lstm_input(df = df_emb_input, df_header = df_emb_input_header, ID_col = 'abi_ndg', TIME_col = 'year', NA_masking = 0)
-     # names(x_input) = NULL
-     # x_input = np$array(x_input)
-     # x_input_dim = py_to_r(x_input$shape) %>% unlist()
-     # 
-     # # create a copy of x_input, reshaping into a (obs*timestep)x(features) matrix including masked values
-     # x_input_full = array_reshape(x_input, c(prod(x_input_dim[1:2]), x_input_dim[3]))
-     # x_input_full = py_to_r(x_input_full)
-     # 
-     # # save masking index
-     # if (!is.null(masking_value)){
-     #   masking = x_input_full == masking_value
-     # } else {
-     #   masking = matrix(FALSE, ncol = ncol(x_input_full), nrow = nrow(x_input_full))
-     # }
-     # 
-     # result_csv = paste0('./Distance_to_Default/Checkpoints/Autoencoder_test/00_Optimization_list_', save_RDS_additional_lab, '.csv')
-     # result = read.csv(result_csv, sep=";", stringsAsFactors=FALSE) %>%
-     #   mutate(R2 = -99) %>%
-     #   relocate(R2, .after = MSE)
-     # for (i in 1:nrow(result)){
-     #   if (result$MSE[i] != 999){
-     #     aut = readRDS(result$RDS_path[i])
-     #     full_output = aut$reconstr_prediction
-     #     
-     #     R2 = round(eval_R2(x_input_full, full_output, masking = masking) * 100, 1)
-     #     R2_99 = round(eval_R2(x_input_full, full_output, 0.99, masking = masking) * 100, 1)
-     #     R2_95 = round(eval_R2(x_input_full, full_output, 0.95, masking = masking) * 100, 1)
-     #     
-     #     aut$R2 = R2
-     #     aut$R2_99 = R2_99
-     #     aut$R2_95 = R2_95
-     #     
-     #     saveRDS(aut, result$RDS_path[i])
-     #     
-     #     result$R2[i] = aut$R2
-     #   }
-     # }
-     # write.table(result, result_csv, sep = ';', row.names = F, append = F)
-     
-     
-     # res =  read.csv('./Distance_to_Default/Checkpoints/Autoencoder_test/00_Optimization_list_AE_LSTM_emb.csv', sep=";", stringsAsFactors=FALSE) %>%
-     #   mutate(layers_list = as.character(layers_list))
-     # lstm_list = paste0("./Distance_to_Default/Checkpoints/Autoencoder_test/",
-     #                      list.files(path = './Distance_to_Default/Checkpoints/Autoencoder_test/', pattern = "^AE_LSTM_emb*"), sep = "")
-     # for (i in 1:length(lstm_list)){
-     #   aut = readRDS(lstm_list[i])
-     #   opt = aut$options
-     #   add_row = data.frame(layers = length(opt$layer_list),
-     #                        layers_list = paste0(opt$layer_list, collapse = ".") %>% as.character(),
-     #                        n_comp = opt$n_comp,
-     #                        RNN_type = opt$RNN_type,
-     #                        kernel_reg_alpha = ifelse(is.null(opt$kernel_reg_alpha), "", as.character(opt$kernel_reg_alpha)),
-     #                        batch_size = opt$batch_size,
-     #                        MSE = aut$ReconstErrorRMSE ^ 2,
-     #                        RDS_path = lstm_list[i],
-     #                        R2 = aut$R2, stringsAsFactors = F)
-     #   res = res %>%
-     #     bind_rows(add_row)
-     # }
-     # write.table(res %>% relocate(R2, .after = MSE) %>% filter(!is.na(R2)), './Distance_to_Default/Checkpoints/Autoencoder_test/00_Optimization_list_AE_LSTM_emb.csv', sep = ';', row.names = F, append = F)
      

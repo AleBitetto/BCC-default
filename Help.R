@@ -2860,33 +2860,37 @@ ml_tuning = function(df_work, algo_type, cv_ind, prob_thresh_cv, tuning_crit = "
 }
 
 # evaluate Shapley values
-evaluate_SHAP = function(dataSample, sample.size = 100, trained_model_prediction_function = NULL, obs_index_to_evaluate = NULL,
-                         obs_index_class = NULL, n_batch = 1, verbose = 1, n_workers = 5, seed = 66){
-  
+evaluate_SHAP = function(dataSample, sample_size = 100, trained_model_prediction_function = NULL, obs_index_to_evaluate = NULL,
+                         obs_index_to_sample = NULL, obs_index_subset = NULL, adjust_shapley = FALSE, n_batch = 1, n_workers = 5, verbose = 1, seed = 66){
+
   # evaluate local SHAP values for single observations, global (signed) features effects, global SHAP features importance and input for plot_SHAP_summary().
   # https://christophm.github.io/interpretable-ml-book/shapley.html
   # https://christophm.github.io/interpretable-ml-book/shap.html
-  
+
   # dataSample: data.frame of predictors ONLY.
-  # sample.size: sample size to generate shuffled instances (coalitions). The higher the more accurate the explanations become.
+  # sample_size: sample size to generate instances (coalitions) with shuffled features. The higher the more accurate the explanations become.
   # trained_model_prediction_function: named list of function(predictors) -> prediction (vector of values for regression,
   #                                   probabilities of "1" for binary classification).
   #                                   E.g. function(x){predict(rf, newdata = x)}. List names will be used as output label for each model.
-  # obs_index_to_evaluate: integer vector - row index of observation to evaluate SHAP value. If NULL all observation will be used.
-  # obs_index_class: data.frame of "obs_index", "class". If not NULL contains class for each obs_index_to_evaluate. All output are then evaluated
+  # obs_index_to_evaluate: integer vector - row index of observations to evaluate SHAP value. If NULL all observations will be used.
+  # obs_index_to_sample: integer vector of index of rows to be used when sampling all coalitions. obs_index_to_evaluate must be a partition of obs_index_to_sample.
+  #                      If NULL all observations will be used. It can be used to do stratified sampling and/or mitigate imbalance in dataset.
+  # obs_index_subset: data.frame of "obs_index", "class". If not NULL contains class for each obs_index_to_evaluate. All outputs are then evaluated
   #                 for each class and all observations.
-  # verbose: 1 to display calculation time, 0 for silent.
+  # adjust_shapley: if TRUE adjust the sum of the estimated Shapley values to satisfy the local accuracy property, i.e. to equal the difference between the
+  #               model's prediction for of each observation and the average prediction over all the dataset.
   # n_batch: number of batch to split the evaluation. May speed up evaluation and save memory.
   # n_workers: number of workers for parallel calculation. Try not to exceed 30-40.
+  # verbose: 1 to display calculation time, 0 for silent.
   # seed: seed for reproducibility
-  
+
   # Output:
   #   list of:
   #     - local_SHAP: complete list of SHAP values for each observation
-  #                     data.frame with "feature", "phi", "phi.std", "feature.value", "obs_index", "model_name", "predicted.val", "predicted.val.avg"
-  #                     "phi" and "phi.std" are the average and st.dev of SHAP values over all shuffled coalitions
-  #                     "feature" is feature name and "feature.value" is the corresponding value from the original instance (obs_index reference)
-  #                     "predicted.val" and "predicted.val.avg" are predicted value of single observation and columns average, respectively
+  #                     data.frame with "feature", "phi", "phi_std", "feature_value", "obs_index", "model_name", "predicted_val", "predicted_val_avg"
+  #                     "phi" and "phi_std" are the average and st.dev of SHAP values over all shuffled coalitions
+  #                     "feature" is feature name and "feature_value" is the corresponding value from the original instance (obs_index reference)
+  #                     "predicted_val" and "predicted_val_avg" are predicted value of single observation and columns average, respectively
   #     - global_features_effect: simple average of all local (single observation) SHAP values over all observation.
   #                              It is a signed features effect on predicted value.
   #                              data.frame with "model_name", "feature", "phi"
@@ -2894,50 +2898,71 @@ evaluate_SHAP = function(dataSample, sample.size = 100, trained_model_prediction
   #                     data.frame with "model_name", "feature", "phi"
   #     - summary_plot_data: input for plot_SHAP_summary()
   #     - type: "SHAP". Used in plot_feat_imp().
-  # If obs_index_class != NULL additional nested list is returned for each class and all observations with global_features_effect and SHAP_feat_imp,
+  # If obs_index_subset != NULL additional nested list is returned for each class and all observations with global_features_effect and SHAP_feat_imp,
   # local_SHAP and summary_plot_data have an additional column "class"
-  
-  # code adapted from https://github.com/christophM/iml/blob/master/R/Shapley.R  
-  
-  
+
+  # code adapted from https://github.com/christophM/iml/blob/master/R/Shapley.R
+
+
   # check for numeric predictors only
   invalid_col_type = dataSample %>% select_if(negate(is.numeric)) %>% colnames()
   if (length(invalid_col_type) > 0){
     oo = capture.output(print(sapply(dataSample %>% select(all_of(invalid_col_type)), class)))
     stop(paste0("Only numeric predictors supported:\n", paste0(oo, collapse = "\n")))
   }
-  
+
   dataSample = dataSample %>% setDT()
-  n.features = ncol(dataSample)
-  feature.names = colnames(dataSample)
+  n_features = ncol(dataSample)
+  feature_names = colnames(dataSample)
+  samp_len = length(obs_index_to_sample)
   if (is.null(obs_index_to_evaluate)){obs_index_to_evaluate = c(1:nrow(dataSample))}
-  
-  generate_data = function(obs_index){
-    # final sample will have ncol=n.features
-    #                        nrow=sample.size*n.features*2  - first half rows are data with features x_+j,
+  if (is.null(obs_index_to_sample)){obs_index_to_sample = c(1:nrow(dataSample))}
+  if (length(intersect(obs_index_to_evaluate, obs_index_to_sample)) != length(obs_index_to_evaluate)){
+    stop('"obs_index_to_evaluate" must be a partition of "obs_index_to_sample"')
+  }
+
+  generate_sample_index = function(obs_index){
+    # generate indices of samples to be used as coalitions trying not to use duplicates. If sample_size > length(obs_index_to_sample)
+    # duplicates are introduced.
+    # Returns indices vector of length sample_size
+
+    set.seed(seed + obs_index)
+    out = sample(obs_index_to_sample, min(c(sample_size, samp_len)), replace = FALSE)
+
+    if (sample_size > samp_len){
+      out = c(out, sample(obs_index_to_sample, sample_size - samp_len, replace = TRUE))
+    }
+
+    return(out)
+  }
+
+  generate_coalitions = function(obs_index){
+    # generate coalitions with shuffled features
+    # final sample will have ncol=n_features
+    #                        nrow=sample_size*n_features*2  - first half rows are data with features x_+j,
     #                                                         second half is x_-j of algo definition at linked page
-    
+    # column with obs_index is added as well
+
     # select instance
     x.interest = dataSample[obs_index,] %>% as.data.frame()
-    
+
     n_row = nrow(dataSample)
-    runs <- lapply(1:sample.size, function(m) {
-      
+    runs <- lapply(1:sample_size, function(m) {
+
       # randomly order features
       set.seed(seed + obs_index*m)
-      new.feature.order <- sample(1:n.features)
-      
-      # randomly choose sample instance from dataSample and shuffle features order
-      set.seed(seed + obs_index*m)
-      sample.instance.shuffled <- dataSample[sample(1:n_row, 1),
+      new.feature.order <- sample(1:n_features)
+
+      # randomly choose sample instance from dataSample to shuffle features order
+      sample.instance.shuffled <- dataSample[list_generated_sample[[as.character(obs_index)]][m],
                                              new.feature.order,
                                              with = FALSE
       ]
       # shuffle interest instance with same features order
       x.interest.shuffled <- x.interest[, new.feature.order]
-      
+
       # create new instances (with and without) for each feature
-      featurewise <- lapply(1:n.features, function(k) {
+      featurewise <- lapply(1:n_features, function(k) {
         k.at.index <- which(new.feature.order == k)
         # replace sample.instance.shuffled at features > k  (X_+j of algo definition at linked page "k" is "j")
         instance.with.k <- x.interest.shuffled
@@ -2948,67 +2973,72 @@ evaluate_SHAP = function(dataSample, sample.size = 100, trained_model_prediction
         # replace sample.instance.shuffled at features >= k  (X_-j of algo definition)
         instance.without.k <- instance.with.k
         instance.without.k[, k.at.index] <- sample.instance.shuffled[,k.at.index,with = FALSE]
-        cbind(instance.with.k[, feature.names],instance.without.k[, feature.names])
+        cbind(instance.with.k[, feature_names],instance.without.k[, feature_names])
       })
       data.table::rbindlist(featurewise)
     })
     runs <- data.table::rbindlist(runs)
     dat.with.k <- data.frame(runs[, 1:(ncol(runs) / 2)])
     dat.without.k <- data.frame(runs[, (ncol(runs) / 2 + 1):ncol(runs)])
-    
+
     return(rbind(dat.with.k, dat.without.k) %>% mutate(obs_index = obs_index))
   }
-  
-  generate_phi_table = function(list_index, trained_model_name){
-    
-    # list_index: index of the list that contains all generate_data() and predictions "list_predicted_data". obs_index will be extracted inside so to avoid
-    #             index mismatch when list_generated_data doesn't keep the order.
+
+  generate_shapley = function(list_index, trained_model_name){
+    # generate Shapley values
+    # list_index: index of the list that contains all generate_coalitions() and predictions "list_predicted_data". obs_index will be extracted inside so to avoid
+    #             index mismatch when list_generated_coal doesn't keep the order.
     # trained_model_name: model name from trained_model_prediction_function
     #
-    # Output: data.frame with "feature", "phi", "phi.std", "feature.value", "obs_index", "model_name", "predicted.val", "predicted.val.avg"
-    #         "phi" and "phi.std" are the average and st.dev of SHAP values over all shuffled coalitions
-    #         "feature" is feature name and "feature.value" is the corresponding value from the original instance (obs_index reference)
-    #         "predicted.val" and "predicted.val.avg" are predicted value of single observation and columns average, respectively
-    
+    # Output: data.frame with "feature", "phi", "phi_std", "feature_value", "obs_index", "model_name", "predicted_val", "predicted_val_avg"
+    #         "phi" and "phi_std" are the average and st.dev of SHAP values over all shuffled coalitions
+    #         "feature" is feature name and "feature_value" is the corresponding value from the original instance (obs_index reference)
+    #         "predicted_val" and "predicted_val_avg" are predicted value of single observation and columns average, respectively
+
     # select sampled data and predictions from generated list
     data_predicted = list_predicted_data[[list_index]]
     obs_index = data_predicted$obs_index %>% unique()
     var_names = data_predicted %>% select(-obs_index, -Prediction) %>% colnames()
     x.interest = dataSample[obs_index,] %>% as.data.frame()
     data_predicted = data_predicted %>% select(Prediction)
-    
+
     # evaluate Phi
     # split prediction in yhat_x_+j and yhat_-j
     y.hat.with.k <- data_predicted[1:(nrow(data_predicted) / 2), , drop = FALSE]
     y.hat.without.k <- data_predicted[(nrow(data_predicted) / 2 + 1):nrow(data_predicted), , drop = FALSE]
-    y.hat.diff <- y.hat.with.k - y.hat.without.k   # these are Phi_j^m  -> will be averaged after (m=1,...,sample.size)
+    y.hat.diff <- y.hat.with.k - y.hat.without.k   # these are Phi_j^m  -> will be averaged after (m=1,...,sample_size)
     cnames <- colnames(y.hat.diff)
     y.hat.diff <- cbind(
-      data.table(feature = rep(var_names, times = sample.size)),
+      data.table(feature = rep(var_names, times = sample_size)),
       y.hat.diff
     )
     # average over all sampled observation (for each feature) - also include std
     y.hat.diff <- data.table::melt(y.hat.diff, variable.name = "class", value.name = "value", measure.vars = cnames)
-    y.hat.diff <- y.hat.diff[, list("phi" = mean(value), "phi.std" = sd(value)), by = c("feature", "class")]
+    y.hat.diff <- y.hat.diff[, list("phi" = mean(value), "phi_std" = sd(value)), by = c("feature", "class")]
     y.hat.diff$class <- NULL
     # x.original <- unlist(lapply(x.interest[1, ], as.character))
-    # y.hat.diff$feature.value <- rep(sprintf("%s=%s", colnames(x.interest), x.original), times = length(cnames))
+    # y.hat.diff$feature_value <- rep(sprintf("%s=%s", colnames(x.interest), x.original), times = length(cnames))
     y.hat.diff = y.hat.diff %>%
       left_join(data.frame(unlist(x.interest[1, ]), stringsAsFactors = F) %>%
-                  setNames("feature.value") %>%
+                  setNames("feature_value") %>%
                   rownames_to_column("feature"), by = "feature") %>%
       mutate(obs_index = obs_index,
              model_name = trained_model_name)
-    
+
     return(y.hat.diff)
   }
-  
+
+
   # suppress messages
   if (verbose == 0){sink(tempfile());on.exit(sink())}
-  
+
+  # generate samples indices for coalitions
+  list_generated_sample = lapply(obs_index_to_evaluate, generate_sample_index)
+  names(list_generated_sample) = as.character(obs_index_to_evaluate)
+
 
   #### loop for each batch of obs_index_to_evaluate
-  
+
   options(future.globals.maxSize = 8000 * 1024^2)
   plan(multisession, workers = n_workers)
   list_split = split(obs_index_to_evaluate, sort(obs_index_to_evaluate %% n_batch))
@@ -3016,7 +3046,7 @@ evaluate_SHAP = function(dataSample, sample.size = 100, trained_model_prediction
   split_time_val = local_SHAP = c()
   cat('\nStart time:', as.character(Sys.time()), '\n')
   for (split_name in names(list_split)){
-    
+
     # check average batch time
     split_time = Sys.time()
     if (split_name != names(list_split)[1]){
@@ -3027,105 +3057,105 @@ evaluate_SHAP = function(dataSample, sample.size = 100, trained_model_prediction
     }
     cat('Generating coalitions and SHAP values for batch', paste0(as.numeric(split_name)+1, '/', length(list_split)),
         ' | last timestamp:', as.character(Sys.time()), avg_time_label, end = '')
-    
+
     # generate all sample to be used for all trained models
     tic()
-    list_generated_data <- future_lapply(list_split[[split_name]], generate_data, future.packages = c("data.table"), future.seed = NULL)
+    list_generated_coal <- future_lapply(list_split[[split_name]], generate_coalitions, future.packages = c("data.table"), future.seed = NULL)
     gen_time = capture.output(toc()) %>% strsplit(" ") %>% .[[1]] %>% .[1] %>% as.numeric() %>% seconds_to_period()
     cat(paste0('(generate: ', lubridate::hour(gen_time), 'h:', lubridate::minute(gen_time), 'm:', round(lubridate::second(gen_time))), end = '')
-    
+
     # generate SHAP values for all observations and all trained models
     tic()
     for (tr_model in names(trained_model_prediction_function)){
-      
+
       # select model from trained_model_prediction_function
       trained_model = trained_model_prediction_function[[tr_model]]
-      
-      # predict trained model on list_generated_data
-      list_predicted_data = data.table::rbindlist(list_generated_data)
+
+      # predict trained model on list_generated_coal
+      list_predicted_data = data.table::rbindlist(list_generated_coal)
       list_predicted_data = list_predicted_data %>%
         mutate(Prediction = trained_model(list_predicted_data %>% as.data.frame() %>% select(all_of(colnames(dataSample)))))
       list_predicted_data = split(list_predicted_data , f = list_predicted_data$obs_index)
-      
+
       # evaluate SHAP values
-      list_generated_SHAP <- future_lapply(1:length(list_predicted_data), generate_phi_table, trained_model_name = tr_model, future.seed = NULL)
-      
+      list_generated_SHAP <- future_lapply(1:length(list_predicted_data), generate_shapley, trained_model_name = tr_model, future.seed = NULL)
+
       # add observation predicted values and average observation predicted value
       predicted_obs = data.frame(obs_index = obs_index_to_evaluate,
-                                 predicted.val = trained_model(dataSample[obs_index_to_evaluate, ] %>% as.data.frame()))
+                                 predicted_val = trained_model(dataSample[obs_index_to_evaluate, ] %>% as.data.frame()))
       predicted_obs_avg = trained_model(dataSample %>% summarise_all(mean))
-      
+
       # append results
       local_SHAP = local_SHAP %>%
         bind_rows(data.table::rbindlist(list_generated_SHAP) %>%
                     left_join(predicted_obs, by = "obs_index") %>%
-                    mutate(predicted.val.avg = predicted_obs_avg))
+                    mutate(predicted_val_avg = predicted_obs_avg))
     } # tr_model
     pred_time = capture.output(toc()) %>% strsplit(" ") %>% .[[1]] %>% .[1] %>% as.numeric() %>% seconds_to_period()
     cat(paste0(' - predict: ', lubridate::hour(pred_time), 'h:', lubridate::minute(pred_time), 'm:', round(lubridate::second(pred_time)), ')'), end = '\r')
-    
+
     split_time_val = c(split_time_val, difftime(Sys.time(), split_time, units='secs'))
   } # split_name
   future:::ClusterRegistry("stop")
   tot_diff=seconds_to_period(difftime(Sys.time(), start_time, units='secs'))
   cat('\nTotal elapsed time', paste0(lubridate::hour(tot_diff), 'h:', lubridate::minute(tot_diff), 'm:', round(lubridate::second(tot_diff))), ' ', as.character(Sys.time()), '\n')
-  if (n.features * length(obs_index_to_evaluate) * length(trained_model_prediction_function) != nrow(local_SHAP)){
+  if (n_features * length(obs_index_to_evaluate) * length(trained_model_prediction_function) != nrow(local_SHAP)){
     warning("Expected number of rows in generated local SHAP values doesn't match")
   }
   local_SHAP = local_SHAP %>%
     arrange(model_name, obs_index, feature)
-  
+
   #### loop for all classes (if any) to create global_features_effect and SHAP_feat_imp
-  
+
   class_set = data.frame(set = 'All observations', class = '', stringsAsFactors = F)
-  if (!is.null(obs_index_class)){
-    obs_index_class = obs_index_class %>% mutate(class = as.character(class))  # remove factors
+  if (!is.null(obs_index_subset)){
+    obs_index_subset = obs_index_subset %>% mutate(class = as.character(class))  # remove factors
     class_set = class_set %>%
-      bind_rows(data.frame(set = paste0("class ", obs_index_class$class %>% unique() %>% sort()),
-                           class = obs_index_class$class %>% unique() %>% sort(), stringsAsFactors = F))
+      bind_rows(data.frame(set = paste0("class ", obs_index_subset$class %>% unique() %>% sort()),
+                           class = obs_index_subset$class %>% unique() %>% sort(), stringsAsFactors = F))
     local_SHAP = local_SHAP %>%
-      left_join(obs_index_class, by = "obs_index")
+      left_join(obs_index_subset, by = "obs_index")
   }
   list_output = list()
   for (class_i in 1:nrow(class_set)){
-    
+
     if (class_set$set[class_i] != 'All observations'){
       tt_local_SHAP = local_SHAP %>%
         filter(class == class_set$class[class_i])
     } else {
       tt_local_SHAP = local_SHAP
     }
-    
+
     # evaluate average of SHAP values. Proxy for GLOBAL signed impact on predictions
     global_features_effect = tt_local_SHAP %>%
       group_by(model_name, feature) %>%
       summarize(phi = mean(phi), .groups = "drop") %>%
       arrange(model_name, desc(abs(phi)))
-    
-    
+
+
     # evaluate SHAP feature importance. Average of SHAP values absolute value
     SHAP_feat_imp = tt_local_SHAP %>%
       group_by(model_name, feature) %>%
       summarize(phi = mean(abs(phi)), .groups = "drop") %>%
       arrange(model_name, desc(phi))
-    
+
     list_output[[class_set$set[class_i]]] = list(global_features_effect = global_features_effect,
                                                  SHAP_feat_imp = SHAP_feat_imp)
-    
+
   } # class_i
   features_level = list_output$`All observations`$SHAP_feat_imp
   if (length(list_output) == 1){list_output = list_output[[1]]}   # remove "All observations" level if it is the only available
-  
+
   # evaluate input for plot_SHAP_summary()
   scaled_features = dataSample %>%    # scale input features in [0,1]
     as.data.frame() %>%
     mutate_all(~scale_range(., a=0, b=1)) %>%
     mutate(obs_index = 1:n()) %>%
     gather(key = "feature", value = "value_color", -obs_index)
-  
+
   summary_plot_data = c()
   for (tr_model in names(trained_model_prediction_function)){
-    
+
     summary_plot_data = summary_plot_data %>%
       bind_rows(
         local_SHAP %>%
@@ -3134,20 +3164,20 @@ evaluate_SHAP = function(dataSample, sample.size = 100, trained_model_prediction
           mutate(feature = factor(feature, levels = features_level %>% filter(model_name == tr_model) %>% pull(feature)))
       )
   } # tr_model
-  
+
   list_output = c(list(type = "SHAP",
                        local_SHAP = local_SHAP,
                        summary_plot_data = summary_plot_data),
                   list_output)
-  
+
   return(list_output)
 }
 
 # evaluate Permutation Feature Importance
 evaluate_Perm_Feat_Imp = function(dataSample, trained_model_prediction_function = NULL, n_repetitions = 5, compare = "difference",
-                                  obs_index_to_evaluate = NULL, obs_index_to_shuffle = NULL, obs_index_class = NULL,
+                                  obs_index_to_evaluate = NULL, obs_index_to_shuffle = NULL, obs_index_subset = NULL,
                                   perf_metric = NULL, perf_metric_add_pars = NULL, true_val_name = NULL, prediction_name = NULL, perf_metric_minimize = F,
-                                  package_to_load = c("glmnet", "ranger", "earth", "kernlab"), verbose = 1, n_workers = 5, seed = 66){
+                                  verbose = 1, n_workers = 5, seed = 66){
   
   # evaluate Permutation Feature Importance.
   
@@ -3157,10 +3187,10 @@ evaluate_Perm_Feat_Imp = function(dataSample, trained_model_prediction_function 
   #                                   E.g. function(x){predict(rf, newdata = x)}. List names will be used as output label for each model.
   # n_repetitions: how many times permutation importance must be evaluated with different seeds and then averaged.
   # compare: "difference" or "ratio" to compare permutation performance with original input performance. See perf_metric_minimize.
-  # obs_index_to_evaluate: integer vector - row index of observation to evaluate feature importance value. If NULL all observation will be used.
+  # obs_index_to_evaluate: integer vector - row index of observations to evaluate feature importance value. If NULL all observations will be used.
   # obs_index_to_shuffle: integer vector of index of rows to be used when shuffling each feature. obs_index_to_evaluate must be a partition of obs_index_to_shuffle.
-  #                      If NULL all observation will be used.
-  # obs_index_class: data.frame of "obs_index", "class". If not NULL contains class for each obs_index_to_evaluate. All output are then evaluated
+  #                      If NULL all observations will be used.
+  # obs_index_subset: data.frame of "obs_index", "class". If not NULL contains class for each obs_index_to_evaluate. All outputs are then evaluated
   #                 for each class and all observations. Meaningless for classification problem and class-specific perf_metric (such as F1)
   # perf_metric, perf_metric_add_pars: function to predict performance. E.g. MLmetrics::F1_Score. If user defined, must return a single value
   #                                   and must have named input arguments. Additional parameters can be passed by named list perf_metric_add_pars. See next.
@@ -3169,7 +3199,6 @@ evaluate_Perm_Feat_Imp = function(dataSample, trained_model_prediction_function 
   # perf_metric_minimize: whether optimal value of perf_metric should be minimized or not. E.g. TRUE for RMSE, FALSE for Accuracy or F1.
   #                      Used to set right order of "compare" method. For "difference", if FALSE then Imp = Perf_original - Perf_permutation, else reverse order.
   #                      For "ratio", if FALSE then Imp = Perf_original / Perf_permutation, else reverse order.
-  # package_to_load: vector of strings. Include packages used to predict trained_model_prediction_function. Needed in future_lapply() todo: vedi se si risolve con loadedNamespaces()
   # verbose: 1 to display calculation time, 0 for silent.
   # n_workers: number of workers for parallel calculation. Try not to exceed 30-40.
   # seed: seed for reproducibility
@@ -3180,7 +3209,7 @@ evaluate_Perm_Feat_Imp = function(dataSample, trained_model_prediction_function 
   #                           data.frame with "model_name", "feature", "importance", "importance.std", "importance.5", "importance.95"
   #                           "importance", ".std", ".5" and ".95" are the average, st.dev, 5th and 95th percentile of feature importance over repetitions.
   #     - type: "SHAP". Used in plot_feat_imp().
-  # If obs_index_class != NULL additional nested list is returned for each class and all observations with Permutation_feat_imp
+  # If obs_index_subset != NULL additional nested list is returned for each class and all observations with Permutation_feat_imp
   
   # check input index and target variable
   if (is.null(obs_index_to_evaluate)){obs_index_to_evaluate = c(1:nrow(dataSample))}
@@ -3188,8 +3217,8 @@ evaluate_Perm_Feat_Imp = function(dataSample, trained_model_prediction_function 
   if (length(intersect(obs_index_to_evaluate, obs_index_to_shuffle)) != length(obs_index_to_evaluate)){
     stop('"obs_index_to_evaluate" must be a partition of "obs_index_to_shuffle"')
   }
-  if (!is.null(obs_index_class) & sum(obs_index_class$obs_index %>% sort() == obs_index_to_evaluate) != length(obs_index_to_evaluate)){
-    stop('"obs_index_class" must have same obs_index of "obs_index_to_evaluate"')
+  if (!is.null(obs_index_subset) & sum(obs_index_subset$obs_index %>% sort() == obs_index_to_evaluate) != length(obs_index_to_evaluate)){
+    stop('"obs_index_subset" must have same obs_index of "obs_index_to_evaluate"')
   }
   if (!"y" %in% colnames(dataSample)){
     stop('Target variable "y" not found')
@@ -3207,7 +3236,7 @@ evaluate_Perm_Feat_Imp = function(dataSample, trained_model_prediction_function 
     mutate(obs_index = 1:n()) %>%
     as.data.frame()
   
-  generate_data = function(k){    # k = feature
+  generate_permutations = function(k){    # k = feature
     
     f_name = feat_names[k]
     
@@ -3235,17 +3264,17 @@ evaluate_Perm_Feat_Imp = function(dataSample, trained_model_prediction_function 
   cat('Evaluating feature importance...', end = '\r')
   
   #### generate shuffled data for all features and repetitions
-  list_generated_data <- future_lapply(1:tot_features, generate_data, future.seed = NULL)
+  list_generated_perm <- future_lapply(1:tot_features, generate_permutations, future.seed = NULL)
   
   
   #### loop for all classes (if any) to create global_features_effect and SHAP_feat_imp
   
   class_set = data.frame(set = 'All observations', class = '', stringsAsFactors = F)
-  if (!is.null(obs_index_class)){
-    obs_index_class = obs_index_class %>% mutate(class = as.character(class))  # remove factors
+  if (!is.null(obs_index_subset)){
+    obs_index_subset = obs_index_subset %>% mutate(class = as.character(class))  # remove factors
     class_set = class_set %>%
-      bind_rows(data.frame(set = paste0("class ", obs_index_class$class %>% unique() %>% sort()),
-                           class = obs_index_class$class %>% unique() %>% sort(), stringsAsFactors = F))
+      bind_rows(data.frame(set = paste0("class ", obs_index_subset$class %>% unique() %>% sort()),
+                           class = obs_index_subset$class %>% unique() %>% sort(), stringsAsFactors = F))
   }
   
   list_output = list()
@@ -3254,7 +3283,7 @@ evaluate_Perm_Feat_Imp = function(dataSample, trained_model_prediction_function 
     if (class_set$set[class_i] == 'All observations'){
       class_index = obs_index_to_evaluate
     } else {
-      class_index = obs_index_class %>%
+      class_index = obs_index_subset %>%
         filter(class == class_set$class[class_i]) %>%
         pull(obs_index)
     }
@@ -3272,7 +3301,7 @@ evaluate_Perm_Feat_Imp = function(dataSample, trained_model_prediction_function 
           select(obs_index, feature, rep_num, all_of(c(true_val_name, prediction_name)))
       }
       
-      list_predicted_data = future_lapply(list_generated_data, future.packages = loadedNamespaces(), pred_function, future.seed = NULL)
+      list_predicted_data = future_lapply(list_generated_perm, future.packages = loadedNamespaces(), pred_function, future.seed = NULL)
       
       # evaluate performance for all features and repetitions
       perf_function = function(x){
@@ -3342,7 +3371,7 @@ plot_SHAP_summary = function(list_input, sina_method = "counts", sina_bins = 20,
                              SHAP_axis_lower_limit = 0, magnify_text = 1.4, color_range = c("red", "blue"),
                              save_path = '', plot_width = 12, plot_height = 12){
   
-  # Plot Shapley summary. Returns plots for all trained model and 'All observations' and 'class ...' if any.
+  # Plot Shapley summary. Returns plots for all trained model splitting results by 'All observations' and 'class ...' subsets if any.
   # list_input: output of evaluate_SHAP()
   # plot_model_set: if not NULL plot only provided trained model results.
   # plot_class_set: if not NULL and if 'All observations', 'class ...' available plot only provided class.
@@ -3643,7 +3672,7 @@ plot_feat_imp = function(list_input, normalize = F, color_pos = "blue", color_ne
 # evaluate feature importance
 evaluate_feature_importance = function(df_work, model_setting_block, method,
                                        performance_metric = "F1", n_repetitions = 5, compare = "difference",
-                                       sample.size = 100, n_batch = 5,
+                                       sample_size = 100, n_batch = 5,
                                        verbose = 1, n_workers = 5, seed = 66){
   
   # Evaluate feature importance with SHAP or Permutation Feature Importance. SHAP will use a subset of observations, i.e. y=0 are downsampled to match y=1.
@@ -3657,7 +3686,7 @@ evaluate_feature_importance = function(df_work, model_setting_block, method,
   # n_repetitions: how many times permutation importance must be evaluated with different seeds and then averaged.
   # compare: "difference" or "ratio" to compare permutation performance with original input performance. See perf_metric_minimize.
   #  --- Arguments for SHAP
-  # sample.size: sample size to generate shuffled instances (coalitions). The higher the more accurate the explanations become.
+  # sample_size: sample size to generate shuffled instances (coalitions). The higher the more accurate the explanations become.
   # n_batch: number of batch to split the evaluation. May speed up evaluation and save memory.
   #
   # verbose: 1 to display calculation time, 0 for silent.
@@ -3785,11 +3814,11 @@ evaluate_feature_importance = function(df_work, model_setting_block, method,
     
     obs_index_to_evaluate = NULL
     obs_index_to_shuffle = NULL
-    obs_index_class = NULL
+    obs_index_subset = NULL
     
     feat_imp = evaluate_Perm_Feat_Imp(dataSample = df_work %>% mutate(y = as.character(y)),
                                       trained_model_prediction_function = trained_model_prediction_function, n_repetitions = n_repetitions, compare = compare,
-                                      obs_index_to_evaluate = obs_index_to_evaluate, obs_index_to_shuffle = obs_index_to_shuffle, obs_index_class = obs_index_class,
+                                      obs_index_to_evaluate = obs_index_to_evaluate, obs_index_to_shuffle = obs_index_to_shuffle, obs_index_subset = obs_index_subset,
                                       perf_metric = perf_metric, perf_metric_add_pars = perf_metric_add_pars, true_val_name = true_val_name,
                                       prediction_name = prediction_name, perf_metric_minimize = perf_metric_minimize,
                                       verbose = verbose, n_workers = n_workers, seed = seed)
@@ -3806,11 +3835,12 @@ evaluate_feature_importance = function(df_work, model_setting_block, method,
     # df_work = df_work[1:100, ]   # todo: rimuovi
     
     obs_index_to_evaluate = NULL   # take all observations
-    obs_index_class = data.frame(obs_index = 1:nrow(df_work), class = df_work$y)   # evaluate SHAP for each class as well
+    obs_index_to_sample = NULL   # sample from all observations (df_work is already balanced)
+    obs_index_subset = data.frame(obs_index = 1:nrow(df_work), class = df_work$y)   # evaluate SHAP for each class as well
     
     feat_imp = evaluate_SHAP(dataSample = df_work %>% select(-y),
-                             sample.size = sample.size, trained_model_prediction_function = trained_model_prediction_function,
-                             obs_index_to_evaluate = obs_index_to_evaluate, obs_index_class = obs_index_class,
+                             sample_size = sample_size, trained_model_prediction_function = trained_model_prediction_function,
+                             obs_index_to_evaluate = obs_index_to_evaluate, obs_index_to_sample = obs_index_to_sample, obs_index_subset = obs_index_subset,
                              n_batch = n_batch, verbose = verbose, n_workers = n_workers, seed = seed)
   }
   
