@@ -3483,11 +3483,11 @@ plot_SHAP_summary = function(list_input, sina_method = "counts", sina_bins = 20,
               axis.ticks.y = element_blank(),
               axis.text.y = element_text(size = 13 * magnify_text, vjust = 0.5),   # features
               axis.text.x = element_text(size = 16),   # SHAP
-              axis.title = element_text(size = 20),
+              axis.title = element_text(size = 20* magnify_text),
               plot.title = element_text(size=30),
               plot.subtitle = element_text(size=25),
-              legend.title=element_text(size=18),
-              legend.text=element_text(size=15),
+              legend.title=element_text(size=18* magnify_text),
+              legend.text=element_text(size=15* magnify_text),
               legend.position="bottom") +
         guides(colour = guide_colourbar(title.position="left", title.vjust = 1))
       
@@ -3606,6 +3606,7 @@ plot_feat_imp = function(list_input, normalize = F, color_pos = "blue", color_ne
         
         if (normalize_work){
           data_plot_tt = data_plot_tt %>%
+            as.data.frame() %>%
             mutate(importance = round(importance / sum(abs(importance)) * 100, 1))
           max_span = max(abs(data_plot_tt$importance)) * 1.3
         }
@@ -3627,7 +3628,7 @@ plot_feat_imp = function(list_input, normalize = F, color_pos = "blue", color_ne
                 axis.ticks = element_blank(),
                 axis.text.y = element_text(size = 13 * magnify_text, vjust = 0.5),   # features
                 axis.text.x = element_blank(),   # SHAP
-                axis.title = element_text(size = 20),
+                axis.title = element_text(size = 20 * magnify_text),
                 plot.title = element_text(size=30),
                 plot.subtitle = element_text(size=25),
                 legend.title=element_text(size=18),

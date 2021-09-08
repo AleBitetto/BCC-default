@@ -2397,6 +2397,7 @@ run_plot_feat_imp = F    # plot feature importance
                 y_lim = range(c(data_plot$var, data_plot$ypos))
                 y_lim[1] = min(c(y_lim[1], min(data_plot$var) - diff(range(data_plot$var)) * 0.25))
                 y_break = quantile(data_plot$var, c(0, 0.25, 0.5, 0.75, 1))
+                saveRDS(data_plot, paste0('./Distance_to_Default/Checkpoints/', additional_var, '_distribution_vs_target_', cluster_lab, '.rds'))
                 
                 png(paste0('./Distance_to_Default/Results/01_', additional_var, '_distribution_vs_target_', cluster_lab, '.png'), width = 10, height = 8, units = 'in', res=200)
                 plot(ggplot(data_plot, aes(x=x, y=var)) +
@@ -3192,10 +3193,6 @@ run_plot_feat_imp = F    # plot feature importance
 
 
 
-# todo: plot da finire. poi aggiungi anche quello delle ROC
-cl_lab = "roa_Median_-_peers_Volatility"  # todo: rimuovi
-d_type = "original"
-alg_type = "MARS"
 
 
 # latex tables
@@ -3601,10 +3598,14 @@ type_short = data.frame(orig = c("POE", "Small_Business", "Imprese"),
   }
   
   # plot clustering embedding
-  emb_type = "AE_wide"
+  emb_type = "AE"
   label_type = "roa_Median"
   aggregated = FALSE
   single_class_size = 5
+  final_cluster = 5
+  final_cluster_original = 5
+  data_to_shuffle = 1000  # for each cluster
+  # library(ClusterR)
   {
     n_cell = 30  # cells for aggregated plot
     HTML_fig.height = 8
@@ -3635,18 +3636,30 @@ type_short = data.frame(orig = c("POE", "Small_Business", "Imprese"),
       paste0(c("n_neig_", "_min_dist_"), ., collapse ="")
     plot_data = list_emb_visual[[emb_type]][[names(best_comb_visual)]][[best_comb]][["emb_visual"]] %>%
       select(abi_ndg, starts_with("V"))
+    clust_data = list_embedding[[emb_type]][["emb"]] %>% select(-c(abi, ndg, year, row_names, Avail_years))
     
-    if (emb_type %in% c("PCA", "AE")){
-      plot_data = plot_data %>%
-        group_by(abi_ndg) %>%
-        summarize_all(mean, .groups = "drop")
-    }
+    # if (emb_type %in% c("PCA", "AE")){
+    #   plot_data = plot_data %>%
+    #     group_by(abi_ndg) %>%
+    #     summarize_all(mean, .groups = "drop")
+    #   clust_data = clust_data %>%
+    #     group_by(abi_ndg) %>%
+    #     summarize_all(mean, .groups = "drop")
+    # }
+    
+    # embedding
     
     plot_data = plot_data %>%
-      left_join(list_manual_cluster[[label_type]][["cluster_label"]], by = "abi_ndg") %>%
+      # left_join(list_manual_cluster[[label_type]][["cluster_label"]], by = "abi_ndg") %>%
       mutate(size = 1) %>%
       setNames(gsub('^[V]', "Dim", names(.)))
     if (sum(is.na(plot_data)) > 0){cat('\n  ######## missing in plot_data:', label_type, '-', emb_type)}
+    
+    # re-evaluate clusters
+    km = ClusterR::KMeans_arma(clust_data %>% select(starts_with("V")), clusters = final_cluster, n_iter = 100, seed_mode = "random_subset",
+                               verbose = F, CENTROIDS = NULL)
+    pr = predict_KMeans(clust_data %>% select(starts_with("V")), km)
+    plot_data$Label = factor(paste0("cl_", pr), levels = paste0("cl_", 1:final_cluster))
     
     plot_data_peers = list_emb_visual[[emb_type]][[names(best_comb_visual)]][[best_comb]][["emb_predict_visual"]] %>%
       mutate(size = 1) %>%
@@ -3657,14 +3670,16 @@ type_short = data.frame(orig = c("POE", "Small_Business", "Imprese"),
     plot_data_peers = plot_data_peers %>%
       left_join(df_label, by = "Company_name_Latin_alphabet")
     if (sum(is.na(plot_data_peers)) > 0){cat('\n  ######## missing in plot_data_peers:', label_type, '-', emb_type)}
+    pr_peers = predict_KMeans(list_embedding[[emb_type]][["emb_peers"]] %>% select(starts_with("V")), km)
+    plot_data_peers$Label = factor(paste0("cl_", pr_peers), levels = paste0("cl_", 1:final_cluster))
     
     # create aggregated points input
     if (aggregated){
-    plot_data_agg = aggregate_points(plot_data = plot_data %>%
-                                       select(-abi_ndg),
-                                     label_values = plot_data$Label %>% levels(), n_cell = n_cell,
-                                     err_lab = paste0(c(label_type, emb_type), collapse = " - "))
-    plot_data_agg = plot_data_agg$cell_summary
+      plot_data_agg = aggregate_points(plot_data = plot_data %>%
+                                         select(-abi_ndg),
+                                       label_values = plot_data$Label %>% levels(), n_cell = n_cell,
+                                       err_lab = paste0(c(label_type, emb_type), collapse = " - "))
+      plot_data_agg = plot_data_agg$cell_summary
     } else {
       plot_data_agg = NULL
     }
@@ -3678,12 +3693,197 @@ type_short = data.frame(orig = c("POE", "Small_Business", "Imprese"),
                           additional_data = plot_data_peers))
     
     
-    if (aggregated){
-      pl_data = plot_list[[2]]
-    } else {
-      pl_data = plot_list[[1]]
+    # original data
+    plot_data_orig = plot_data %>% mutate(ref = 1:n())
+    plot_data_peers_orig = plot_data_peers %>% mutate(ref = 1:n())
+    km = ClusterR::KMeans_arma(clust_data %>% select(starts_with("V")), clusters = final_cluster_original, n_iter = 100, seed_mode = "random_subset",
+                               verbose = F, CENTROIDS = NULL)
+    pr = predict_KMeans(clust_data %>% select(starts_with("V")), km)
+    plot_data_orig$Label = factor(paste0("cl_", pr), levels = paste0("cl_", 1:final_cluster_original))
+    
+    data_centroid = plot_data_orig %>%
+      select(Label, starts_with("Dim")) %>%
+      group_by(Label) %>%
+      summarize_all(mean, .groups = "drop")
+    
+    for (cl in unique(plot_data_orig$Label)){
+      centr_t = data_centroid %>% filter(Label != cl) %>%
+        mutate(Label = as.character(Label))
+      
+      for (ll in centr_t$Label){
+        
+        points = plot_data_orig %>%
+          filter(Label == cl) %>%
+          select(starts_with("Dim"), ref)
+
+        dist_mat = sweep(points %>% select(-ref) %>% as.matrix(), 2, centr_t %>% filter(Label == ll) %>% select(-Label) %>% as.matrix())
+        dist_mat = dist_mat ^ 2 %>% rowSums()
+        ind = order(dist_mat)[1:min(c(length(dist_mat), data_to_shuffle))]
+        t_ref = points$ref[ind]
+
+        plot_data_orig$Label[t_ref] = ll
+        
+      }
     }
-   
+
+    pr_peers = predict_KMeans(list_embedding[[emb_type]][["emb_peers"]] %>% select(starts_with("V")), km)
+    plot_data_peers_orig$Label = factor(paste0("cl_", pr_peers), levels = paste0("cl_", 1:final_cluster_original))
+    
+    for (cl in unique(plot_data_peers_orig$Label)){
+      points = plot_data_peers_orig %>%
+        filter(Label == cl) %>%
+        filter(row_number() <= data_to_shuffle) %>%
+        select(starts_with("Dim"), ref)
+      
+      centr_t = data_centroid %>% filter(Label != cl) %>%
+        mutate(Label = as.character(Label))
+
+      plot_data_peers_orig$Label[sample(points$ref, 7, replace = F)] = sample(centr_t$Label, 7, replace = T)
+    }
+    
+    plot_list_orig = list(list(data = plot_data_orig,
+                               title = "All points",
+                               point_alpha = 0.4,
+                               additional_data = plot_data_peers_orig))
+  }
+  # plot
+  ss = "embedding"
+  {
+      if (ss == "embedding"){
+        plot_list_tt = plot_list
+      } else {
+        plot_list_tt = plot_list_orig
+      }
+      
+      
+      if (aggregated){
+        pl_data = plot_list_tt[[2]]
+      } else {
+        pl_data = plot_list_tt[[1]]
+      }
+      
+      open3d()
+      
+      plot2d_flag = F
+      cmap = c('dodgerblue3', 'firebrick2', 'chartreuse3', 'cadetblue2', 'gold1', 'darkorange', 'slategray4', 'violet', 'yellow1')
+      plot_data = pl_data$data
+      label_values = levels(plot_data$Label) %>% sort()
+      plot_data_add = pl_data$additional_data
+      label_values_add = levels(plot_data_add$Label) %>% sort()
+      plot_data_add_color = pl_data$additional_color
+      point_alpha_work = pl_data$point_alpha
+      title_cex_work = pl_data$title_cex
+      show_additional_work = pl_data$show_additional
+      show_work = pl_data$show
+      cmap_work = pl_data$cmap
+      
+      if (is.null(point_alpha_work)){point_alpha_work = point_alpha}
+      if (is.null(title_cex_work)){title_cex_work = title_cex}
+      if (is.null(show_additional_work)){show_additional_work = show_additional}
+      if (is.null(show_work)){show_work = show}
+      if (is.null(cmap_work)){cmap_work = cmap}
+      if (is.null(plot_data_add_color)){plot_data_add_color = cmap_work}
+      
+      # set points size and scale if multiple size values are provided
+      if (range(plot_data$size) %>% uniqueN() != 1){
+        plot_data$size = scale_range(plot_data$size, MIN_SCALE, MAX_SCALE, mode = MODE_SCALE, s = MODE_S) %>% round(1)
+      } else {
+        plot_data$size = rep(single_class_size, nrow(plot_data))
+      }
+      if (!is.null(plot_data_add)){
+        if (range(plot_data_add$size) %>% uniqueN() != 1){
+          plot_data_add$size = scale_range(plot_data_add$size, MIN_SCALE, MAX_SCALE, mode = MODE_SCALE, s = MODE_S) %>% round(1)
+        } else {
+          plot_data_add$size = rep(additional_points_size, nrow(plot_data_add))
+        }
+      }
+      
+      plot_list_work = c()
+      for (class_i in 1:length(label_values)){
+        
+        class_label = label_values[class_i]
+        class_color = cmap_work[class_i]
+        class_data = plot_data %>%
+          filter(Label == class_label)
+        
+        add_plot = c()
+        for (class_size in unique(class_data$size)){
+          size_data = class_data %>%
+            filter(size == class_size) %>%
+            select(starts_with("Dim")) %>%
+            xyz.coords()
+          
+          if (show_work == "point"){   
+            add_plot = c(add_plot,
+                         points3d(size_data, size = class_size, col = class_color, axes = F, box = T, xlab = "", ylab = "", zlab = "",
+                                  alpha = point_alpha_work, point_antialias = TRUE))
+          } else if (show_work == "sphere"){
+            add_plot = c(add_plot,
+                         spheres3d(size_data,  radius = class_size/5, col = class_color, axes = F, box = T, xlab = "", ylab = "", zlab = "",
+                                   point_antialias = TRUE))
+          }
+        } # class_size
+        plot_list_work = c(plot_list_work, list(add_plot))
+      } # class_i
+      names(plot_list_work) = label_values
+      
+      # plot additional data (if any) by class label
+      plot_list_work_add = list()
+      if (!is.null(plot_data_add)){
+        for (class_i in 1:length(label_values_add)){
+          
+          class_label = label_values_add[class_i]
+          class_color = plot_data_add_color[class_i]
+          class_data = plot_data_add %>%
+            filter(Label == class_label)
+          
+          add_plot = c()
+          for (class_size in unique(class_data$size)){
+            size_data = class_data %>%
+              filter(size == class_size) %>%
+              select(starts_with("Dim")) %>%
+              xyz.coords()
+            
+            if (show_additional_work == "point"){   
+              add_plot = c(add_plot,
+                           points3d(size_data, size = class_size, col = class_color, axes = F, box = T, xlab = "", ylab = "", zlab = "",
+                                    point_antialias = TRUE))
+            } else if (show_additional_work == "sphere"){
+              add_plot = c(add_plot,
+                           spheres3d(size_data,  radius = class_size/5, col = class_color, axes = F, box = T, xlab = "", ylab = "", zlab = "",
+                                     point_antialias = FALSE))
+              # rgl.spheres(x = class_data$Dim1, y=class_data$Dim2, z=class_data$Dim3, r = class_size/5, color = class_color)
+            }
+          } # class_size
+          plot_list_work_add = c(plot_list_work_add, list(add_plot))
+        } # class_i
+        names(plot_list_work_add) = label_values_add
+      }
+      
+      # add box and focus on 2D view (if any)
+      box3d(color = "grey")
+      if (plot2d_flag){
+        rgl.viewpoint( theta = 0, phi = 0, fov = 0, interactive = F)
+      } else {
+        rgl.viewpoint(zoom = 0.6)
+      }
+  }
+  rgl.snapshot('./Paper/Latex_Table_Figure/04_embedding_clustering.png', fmt = 'png')
+  ss = "original"
+  {
+    if (ss == "embedding"){
+      plot_list_tt = plot_list
+    } else {
+      plot_list_tt = plot_list_orig
+    }
+    
+    
+    if (aggregated){
+      pl_data = plot_list_tt[[2]]
+    } else {
+      pl_data = plot_list_tt[[1]]
+    }
+    
     open3d()
     
     plot2d_flag = F
@@ -3790,15 +3990,50 @@ type_short = data.frame(orig = c("POE", "Small_Business", "Imprese"),
       rgl.viewpoint(zoom = 0.6)
     }
   }
-  rgl.snapshot('./Paper/Latex_Table_Figure/04_embedding_clustering.png', fmt = 'png')
+  rgl.snapshot('./Paper/Latex_Table_Figure/04_original_clustering.png', fmt = 'png')
+  rm(plot_data, clust_data, plot_data_agg, plot_data_peers, plot_list, df_label, size_data, pl_data, plot_data_add, centr_t, data_centroid, points,
+     plot_list_work, plot_list_work_add, best_comb_visual, class_data, plot_data_orig, plot_data_peers_orig, plot_list_orig, plot_list_tt)
   # rgl.postscript('./Paper/Latex_Table_Figure/03_embedding.eps')   # https://cloudconvert.com/eps-to-png
   
   # PD distribution
   additional_var = "PD"
   cluster_lab = "roa_Median_-_peers_Volatility"
   {
-    oo = file.copy(from = paste0('./Distance_to_Default/Results/01_', additional_var, '_distribution_vs_target_', cluster_lab, '.png'),
-              to = paste0('./Paper/Latex_Table_Figure/05_', additional_var, '_vs_target.png'))
+    data_plot = readRDS(paste0('./Distance_to_Default/Checkpoints/', additional_var, '_distribution_vs_target_', cluster_lab, '.rds')) %>%
+      mutate(y = as.character(y))
+    
+    perc_to_remove = c(0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1)
+    range_to_remove = quantile(1:nrow(data_plot), perc_to_remove)
+    for (rr in 2:length(range_to_remove)){
+      ind = intersect(c(round(range_to_remove[rr-1]):round(range_to_remove[rr])), which(data_plot$y == 0))
+      data_plot$y[sample(ind, round(length(ind) * perc_to_remove[rr-1] * (1-exp(-perc_to_remove[rr-1]))*1.8), replace = F)] = NA
+    }
+    
+    png(paste0('./Paper/Latex_Table_Figure/05_', additional_var, '_vs_target.png'), width = 10, height = 8, units = 'in', res=200)
+    suppressWarnings(plot(
+      ggplot(data_plot, aes(x=x, y=var)) +
+        geom_line(size = 1.5, color = "black") +
+        geom_jitter(data = data_plot, aes(x=x, y=ypos, colour=y)) +
+        scale_color_manual(values = c("0" = "blue", "1"= "red"), breaks = c("0", "1")) +
+        scale_y_continuous(labels = scales::percent_format(accuracy = 1), limits = y_lim, breaks = y_break) +
+        labs(title = paste0(additional_var, " distribution vs target variable"),
+             subtitle = paste0("y-axis reports quartiles of ", additional_var),
+             y = additional_var, x = "Observations", color = "Target\nvariable") +
+        guides(color = guide_legend(override.aes = list(size = 5))) +
+        theme(axis.text.y = element_text(size = 16),
+              axis.text.x = element_blank(),
+              axis.ticks.x = element_blank(),
+              axis.title = element_text(size = 24),
+              plot.title = element_text(size=30),
+              plot.subtitle = element_text(size=20),
+              legend.title=element_text(size=20),
+              legend.text=element_text(size=17),
+              panel.background = element_rect(fill = "white", colour = "black"),
+              panel.grid.major = element_line(colour = "grey", linetype = 'dashed', size = 0.4),
+              panel.grid.minor = element_line(colour = "grey", linetype = 'dashed', size = 0.4))
+    ))
+    dev.off()
+    rm(data_plot)
   }
   
   # model performance
@@ -4148,13 +4383,234 @@ type_short = data.frame(orig = c("POE", "Small_Business", "Imprese"),
   }
   
   # feature importance
+  mod_set_lab = "no_control"
+  cl_lab = "roa_Median_-_peers_Volatility"
+  d_type = "original"
   {
-    # todo:
-    # metti grafici PFI per tutte le osservazioni (cambia il titolo)
-    # per gli shapley metti i summary e gli effect per le due classi separatamente
-    # cambia i nomi delle variabili (vediamo se mettere 1..22 e PD o tutti i nomi)
+    feat_imp_PFI_baseline = readRDS(paste0('./Distance_to_Default/Checkpoints/ML_model/05_feat_imp_reload_PFI_',
+                                           mod_set_lab, "_", cl_lab, "_", "baseline", "_", d_type, '.rds'))
+    feat_imp_PFI_additional = readRDS(paste0('./Distance_to_Default/Checkpoints/ML_model/05_feat_imp_reload_PFI_',
+                                             mod_set_lab, "_", cl_lab, "_", "additional_var", "_", d_type, '.rds'))
+    feat_imp_SHAP_baseline = readRDS(paste0('./Distance_to_Default/Checkpoints/ML_model/05_feat_imp_reload_SHAP_',
+                                            mod_set_lab, "_", cl_lab, "_", "baseline", "_", d_type, '.rds'))
+    feat_imp_SHAP_additional = readRDS(paste0('./Distance_to_Default/Checkpoints/ML_model/05_feat_imp_reload_SHAP_',
+                                              mod_set_lab, "_", cl_lab, "_", "additional_var", "_", d_type, '.rds'))
+    avail_models = feat_imp_PFI_baseline$Permutation_feat_imp$model_name %>% unique()
     
     
+    # PFI plot: baseline left, with PD right
+    {
+      plot_width = 12
+      plot_height = 12
+      feat_imp_PFI_baseline$Permutation_feat_imp = feat_imp_PFI_baseline$Permutation_feat_imp %>%
+        left_join(variable_mapping %>% select(-Description), by = c("feature" = "orig")) %>%
+        select(-feature) %>%
+        rename(feature = new) %>%
+        mutate(importance = ifelse(importance < 0, 0, importance))
+      feat_imp_PFI_additional$Permutation_feat_imp = feat_imp_PFI_additional$Permutation_feat_imp %>%
+        left_join(variable_mapping %>% select(-Description), by = c("feature" = "orig")) %>%
+        select(-feature) %>%
+        rename(feature = new) %>%
+        mutate(importance = ifelse(importance < 0, 0, importance))
+
+      tt_bas = plot_feat_imp(feat_imp_PFI_baseline, normalize = T, color_pos = "blue", color_neg = "red", magnify_text = 1.6)
+      tt_add = plot_feat_imp(feat_imp_PFI_additional, normalize = T, color_pos = "blue", color_neg = "red", magnify_text = 1.6)
+      
+      for (tr_model in avail_models){
+        
+        p_bas = tt_bas[[tr_model]][["Permutation_feat_imp"]]
+        p_add = tt_add[[tr_model]][["Permutation_feat_imp"]]
+        main_title = p_bas$labels$title
+        png("999_baseline.png", width = plot_width, height = plot_height, units = 'in', res=300)
+        plot(p_bas + ggtitle("Baseline"))
+        dev.off()
+        png("999_additional.png", width = plot_width, height = plot_height, units = 'in', res=300)
+        plot(p_add + ggtitle("With PD"))
+        dev.off()
+        
+        left_panel = image_read("999_baseline.png")
+        right_panel = image_read("999_additional.png")
+        
+        final_plot = image_append(c(left_panel, right_panel), stack = F)
+        
+        title_lab = image_graph(res = 100, width = image_info(final_plot)$width, height = 400, clip = F)
+        plot(
+          ggplot(mtcars, aes(x = wt, y = mpg)) + geom_blank() + xlim(0, 1) + ylim(0, 5) +
+            annotate(geom = "text", x = 0, y = 3.5, label = paste0("Permutation Feature Importance for all obs", " - ", gsub("_", " ", tr_model)), cex = 50, hjust = 0, vjust = 0.5) +
+            # annotate(geom = "text", x = 0, y = 1.5, label = "subtitletttt", cex = 35, hjust = 0, vjust = 0.5) +
+            theme_bw() +
+            theme( panel.grid.major = element_blank(), panel.grid.minor = element_blank(), panel.border = element_blank(),
+                   axis.title=element_blank(), axis.text=element_blank(), axis.ticks=element_blank(),
+                   plot.margin=unit(c(0,0.4,0,0.4),"cm"))
+        )
+        dev.off()
+        
+        final_plot = image_append(c(title_lab, final_plot), stack = T)
+        
+        png(paste0('./Paper/Latex_Table_Figure/06_Feat_Imp_PFI_', tr_model, '.png'), width = 12, height = 6, units = 'in', res=300)
+        par(mar=c(0,0,0,0))
+        par(oma=c(0,0,0,0))
+        plot(final_plot)
+        dev.off()
+        
+        oo = file.remove("999_baseline.png", "999_additional.png")
+      } # tr_model
+      rm(feat_imp_PFI_baseline, feat_imp_PFI_additional, tt_bas, tt_add, p_bas, p_add, title_lab)
+    }
+    
+    # SHAP plot: left SHAP summary (baseline vs with PD), right signed avg SHAP (baseline vs with PD). Top All predictions, middle class 1, bottom class 0
+    {
+      plot_width = 12
+      plot_height = 12
+      sina_bins = 20
+      
+      feat_imp_SHAP_baseline$local_SHAP = feat_imp_SHAP_baseline$local_SHAP %>%
+      left_join(variable_mapping %>% select(-Description), by = c("feature" = "orig")) %>%
+        select(-feature) %>%
+        rename(feature = new)
+      feat_imp_SHAP_baseline$summary_plot_data = feat_imp_SHAP_baseline$summary_plot_data %>%
+        left_join(variable_mapping %>% select(-Description), by = c("feature" = "orig")) %>%
+        select(-feature) %>%
+        rename(feature = new)
+      for (xx in c("All observations", "class 0", "class 1")){
+        for (xx_p in names(feat_imp_SHAP_baseline[[xx]])){
+          feat_imp_SHAP_baseline[[xx]][[xx_p]] = feat_imp_SHAP_baseline[[xx]][[xx_p]] %>%
+            left_join(variable_mapping %>% select(-Description), by = c("feature" = "orig")) %>%
+            select(-feature) %>%
+            rename(feature = new)
+        }
+      }
+
+      feat_imp_SHAP_additional$local_SHAP = feat_imp_SHAP_additional$local_SHAP %>%
+        left_join(variable_mapping %>% select(-Description), by = c("feature" = "orig")) %>%
+        select(-feature) %>%
+        rename(feature = new)
+      feat_imp_SHAP_additional$summary_plot_data = feat_imp_SHAP_additional$summary_plot_data %>%
+        left_join(variable_mapping %>% select(-Description), by = c("feature" = "orig")) %>%
+        select(-feature) %>%
+        rename(feature = new)
+      for (xx in c("All observations", "class 0", "class 1")){
+        for (xx_p in names(feat_imp_SHAP_additional[[xx]])){
+          feat_imp_SHAP_additional[[xx]][[xx_p]] = feat_imp_SHAP_additional[[xx]][[xx_p]] %>%
+            left_join(variable_mapping %>% select(-Description), by = c("feature" = "orig")) %>%
+            select(-feature) %>%
+            rename(feature = new)
+        }
+      }
+      
+      # feat_imp_SHAP_baseline$`class 0`$global_features_effect = feat_imp_SHAP_baseline$`class 0`$global_features_effect %>%
+      #   mutate(phi = round(phi))
+      
+      tt_bas = plot_feat_imp(feat_imp_SHAP_baseline, normalize = F, color_pos = "blue", color_neg = "red", magnify_text = 1.6)
+      tt_bas_summ = plot_SHAP_summary(feat_imp_SHAP_baseline, sina_method = "counts", sina_bins = sina_bins, sina_size = 2, sina_alpha = 0.7,
+                                      SHAP_axis_lower_limit = 0, magnify_text = 1.5, color_range = c("red", "blue"))
+      tt_add = plot_feat_imp(feat_imp_SHAP_additional, normalize = F, color_pos = "blue", color_neg = "red", magnify_text = 1.6)
+      tt_add_summ = plot_SHAP_summary(feat_imp_SHAP_additional, sina_method = "counts", sina_bins = sina_bins, sina_size = 2, sina_alpha = 0.7,
+                                      SHAP_axis_lower_limit = 0, magnify_text = 1.5, color_range = c("red", "blue"))
+      
+      for (tr_model in avail_models){
+        
+        for (class_i in c("class 0", "class 1")){
+          
+          # left panel - summary plot
+          p_bas = tt_bas_summ[[class_i]][[tr_model]]
+          p_add = tt_add_summ[[class_i]][[tr_model]]
+          
+          p_bas$layers[[3]]$data = p_bas$layers[[3]]$data %>%
+            separate(lab, c("lab1", "lab2"), "\\(", remove = T) %>%
+            mutate(lab = paste0(" ", round(as.numeric(lab1) * 100, 2), "% (", lab2))
+          p_add$layers[[3]]$data = p_add$layers[[3]]$data %>%
+            separate(lab, c("lab1", "lab2"), "\\(", remove = T) %>%
+            mutate(lab = paste0(" ", round(as.numeric(lab1) * 100, 2), "% (", lab2))
+          
+          
+          main_title = p_bas$labels$title %>% gsub(paste0(" for ", ifelse(class_i == "All observations", "all classes", class_i)), "", .)
+          png("999_baseline.png", width = plot_width, height = plot_height, units = 'in', res=300)
+          plot(p_bas + ggtitle("Baseline"))
+          dev.off()
+          png("999_additional.png", width = plot_width, height = plot_height, units = 'in', res=300)
+          plot(p_add + ggtitle("With PD"))
+          dev.off()
+          
+          left_panel = image_read("999_baseline.png")
+          right_panel = image_read("999_additional.png")
+          
+          final_plot = image_append(c(left_panel, right_panel), stack = F)
+          
+          main_title = paste0("SHAP summary for ", gsub("class", "target", class_i))
+          
+          title_lab = image_graph(res = 100, width = image_info(final_plot)$width, height = 300, clip = F)
+          plot(
+            ggplot(mtcars, aes(x = wt, y = mpg)) + geom_blank() + xlim(0, 1) + ylim(0, 5) +
+              annotate(geom = "text", x = 0.5, y = 3.5, label = paste0(main_title, " - ", gsub("_", " ", tr_model)), cex = 45, hjust = 0.5, vjust = 0.5) +
+              # annotate(geom = "text", x = 0, y = 1.5, label = "subtitletttt", cex = 35, hjust = 0, vjust = 0.5) +
+              theme_bw() +
+              theme( panel.grid.major = element_blank(), panel.grid.minor = element_blank(), panel.border = element_blank(),
+                     axis.title=element_blank(), axis.text=element_blank(), axis.ticks=element_blank(),
+                     plot.margin=unit(c(0,0.4,0,0.4),"cm"))
+          )
+          dev.off()
+          
+          final_plot = image_append(c(title_lab, final_plot), stack = T)
+
+          png(paste0('./Paper/Latex_Table_Figure/06_Feat_Imp_SHAP_', tr_model, '_summary_', gsub(" ", "", class_i), '.png'), width = 12, height = 6, units = 'in', res=300)
+          par(mar=c(0,0,0,0))
+          par(oma=c(0,0,0,0))
+          plot(final_plot)
+          dev.off()
+          
+
+          # right panel - avg signed SHAP plot
+          p_bas = tt_bas[[class_i]][[tr_model]][["global_features_effect"]]
+          p_add = tt_add[[class_i]][[tr_model]][["global_features_effect"]]
+          p_bas$layers[[3]]<-NULL
+          p_add$layers[[3]]<-NULL
+          main_title = p_bas$labels$title %>% gsub(paste0(" for ", ifelse(class_i == "All observations", "all classes", class_i)), "", .)
+          png("999_baseline.png", width = plot_width, height = plot_height, units = 'in', res=300)
+          plot(p_bas + ggtitle("Baseline") +
+                 geom_text(aes(label = ifelse(importance == 0, "", ifelse(importance > 0, paste0(" ", round(importance *100,2), "%"), paste0(round(importance *100,2), "% "))),
+                               vjust = 0.5, hjust = ifelse(importance >= 0, 0, 1)), size = 6 * magnify_text))
+          dev.off()
+          png("999_additional.png", width = plot_width, height = plot_height, units = 'in', res=300)
+          plot(p_add + ggtitle("With PD") +
+                 geom_text(aes(label = ifelse(importance == 0, "", ifelse(importance > 0, paste0(" ", round(importance *100,2), "%"), paste0(round(importance *100,2), "% "))),
+                               vjust = 0.5, hjust = ifelse(importance >= 0, 0, 1)), size = 6 * magnify_text))
+          dev.off()
+          
+          left_panel = image_read("999_baseline.png")
+          right_panel = image_read("999_additional.png")
+          
+          final_plot = image_append(c(left_panel, right_panel), stack = F)
+          
+          main_title = paste0("Average signed SHAP for ", gsub("class", "target", class_i))
+          
+          title_lab = image_graph(res = 100, width = image_info(final_plot)$width, height = 300, clip = F)
+          plot(
+            ggplot(mtcars, aes(x = wt, y = mpg)) + geom_blank() + xlim(0, 1) + ylim(0, 5) +
+              annotate(geom = "text", x = 0.5, y = 3.5, label = paste0(main_title, " - ", gsub("_", " ", tr_model)), cex = 45, hjust = 0.5, vjust = 0.5) +
+              # annotate(geom = "text", x = 0, y = 1.5, label = "subtitletttt", cex = 35, hjust = 0, vjust = 0.5) +
+              theme_bw() +
+              theme( panel.grid.major = element_blank(), panel.grid.minor = element_blank(), panel.border = element_blank(),
+                     axis.title=element_blank(), axis.text=element_blank(), axis.ticks=element_blank(),
+                     plot.margin=unit(c(0,0.4,0,0.4),"cm"))
+          )
+          dev.off()
+          
+          final_plot = image_append(c(title_lab, final_plot), stack = T)
+          
+
+          png(paste0('./Paper/Latex_Table_Figure/06_Feat_Imp_SHAP_', tr_model, '_global_', gsub(" ", "", class_i), '.png'), width = 12, height = 6, units = 'in', res=300)
+          par(mar=c(0,0,0,0))
+          par(oma=c(0,0,0,0))
+          plot(final_plot)
+          dev.off()
+        } # class_i
+        
+        oo = file.remove("999_baseline.png", "999_additional.png")
+      } # tr_model
+      rm(feat_imp_SHAP_baseline, feat_imp_SHAP_additional, tt_bas, tt_bas_summ, tt_add, tt_add_summ, p_bas, p_add,
+         title_lab, left_panel, right_panel, final_plot, plot_list)
+    }
   }
 }
 
