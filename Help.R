@@ -3368,7 +3368,7 @@ evaluate_Perm_Feat_Imp = function(dataSample, trained_model_prediction_function 
 
 # Plot Shapley summary
 plot_SHAP_summary = function(list_input, sina_method = "counts", sina_bins = 20, sina_size = 2, sina_alpha = 0.7, plot_model_set = NULL, plot_class_set = NULL,
-                             SHAP_axis_lower_limit = 0, magnify_text = 1.4, color_range = c("red", "blue"),
+                             SHAP_axis_lower_limit = 0, magnify_text = 1.4, color_range = c("red", "blue"), bold_features = c(), bold_color = "black",
                              save_path = '', plot_width = 12, plot_height = 12){
   
   # Plot Shapley summary. Returns plots for all trained model splitting results by 'All observations' and 'class ...' subsets if any.
@@ -3379,6 +3379,8 @@ plot_SHAP_summary = function(list_input, sina_method = "counts", sina_bins = 20,
   # SHAP_axis_lower_limit: value to add to minimum value of x-axis (SHAP). Also moves SHAP's magnitude column
   # magnify_text: magnify all text font in plot
   # color_range: legend color of Low and High value of features
+  # bold_features: list of features to be displayed in bold font
+  # bold_color: if bold_features != c() color of bold features
   # save_path: if not '', save all plots. Only modelName_Class.png will be added. "_" at the end of save_path is automatically added if not provided.
   # plot_width, plot_height: width and height of saved plot
   
@@ -3425,6 +3427,7 @@ plot_SHAP_summary = function(list_input, sina_method = "counts", sina_bins = 20,
       feature_order = data_plot_tt %>%
         select(feature, abs.phi) %>%
         unique() %>%
+        mutate(colr = ifelse(feature %in% bold_features, yes = bold_color, no = "black")) %>%
         mutate(abs.phi.perc = abs.phi / sum(abs.phi),
                lab = paste0(' ', round(abs.phi, 3), ' (', round(abs.phi.perc * 100, 2), '%)')) %>%
         arrange(desc(abs.phi)) %>%
@@ -3449,47 +3452,55 @@ plot_SHAP_summary = function(list_input, sina_method = "counts", sina_bins = 20,
       data_plot_tt = data_plot_tt %>%  # add fake points to add space between features
         bind_rows(data.frame(feature = paste0("xxx_", min(feature_order$feature_ref):uniqueN(data_plot_tt$feature))) %>%
                     mutate(phi = min(data_plot_tt$phi)))
-      out_plot = ggplot(data_plot_tt %>%
-                          group_by(feature) %>%
-                          # filter(row_number() <= 200) %>%   # todo: remove
-                          mutate(feature = factor(feature, levels = rev(feature_order$feature))),
-                        aes(x = feature, y = phi, color = value_color)) +
-        # scale_y_continuous(expand = c(0, 0), limits = c(SHAP_position_work * SHAP_axis_lower_limit, y_lim[2])) +    # SHAP    expand = (expansion between ticks, expansion outside limits)
-        scale_y_continuous(expand = c(0, 0), limits = SHAP_limits, breaks = SHAP_breaks, labels = SHAP_labels) +    # SHAP    expand = (expansion between ticks, expansion outside limits)
-        scale_x_discrete(expand=c(0.02, 0), labels = feature_order %>%  # 0.11
-                           mutate(feature = ifelse(grepl("xxx_", feature), "", feature)) %>%
-                           pull(feature) %>%
-                           rev(), limits = feature_order %>%  # 0.11
-                           pull(feature) %>%
-                           rev(),
-                         breaks = feature_order %>%  # 0.11
-                           pull(feature) %>%
-                           rev()) +     # features
-        labs(title = paste0("SHAP summary plot for ",
-                            ifelse(class_i %in% c('No class', 'All observations'), 'all classes', class_i)),
-             x = "Feature", y = "SHAP value (impact on model predictions)", color = "Feature value") +
-        coord_flip() + 
-        geom_sina(size = sina_size, bins = sina_bins, method = sina_method, alpha = sina_alpha) +
-        geom_hline(yintercept = 0) +
-        geom_text(data = feature_order %>%
-                    filter(!grepl("xxx_", feature)), aes(x = feature, y=-Inf, label = lab),
-                  size = 4 * magnify_text, hjust = 0, color = "black") +
-        annotate("text", x = feature_order$feature[1], y = -Inf, label = " SHAP abs", size = 5 * magnify_text, hjust = 0, fontface = "bold") +
-        annotate("text", x = feature_order$feature[3], y = -Inf, label = " magnitude", size = 5 * magnify_text, hjust = 0, fontface = "bold") +
-        scale_color_gradient(low=color_range[1], high=color_range[2], 
-                             breaks=c(0,1), labels=c("Low","High"), na.value="white") +
-        theme_bw() +
-        theme(axis.line.y = element_blank(),
-              axis.ticks.y = element_blank(),
-              axis.text.y = element_text(size = 13 * magnify_text, vjust = 0.5),   # features
-              axis.text.x = element_text(size = 16),   # SHAP
-              axis.title = element_text(size = 20* magnify_text),
-              plot.title = element_text(size=30),
-              plot.subtitle = element_text(size=25),
-              legend.title=element_text(size=18* magnify_text),
-              legend.text=element_text(size=15* magnify_text),
-              legend.position="bottom") +
-        guides(colour = guide_colourbar(title.position="left", title.vjust = 1))
+      bold_levels = feature_order %>%  # 0.11
+        mutate(feature = ifelse(grepl("xxx_", feature), "", feature)) %>%
+        mutate(face = ifelse(feature %in% bold_features, yes = "bold", no = "plain"))
+      out_plot = suppressWarnings(
+        ggplot(data_plot_tt %>%
+                 group_by(feature) %>%
+                 # filter(row_number() <= 200) %>%   # todo: remove
+                 mutate(feature = factor(feature, levels = rev(feature_order$feature))),
+               aes(x = feature, y = phi, color = value_color)) +
+          # scale_y_continuous(expand = c(0, 0), limits = c(SHAP_position_work * SHAP_axis_lower_limit, y_lim[2])) +    # SHAP    expand = (expansion between ticks, expansion outside limits)
+          scale_y_continuous(expand = c(0, 0), limits = SHAP_limits, breaks = SHAP_breaks, labels = SHAP_labels) +    # SHAP    expand = (expansion between ticks, expansion outside limits)
+          scale_x_discrete(expand=c(0.02, 0), labels = feature_order %>%  # 0.11
+                             mutate(feature = ifelse(grepl("xxx_", feature), "", feature)) %>%
+                             pull(feature) %>%
+                             rev(), limits = feature_order %>%  # 0.11
+                             pull(feature) %>%
+                             rev(),
+                           breaks = feature_order %>%  # 0.11
+                             pull(feature) %>%
+                             rev()) +     # features
+          labs(title = paste0("SHAP summary plot for ",
+                              ifelse(class_i %in% c('No class', 'All observations'), 'all classes', class_i)),
+               x = "Feature", y = "SHAP value (impact on model predictions)", color = "Feature value") +
+          coord_flip() + 
+          geom_sina(size = sina_size, bins = sina_bins, method = sina_method, alpha = sina_alpha) +
+          geom_hline(yintercept = 0) +
+          geom_text(data = feature_order %>%
+                      filter(!grepl("xxx_", feature)), aes(x = feature, y=-Inf, label = lab,
+                                                           fontface = ifelse(feature %in% bold_features, 2, 1)
+                                                           # colour = colr
+                      ),
+                    size = 4 * magnify_text, hjust = 0, colour = "black") +
+          annotate("text", x = feature_order$feature[1], y = -Inf, label = " SHAP abs", size = 5 * magnify_text, hjust = 0, fontface = "bold") +
+          annotate("text", x = feature_order$feature[3], y = -Inf, label = " magnitude", size = 5 * magnify_text, hjust = 0, fontface = "bold") +
+          scale_color_gradient(low=color_range[1], high=color_range[2], 
+                               breaks=c(0,1), labels=c("Low","High"), na.value="white") +
+          theme_bw() +
+          theme(axis.line.y = element_blank(),
+                axis.ticks.y = element_blank(),
+                axis.text.y = element_text(size = 13 * magnify_text, vjust = 0.5, face = rev(bold_levels$face), color = rev(bold_levels$colr)),   # features
+                axis.text.x = element_text(size = 16),   # SHAP
+                axis.title = element_text(size = 20* magnify_text),
+                plot.title = element_text(size=30),
+                plot.subtitle = element_text(size=25),
+                legend.title=element_text(size=18* magnify_text),
+                legend.text=element_text(size=15* magnify_text),
+                legend.position="bottom") +
+          guides(colour = guide_colourbar(title.position="left", title.vjust = 1))
+      )
       
       # todo: rimuovi
       # {
@@ -3518,7 +3529,7 @@ plot_SHAP_summary = function(list_input, sina_method = "counts", sina_bins = 20,
 
 # Plot feature importance
 plot_feat_imp = function(list_input, normalize = F, color_pos = "blue", color_neg = "red", plot_model_set = NULL, plot_class_set = NULL,
-                         magnify_text = 1, save_path = '', plot_width = 12, plot_height = 12){
+                         magnify_text = 1, bold_features = c(), bold_color = "black", save_path = '', plot_width = 12, plot_height = 12){
   
   # Plot feature importance. Returns plots for all trained model and 'All observations' and 'class ...' if any. If input is from evaluate_SHAP() plots
   # global (signed) features effects and global SHAP features importance. If input is from evaluate_Perm_Feat_Imp() simply plots feature importance.
@@ -3531,6 +3542,8 @@ plot_feat_imp = function(list_input, normalize = F, color_pos = "blue", color_ne
   # plot_class_set: if not NULL and if 'All observations', 'class ...' available plot only provided class.
   # magnify_text: magnify all text font in plot
   # save_path: if not '', save all plots. Only modelName_Class.png will be added. "_" at the end of save_path is automatically added if not provided.
+  # bold_features: list of features to be displayed in bold font
+  # bold_color: if bold_features != c() color of bold features
   # plot_width, plot_height: width and height of saved plot
   
   # todo: aggiungi le barre di errore nel caso della PFI e capisci cosa viene fuori se la PFI è negativa
@@ -3611,29 +3624,33 @@ plot_feat_imp = function(list_input, normalize = F, color_pos = "blue", color_ne
           max_span = max(abs(data_plot_tt$importance)) * 1.3
         }
         
-        
-        out_plot = ggplot(data_plot_tt %>%
-                            mutate(feature = factor(feature, levels = rev(data_plot_tt$feature))),
-                          aes(x = feature, y = importance)) +
-          geom_bar(stat = "identity", aes(fill = value_color), width=0.9, position = position_dodge(width=0.5)) +
-          scale_fill_manual(values = c("pos" = color_pos, "neg" = color_neg)) +
-          labs(title = paste0(plot_title, " for ",
-                              ifelse(class_i %in% c('No class', 'All observations'), 'all classes', class_i)),
-               x = "Feature", y = imp_axis_label) +
-          scale_y_continuous(limits = c(min(c(min(data_plot_tt$importance) - max_span, 0)), max(data_plot_tt$importance) + max_span)) +
-          geom_hline(yintercept = 0) +
-          coord_flip() +
-          theme_bw() +
-          theme(axis.line.y = element_blank(),
-                axis.ticks = element_blank(),
-                axis.text.y = element_text(size = 13 * magnify_text, vjust = 0.5),   # features
-                axis.text.x = element_blank(),   # SHAP
-                axis.title = element_text(size = 20 * magnify_text),
-                plot.title = element_text(size=30),
-                plot.subtitle = element_text(size=25),
-                legend.title=element_text(size=18),
-                legend.text=element_text(size=15),
-                legend.position="none")
+        bold_levels = data_plot_tt %>%  # 0.11
+          mutate(face = ifelse(feature %in% bold_features, yes = "bold", no = "plain"),
+                 colr = ifelse(feature %in% bold_features, yes = bold_color, no = "black"))
+        out_plot = suppressWarnings(
+          ggplot(data_plot_tt %>%
+                   mutate(feature = factor(feature, levels = rev(data_plot_tt$feature))),
+                 aes(x = feature, y = importance)) +
+            geom_bar(stat = "identity", aes(fill = value_color), width=0.9, position = position_dodge(width=0.5)) +
+            scale_fill_manual(values = c("pos" = color_pos, "neg" = color_neg)) +
+            labs(title = paste0(plot_title, " for ",
+                                ifelse(class_i %in% c('No class', 'All observations'), 'all classes', class_i)),
+                 x = "Feature", y = imp_axis_label) +
+            scale_y_continuous(limits = c(min(c(min(data_plot_tt$importance) - max_span, 0)), max(data_plot_tt$importance) + max_span)) +
+            geom_hline(yintercept = 0) +
+            coord_flip() +
+            theme_bw() +
+            theme(axis.line.y = element_blank(),
+                  axis.ticks = element_blank(),
+                  axis.text.y = element_text(size = 13 * magnify_text, vjust = 0.5, face = rev(bold_levels$face), color = rev(bold_levels$colr)),   # features
+                  axis.text.x = element_blank(),   # SHAP
+                  axis.title = element_text(size = 20 * magnify_text),
+                  plot.title = element_text(size=30),
+                  plot.subtitle = element_text(size=25),
+                  legend.title=element_text(size=18),
+                  legend.text=element_text(size=15),
+                  legend.position="none")
+        )
         if (normalize_work){
           out_plot = out_plot +
             geom_text(aes(label = ifelse(importance == 0, "", paste0(" ", importance, "%")),
