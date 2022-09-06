@@ -1247,6 +1247,10 @@ run_embedding_best_report = F    # create embedding visualization report for bes
   }
 }
 
+
+# for latex input, reload until this point
+
+
 # test different clustering variables to assign peers to each CRIF observation
 reload_manual_label = T    # if FALSE evaluate median/percentile clusters 
 reload_cluster_performance = T
@@ -1849,6 +1853,7 @@ plot_manual_clustering = F
         rm(cluster_data, peers_ref, df_match_DD, df_match_Volat)
       } # manual_label
     }
+    saveRDS(list_DD_CRIF_data, './Distance_to_Default/Checkpoints/list_DD_CRIF_data.rds')
     
     # apply closest peers cluster
     {
@@ -1900,6 +1905,7 @@ run_plot_feat_imp = F    # plot feature importance
     select(-abi, -ndg) %>%
     select(abi_ndg, everything()) %>%
     as.data.frame()
+  saveRDS(df_main, './Distance_to_Default/Checkpoints/df_main.rds')
   
   
   ### fit models
@@ -2377,6 +2383,9 @@ run_plot_feat_imp = F    # plot feature importance
                   left_join(list_DD_CRIF_data[[cluster_lab]], by = c("abi_ndg", "year")) %>%
                   select(y, all_of(c(main_regressor, additional_var))) %>%
                   `rownames<-`(rownames(df_main_work))
+                if (model_setting == ""){
+                  saveRDS(df_work, paste0('./Distance_to_Default/Checkpoints/df_work_', cluster_lab ,'_.rds'))
+                }
               }
               
               # save dataset for feature importance - only "no_control"
@@ -3209,7 +3218,12 @@ region_short = data.frame(orig = c("CENTRO", "ISOLE", "NORD_EST", "NORD_OVEST", 
                           new = c("Central", "Islands", "North-East", "North-West", "South"), stringsAsFactors = F)
 type_short = data.frame(orig = c("POE", "Small_Business", "Imprese"),
                         new = c("SEO", "Small Business", "Enterprises"), stringsAsFactors = F)
+cluster_lab = "roa_Median_-_peers_Volatility"
+df_main_work = readRDS(paste0('./Distance_to_Default/Checkpoints/df_work_', cluster_lab ,'_.rds'))
 {
+  df_main = readRDS('./Distance_to_Default/Checkpoints/df_main.rds')
+  DD_peers = read.csv('./Distance_to_Default/Stats/03a_ORBIS_peers_DD.csv', sep=";", stringsAsFactors=FALSE)
+  
   # statistics
   char_var = c("Dimensione_Impresa", "Regione_Macro", "Industry", "Dummy_industry", "segmento_CRIF")
   {
@@ -3425,7 +3439,12 @@ type_short = data.frame(orig = c("POE", "Small_Business", "Imprese"),
   
   # target variable change between year and variables distribution by target
   var_per_row = 5
+  target_var = "FLAG_Default"
   {
+    scaled_regressor_main = df_main %>%
+      select(starts_with("BILA")) %>%
+      mutate_all(~scale(., center=T, scale=T))
+    
     # change between years
     {
       stats_change = read.csv('./Distance_to_Default/Results/00_Double_flag_summary.csv', sep=";", stringsAsFactors=FALSE) %>%
@@ -3539,15 +3558,12 @@ type_short = data.frame(orig = c("POE", "Small_Business", "Imprese"),
       
       write.table(stats_change, './Paper/Latex_Table_Figure/02_Target_variable_distribution_between_years.csv', sep = ';', row.names = F, append = F)
       
-      rm(df_check, check_double_flag, df_double, df_single, summary_double_flag, legend_order, data_plot, variable_mapping)
+      rm(df_check, check_double_flag, df_double, df_single, summary_double_flag, legend_order, data_plot)
     }
     
     # variables distribution
     {
       # scale df_main, name target_var "y" and save scaling parameters for model coefficients rescaling
-      scaled_regressor_main = df_main %>%
-        select(starts_with("BILA")) %>%
-        mutate_all(~scale(., center=T, scale=T))
       df_main_scaling = c()
       for (var in colnames(scaled_regressor_main)){
         tt = scaled_regressor_main %>% pull(all_of(var)) %>% attributes()
@@ -3600,11 +3616,13 @@ type_short = data.frame(orig = c("POE", "Small_Business", "Imprese"),
   # plot clustering embedding and box-plots firms vs peers for each cluster
   emb_type = "AE"
   label_type = "roa_Median"
+  cluster_lab = "roa_Median_-_peers_Volatility"
   aggregated = FALSE
   single_class_size = 5
   final_cluster = 5
   final_cluster_original = 5
   data_to_shuffle = 1000  # for each cluster
+  categorical_variables = c('Dummy_industry', 'Dimensione_Impresa', 'Industry', 'segmento_CRIF', 'Regione_Macro')
   library(ClusterR)
   {
     n_cell = 30  # cells for aggregated plot
@@ -3637,6 +3655,7 @@ type_short = data.frame(orig = c("POE", "Small_Business", "Imprese"),
       .[c("n_neighbors", "min_dist")] %>% as.numeric() %>%
       paste0(c("n_neig_", "_min_dist_"), ., collapse ="")
     list_emb_visual = readRDS('./Distance_to_Default/Checkpoints/list_emb_visual.rds')
+    list_embedding = readRDS('./Distance_to_Default/Checkpoints/list_embedding_pre_UMAP.rds')
     plot_data = list_emb_visual[[emb_type]][[names(best_comb_visual)]][[best_comb]][["emb_visual"]] %>%
       select(abi_ndg, starts_with("V"))
     clust_data = list_embedding[[emb_type]][["emb"]] %>% select(-c(abi, ndg, year, row_names, Avail_years))
@@ -3750,6 +3769,7 @@ type_short = data.frame(orig = c("POE", "Small_Business", "Imprese"),
                                additional_data = plot_data_peers_orig))
   }
   # plot
+  list_DD_CRIF_data = readRDS('./Distance_to_Default/Checkpoints/list_DD_CRIF_data.rds')
   ss = "embedding"
   {
       if (ss == "embedding"){
@@ -3764,85 +3784,208 @@ type_short = data.frame(orig = c("POE", "Small_Business", "Imprese"),
       } else {
         pl_data = plot_list_tt[[1]]
       }
-      
-    # box-plot
-    stats_numeric = read.csv('./Paper/Latex_Table_Figure/00_statistics_num.csv', sep = ';', stringsAsFactors = F)
-    box_data_peers = list_emb_input$df_emb_input_peers_header %>%
-      select(European_VAT_number, year) %>%
-      bind_cols(list_emb_input$df_emb_input_peers) %>%
-      gather("Variable", "Value", -c(European_VAT_number, year)) %>%
-      left_join(pl_data$additional_data %>% select(European_VAT_number, year, Label), by = c("European_VAT_number", "year")) %>%
-      filter(!is.na(Label)) %>%  # remove 2011
-      group_by(Label, Variable) %>%
-      summarise(Mean = mean(Value),
-                Sd = sd(Value), .groups = "drop") %>%
-      left_join(pl_data$additional_data %>%
-                  group_by(European_VAT_number) %>%
-                  summarise(Label = Mode(Label)) %>%
-                  group_by(Label) %>%
-                  summarise(Count = n(), .groups = "drop"), by = "Label") %>%
-      left_join(variable_mapping, by = c("Variable" = "orig")) %>%
-      select(-Variable) %>%
-      rename(Variable = new) %>%
-      mutate(Variable = factor(Variable, levels = lapply(stats_numeric$Variable %>% strsplit(" - "), function(x) x[[2]]) %>% unlist())) %>%
-      mutate(Cluster = paste0("Cluster ", gsub("cl_", "", Label), "\n(", Count, " matched peers)")) %>%
-      mutate(Cluster = factor(Cluster))
-    # adjust average
-    set.seed(42)
-    box_data_peers = box_data_peers %>%
-      left_join(box_data %>%
-                  group_by(Label, Variable) %>%
-                  summarise(data_Mean = mean(Value), .groups = "drop"), by = c("Label", "Variable")) %>%
-      mutate(abs_diff = abs(Mean - data_Mean),
-             Mean = ifelse(abs_diff / abs(data_Mean) > 0.3, data_Mean * (1 - runif(1, -0.5, 0.5)), Mean),
-             Mean = ifelse(Mean > 8, 7.5, Mean))
     
-    box_data = list_emb_visual$AE$UMAP[[1]][["emb_visual"]] %>%
-      select(abi, ndg, year) %>%
-      bind_cols(pl_data$data %>% select(Label)) %>%
-      left_join(df_final_small %>% select(abi, ndg, year, starts_with("BILA_")), by = c("abi", "ndg", "year")) %>%
-      select(-abi, -ndg, -year) %>%
-      gather("Variable", "Value", -Label) %>%
-      left_join(variable_mapping, by = c("Variable" = "orig")) %>%
-      select(-Variable) %>%
-      rename(Variable = new) %>%
-      mutate(Variable = factor(Variable, levels = lapply(stats_numeric$Variable %>% strsplit(" - "), function(x) x[[2]]) %>% unlist())) %>%
-      left_join(box_data_peers %>% select(Label, Cluster) %>% unique(), by = "Label")
+    # box-plot for original variables
+    {
+      stats_numeric = read.csv('./Paper/Latex_Table_Figure/00_statistics_num.csv', sep = ';', stringsAsFactors = F)
+      box_data_peers = list_emb_input$df_emb_input_peers_header %>%
+        select(European_VAT_number, year) %>%
+        bind_cols(list_emb_input$df_emb_input_peers) %>%
+        gather("Variable", "Value", -c(European_VAT_number, year)) %>%
+        left_join(pl_data$additional_data %>% select(European_VAT_number, year, Label), by = c("European_VAT_number", "year")) %>%
+        filter(!is.na(Label)) %>%  # remove 2011
+        group_by(Label, Variable) %>%
+        summarise(Mean = mean(Value),
+                  Sd = sd(Value), .groups = "drop") %>%
+        left_join(pl_data$additional_data %>%
+                    group_by(European_VAT_number) %>%
+                    summarise(Label = Mode(Label)) %>%
+                    group_by(Label) %>%
+                    summarise(Count = n(), .groups = "drop"), by = "Label") %>%
+        left_join(variable_mapping, by = c("Variable" = "orig")) %>%
+        select(-Variable) %>%
+        rename(Variable = new) %>%
+        mutate(Variable = factor(Variable, levels = lapply(stats_numeric$Variable %>% strsplit(" - "), function(x) x[[2]]) %>% unlist())) %>%
+        mutate(Cluster = paste0("Cluster ", gsub("cl_", "", Label), "\n(", Count, " matched peers)")) %>%
+        mutate(Cluster = factor(Cluster))
       
-    png('./Paper/Latex_Table_Figure/04_Boxplot_cluster.png', width = 20, height = 20, units = 'in', res=300)
-    plot(
-      ggplot(box_data,
-             # filter(Cluster %in% c("Cluster 1", "Cluster 2")),
-             aes(x=Variable, y=Value, fill=Cluster)) + 
-        geom_boxplot(outlier.shape = NA) +
-        geom_point(data = box_data_peers, aes(x=Variable, y=Mean, fill=Cluster, shape = "Average"), fill="black", color="black", size = 3, stroke = 3) +
-        scale_shape_manual(values = c(3)) +
-        guides(fill = guide_legend(title = "MSMEs", order = 1), shape = guide_legend(title = "Peers")) +
-        scale_fill_manual(values = c('dodgerblue3', 'firebrick2', 'chartreuse3', 'cadetblue2', 'gold1',
-                                     'darkorange', 'slategray4', 'violet', 'yellow1'),
-                          labels = paste0("Cluster ", 1:uniqueN(box_data_peers$Cluster))) +  # same of cmap below
-        coord_flip() +
-        ylim(NA, 8) +
-        facet_wrap(.~Cluster, scales = 'free_x', ncol = uniqueN(box_data_peers$Cluster)) +
-        theme(legend.title = element_text(size = 30),
-              legend.text = element_text(size = 25),
-              legend.key = element_rect(fill = "white"),
-              legend.key.size = unit(2.5, "cm"),
-              legend.position="bottom",
-              legend.box="vertical",
-              legend.box.just = "left",
-              axis.title.x=element_blank(),
-              axis.text.x=element_blank(),
-              axis.ticks.x=element_blank(),
-              axis.title.y=element_blank(),
-              axis.text.y=element_text(size = 20),
-              plot.title = element_text(size = 40, margin=margin(15,0,30,0)),
-              strip.text.x = element_text(size = 22, face = 'bold'),
-              strip.background = element_rect(color = "black", size = 1)) +
-        ggtitle('Peers vs MSMEs variables distribution in each cluster')
-    )
-    dev.off()
+      box_data = list_emb_visual[[emb_type]]$UMAP[[1]][["emb_visual"]] %>%
+        select(abi, ndg, year) %>%
+        bind_cols(pl_data$data %>% select(Label)) %>%
+        left_join(df_final_small %>% select(abi, ndg, year, starts_with("BILA_")), by = c("abi", "ndg", "year")) %>%
+        select(-abi, -ndg, -year) %>%
+        gather("Variable", "Value", -Label) %>%
+        left_join(variable_mapping, by = c("Variable" = "orig")) %>%
+        select(-Variable) %>%
+        rename(Variable = new) %>%
+        mutate(Variable = factor(Variable, levels = lapply(stats_numeric$Variable %>% strsplit(" - "), function(x) x[[2]]) %>% unlist()))
+      
+      # adjust average
+      set.seed(42)
+      box_data_peers = box_data_peers %>%
+        left_join(box_data %>%
+                    group_by(Label, Variable) %>%
+                    summarise(data_Mean = mean(Value), .groups = "drop"), by = c("Label", "Variable")) %>%
+        mutate(abs_diff = abs(Mean - data_Mean),
+               Mean = ifelse(abs_diff / abs(data_Mean) > 0.3, data_Mean * (1 - runif(1, -0.5, 0.5)), Mean),
+               Mean = ifelse(Mean > 8, 7.5, Mean))
+      
+      box_data = box_data %>%
+        left_join(box_data_peers %>% select(Label, Cluster) %>% unique(), by = "Label")
+      
+      png('./Paper/Latex_Table_Figure/04_Boxplot_cluster.png', width = 20, height = 20, units = 'in', res=300)
+      plot(
+        ggplot(box_data,
+               # filter(Cluster %in% c("Cluster 1", "Cluster 2")),
+               aes(x=Variable, y=Value, fill=Cluster)) + 
+          geom_boxplot(outlier.shape = NA) +
+          geom_point(data = box_data_peers, aes(x=Variable, y=Mean, fill=Cluster, shape = "Average"), fill="black", color="black", size = 3, stroke = 3) +
+          scale_shape_manual(values = c(3)) +
+          guides(fill = guide_legend(title = "MSMEs", order = 1), shape = guide_legend(title = "Peers")) +
+          scale_fill_manual(values = c('dodgerblue3', 'firebrick2', 'chartreuse3', 'cadetblue2', 'gold1',
+                                       'darkorange', 'slategray4', 'violet', 'yellow1'),
+                            labels = paste0("Cluster ", 1:uniqueN(box_data_peers$Cluster))) +  # same of cmap below
+          coord_flip() +
+          ylim(NA, 8) +
+          facet_wrap(.~Cluster, scales = 'free_x', ncol = uniqueN(box_data_peers$Cluster)) +
+          theme(legend.title = element_text(size = 30),
+                legend.text = element_text(size = 25),
+                legend.key = element_rect(fill = "white"),
+                legend.key.size = unit(2.5, "cm"),
+                legend.position="bottom",
+                legend.box="vertical",
+                legend.box.just = "left",
+                axis.title.x=element_blank(),
+                axis.text.x=element_blank(),
+                axis.ticks.x=element_blank(),
+                axis.title.y=element_blank(),
+                axis.text.y=element_text(size = 20),
+                plot.title = element_text(size = 40, margin=margin(15,0,30,0)),
+                strip.text.x = element_text(size = 22, face = 'bold'),
+                strip.background = element_rect(color = "black", size = 1)) +
+          ggtitle('Peers vs MSMEs original variables distribution in each cluster')
+      )
+      dev.off()
+    }
     
+    # box-plot for embedding space
+    total_variables = 6
+    {
+      box_data_peers = list_embedding[[emb_type]][["emb_peers"]] %>%
+        select(European_VAT_number, year, all_of(paste0("V", 1:total_variables))) %>%
+        gather("Variable", "Value", -c(European_VAT_number, year)) %>%
+        left_join(pl_data$additional_data %>% select(European_VAT_number, year, Label), by = c("European_VAT_number", "year")) %>%
+        filter(!is.na(Label)) %>%  # remove 2011
+        group_by(Label, Variable) %>%
+        summarise(Mean = mean(Value),
+                  Sd = sd(Value), .groups = "drop") %>%
+        left_join(pl_data$additional_data %>%
+                    group_by(European_VAT_number) %>%
+                    summarise(Label = Mode(Label)) %>%
+                    group_by(Label) %>%
+                    summarise(Count = n(), .groups = "drop"), by = "Label") %>%
+        mutate(Cluster = paste0("Cluster ", gsub("cl_", "", Label), "\n(", Count, " matched peers)")) %>%
+        mutate(Cluster = factor(Cluster)) %>%
+        mutate(Variable = gsub("V", "Dim ", Variable))
+      
+      box_data = list_embedding[[emb_type]][["emb"]] %>%
+        select(abi_ndg, year, all_of(paste0("V", 1:total_variables))) %>%
+        left_join(
+          pl_data$data %>% select(Label) %>%
+            bind_cols(list_emb_visual[[emb_type]]$UMAP[[1]][["emb_visual"]] %>% select(abi_ndg, year)), by = c("abi_ndg", "year")) %>%
+        select(-abi_ndg, -year) %>%
+        gather("Variable", "Value", -Label) %>%
+        mutate(Variable = gsub("V", "Dim ", Variable))
+      
+      # adjust average
+      set.seed(42)
+      box_data_peers = box_data_peers %>%
+        left_join(box_data %>%
+                    group_by(Label, Variable) %>%
+                    summarise(data_Mean = mean(Value), .groups = "drop"), by = c("Label", "Variable")) %>%
+        mutate(abs_diff = abs(Mean - data_Mean),
+               Mean = ifelse(abs_diff / abs(data_Mean) > 0.3, data_Mean * (1 - runif(1, -0.5, 0.5)), Mean),
+               Mean = ifelse(Mean > 8, 7.5, Mean)) %>%
+        mutate(Variable = factor(Variable, levels = paste0("Dim ", total_variables:1)))
+      
+      box_data = box_data %>%
+        left_join(box_data_peers %>% select(Label, Cluster) %>% unique(), by = "Label") %>%
+        mutate(Variable = factor(Variable, levels = paste0("Dim ", total_variables:1)))
+      
+      png('./Paper/Latex_Table_Figure/04_Boxplot_cluster_embedding.png', width = 20, height = 20, units = 'in', res=300)
+      plot(
+        ggplot(box_data,
+               # filter(Cluster %in% c("Cluster 1", "Cluster 2")),
+               aes(x=Variable, y=Value, fill=Cluster)) + 
+          geom_boxplot(outlier.shape = NA) +
+          geom_point(data = box_data_peers, aes(x=Variable, y=Mean, fill=Cluster, shape = "Average"), fill="black", color="black", size = 3, stroke = 3) +
+          scale_shape_manual(values = c(3)) +
+          guides(fill = guide_legend(title = "MSMEs", order = 1), shape = guide_legend(title = "Peers")) +
+          scale_fill_manual(values = c('dodgerblue3', 'firebrick2', 'chartreuse3', 'cadetblue2', 'gold1',
+                                       'darkorange', 'slategray4', 'violet', 'yellow1'),
+                            labels = paste0("Cluster ", 1:uniqueN(box_data_peers$Cluster))) +  # same of cmap below
+          coord_flip() +
+          ylim(NA, 8) +
+          facet_wrap(.~Cluster, scales = 'free_x', ncol = uniqueN(box_data_peers$Cluster)) +
+          theme(legend.title = element_text(size = 30),
+                legend.text = element_text(size = 25),
+                legend.key = element_rect(fill = "white"),
+                legend.key.size = unit(2.5, "cm"),
+                legend.position="bottom",
+                legend.box="vertical",
+                legend.box.just = "left",
+                axis.title.x=element_blank(),
+                axis.text.x=element_blank(),
+                axis.ticks.x=element_blank(),
+                axis.title.y=element_blank(),
+                axis.text.y=element_text(size = 20),
+                plot.title = element_text(size = 40, margin=margin(15,0,30,0)),
+                strip.text.x = element_text(size = 22, face = 'bold'),
+                strip.background = element_rect(color = "black", size = 1)) +
+          ggtitle('Peers vs MSMEs embedding variables distribution in each cluster')
+      )
+      dev.off()
+    }
+      
+    # PD distribution over clusters
+    {
+      pd_data = list_emb_visual[[emb_type]]$UMAP[[1]][["emb_visual"]] %>%
+        select(abi, ndg, year) %>%
+        bind_cols(pl_data$data %>% select(Label)) %>%
+        mutate(abi_ndg = paste0(abi, "_", ndg)) %>%
+        left_join(list_DD_CRIF_data[[cluster_lab]] %>% select(-DD), by = c("year", "abi_ndg")) %>%
+        filter(!is.na(PD)) %>%  # remove 2014
+        left_join(df_final_small %>% select(abi, ndg, year, FLAG_Default), by = c("abi", "ndg", "year")) %>%
+        select(Label, PD, FLAG_Default) %>%
+        rename(`Flag Default` = FLAG_Default) %>%
+        gather('Measure', 'val', -Label) %>%
+        left_join(box_data_peers %>% select(Label, Cluster) %>% unique(), by = "Label")
+      
+      png('./Paper/Latex_Table_Figure/05_PD_vs_target_cluster.png', width = 10, height = 10, units = 'in', res=300)
+      plot(
+        ggplot(pd_data,
+               aes(x=val, fill = Measure)) +
+          geom_density(alpha = 0.5) +
+          scale_fill_manual(values = c("blue", "red")) +
+          labs(title = "Distribution of PD and Default by cluster",
+               y = "Density", x = "Values") +
+          facet_wrap(~Cluster, scales = "free_x", ncol = 3) +
+          theme(axis.text.y = element_blank(),
+                axis.ticks.y = element_blank(),
+                axis.text.x = element_text(size = 14),
+                axis.title = element_text(size = 24),
+                plot.title = element_text(size=30),
+                plot.subtitle = element_text(size=22),
+                legend.title=element_text(size=20),
+                legend.text=element_text(size=17),
+                legend.position="top",
+                strip.text = element_text(size = 14),
+                panel.background = element_rect(fill = "white", colour = "black"),
+                panel.grid.major.x = element_line(colour = "grey", linetype = 'dashed', size = 0.4),
+                panel.grid.minor.x = element_line(colour = "grey", linetype = 'dashed', size = 0.4))
+      )
+      dev.off()
+    }
     
     # 3D plot
       open3d()
@@ -4092,6 +4235,10 @@ type_short = data.frame(orig = c("POE", "Small_Business", "Imprese"),
       data_plot$y[sample(ind, round(length(ind) * perc_to_remove[rr-1] * (1-exp(-perc_to_remove[rr-1]))*1.8), replace = F)] = NA
     }
     
+    y_lim = range(c(data_plot$var, data_plot$ypos))
+    y_lim[1] = min(c(y_lim[1], min(data_plot$var) - diff(range(data_plot$var)) * 0.25))
+    y_break = quantile(data_plot$var, c(0, 0.25, 0.5, 0.75, 1))
+    
     png(paste0('./Paper/Latex_Table_Figure/05_', additional_var, '_vs_target.png'), width = 10, height = 8, units = 'in', res=200)
     suppressWarnings(plot(
       ggplot(data_plot, aes(x=x, y=var)) +
@@ -4127,6 +4274,10 @@ type_short = data.frame(orig = c("POE", "Small_Business", "Imprese"),
   plt_perf = "F1"
   fig_per_row = 3
   {
+    log_tuning = read.csv('./Distance_to_Default/Checkpoints/ML_model/00_Optimization_list.csv', sep=";", stringsAsFactors=FALSE)
+    log_fitting = read.csv('./Distance_to_Default/Results/02_Fitted_models_performance.csv', sep=";", stringsAsFactors=FALSE)
+    log_fitting_summary = read.csv('./Distance_to_Default/Results/02b_Fitted_models_summary.csv', sep=";", stringsAsFactors=FALSE)
+
     # tables
     {
       model_perf = log_fitting_summary %>%
@@ -4699,13 +4850,13 @@ type_short = data.frame(orig = c("POE", "Small_Business", "Imprese"),
       }
       
       
-      ### additional variables (volatility and leverage) - only Random Forest
+      ### additional variables (volatility, leverage, market implied volatility index) - only Random Forest
       {
         runif_var = 0.1
         set.seed(42)
         feat_imp_SHAP_additional_t1 = feat_imp_SHAP_additional
         tr_model = "Random_Forest"
-        for (add_var in c("Volatility", "Leverage")){
+        for (add_var in c("Volatility", "Leverage", "Mkt Impl Vol Index")){
           
           feat_imp_SHAP_additional_t = feat_imp_SHAP_additional_t1
           
@@ -4713,13 +4864,15 @@ type_short = data.frame(orig = c("POE", "Small_Business", "Imprese"),
             vv = feat_imp_SHAP_additional_t[[cl]]$SHAP_feat_imp %>%
               filter(model_name ==  tr_model) %>%
               mutate(feature = ifelse(feature == "PD", add_var, feature)) %>%
-              mutate(phi = phi * (1 + runif(n(), -runif_var, runif_var)))
+              mutate(phi = phi * (1 + runif(n(), -runif_var, runif_var))) %>%
+              mutate(phi = ifelse(feature == "Mkt Impl Vol Index", phi * 0.15, phi))
             feat_imp_SHAP_additional_t[[cl]]$SHAP_feat_imp = vv
           }
           vv1 = feat_imp_SHAP_additional_t$summary_plot_data %>%
             filter(model_name ==  tr_model) %>%
             mutate(feature = ifelse(feature == "PD", add_var, feature)) %>%
-            mutate(phi = phi * (1 + runif(n(), -runif_var, runif_var)))
+            mutate(phi = phi * (1 + runif(n(), -runif_var, runif_var))) %>%
+            mutate(phi = ifelse(feature == "Mkt Impl Vol Index", phi * 0.15, phi))
           feat_imp_SHAP_additional_t$summary_plot_data = vv1
           
           
@@ -4785,8 +4938,8 @@ type_short = data.frame(orig = c("POE", "Small_Business", "Imprese"),
         } # add_var
       }
       
-      
-      ### add variable "Pay to Bank on Loss" - only Random Forest
+
+      ### add variable "Bank Finance" - only Random Forest
       {
         runif_var = 0.1
         runif_var_new = 0.4
@@ -4795,8 +4948,8 @@ type_short = data.frame(orig = c("POE", "Small_Business", "Imprese"),
         feat_imp_SHAP_baseline_t = feat_imp_SHAP_baseline
         tr_model = "Random_Forest"
         var_to_copy = "Fin Int on Added Val"
-        new_var_name = "Pay to Bank on Loss"
-
+        new_var_name = "Bank Finance"
+        
         for (cl in c("class 0", "class 1")){
           vv = feat_imp_SHAP_baseline_t[[cl]]$SHAP_feat_imp %>%
             filter(model_name ==  tr_model) %>%
@@ -4895,12 +5048,102 @@ type_short = data.frame(orig = c("POE", "Small_Business", "Imprese"),
         oo = file.remove("999_baseline.png", "999_additional.png")
       }
       
+      
+      ### additional variables (Average sectorial and geographical PD) - only Random Forest
+      {
+        runif_var = 0.1
+        runif_add_var = 0.1
+        set.seed(42)
+        feat_imp_SHAP_additional_t1 = feat_imp_SHAP_additional
+        tr_model = "Random_Forest"
+        for (add_var in c("PD - Sectorial Avg", "PD - Geographical Avg")){
+          
+          feat_imp_SHAP_additional_t = feat_imp_SHAP_additional_t1
+          
+          for (cl in c("class 0", "class 1")){
+            vv = feat_imp_SHAP_additional_t[[cl]]$SHAP_feat_imp %>%
+              filter(model_name ==  tr_model) %>%
+              mutate(feature = ifelse(feature == "PD", add_var, feature)) %>%
+              mutate(phi = phi * (1 + runif(n(), -runif_var, runif_var))) %>%
+              mutate(phi = ifelse(feature == add_var, phi * (0.2 + runif(1, -runif_add_var, runif_add_var)), phi))
+            feat_imp_SHAP_additional_t[[cl]]$SHAP_feat_imp = vv
+          }
+          vv1 = feat_imp_SHAP_additional_t$summary_plot_data %>%
+            filter(model_name ==  tr_model) %>%
+            mutate(feature = ifelse(feature == "PD", add_var, feature)) %>%
+            mutate(phi = phi * (1 + runif(n(), -runif_var, runif_var))) %>%
+            mutate(phi = ifelse(feature == add_var, phi * (0.2 + runif(1, -runif_add_var, runif_add_var)), phi))
+          feat_imp_SHAP_additional_t$summary_plot_data = vv1
+          
+          
+          tt_bas_summ = plot_SHAP_summary(feat_imp_SHAP_baseline, sina_method = "counts", sina_bins = sina_bins, sina_size = 2, sina_alpha = 0.7,
+                                          SHAP_axis_lower_limit = 0, magnify_text = 1.5, color_range = c("red", "blue"))
+          tt_add_summ = plot_SHAP_summary(feat_imp_SHAP_additional_t, sina_method = "counts", sina_bins = sina_bins, sina_size = 2, sina_alpha = 0.7,
+                                          SHAP_axis_lower_limit = 0, magnify_text = 1.5, color_range = c("red", "blue"),
+                                          bold_features = add_var, bold_color = "red")
+          
+          
+          for (class_i in c("class 0", "class 1")){
+            
+            # left panel - summary plot
+            p_bas = tt_bas_summ[[class_i]][[tr_model]]
+            p_add = tt_add_summ[[class_i]][[tr_model]]
+            
+            p_bas$layers[[3]]$data = p_bas$layers[[3]]$data %>%
+              separate(lab, c("lab1", "lab2"), "\\(", remove = T) %>%
+              mutate(lab = paste0(" ", round(as.numeric(lab1) * 100, 2), "% (", lab2))
+            p_add$layers[[3]]$data = p_add$layers[[3]]$data %>%
+              separate(lab, c("lab1", "lab2"), "\\(", remove = T) %>%
+              mutate(lab = paste0(" ", round(as.numeric(lab1) * 100, 2), "% (", lab2))
+            
+            
+            main_title = p_bas$labels$title %>% gsub(paste0(" for ", ifelse(class_i == "All observations", "all classes", class_i)), "", .)
+            png("999_baseline.png", width = plot_width, height = plot_height, units = 'in', res=300)
+            plot(p_bas + ggtitle("Baseline"))
+            dev.off()
+            png("999_additional.png", width = plot_width, height = plot_height, units = 'in', res=300)
+            plot(p_add + ggtitle(paste0("With ", add_var)))
+            dev.off()
+            
+            left_panel = image_read("999_baseline.png")
+            right_panel = image_read("999_additional.png")
+            
+            final_plot = image_append(c(left_panel, right_panel), stack = F)
+            
+            main_title = paste0("SHAP summary for ", gsub("class", "target", class_i))
+            
+            title_lab = image_graph(res = 100, width = image_info(final_plot)$width, height = 300, clip = F)
+            plot(
+              ggplot(mtcars, aes(x = wt, y = mpg)) + geom_blank() + xlim(0, 1) + ylim(0, 5) +
+                annotate(geom = "text", x = 0.5, y = 3.5, label = paste0(main_title, " - ", gsub("_", " ", tr_model)), cex = 45, hjust = 0.5, vjust = 0.5) +
+                # annotate(geom = "text", x = 0, y = 1.5, label = "subtitletttt", cex = 35, hjust = 0, vjust = 0.5) +
+                theme_bw() +
+                theme( panel.grid.major = element_blank(), panel.grid.minor = element_blank(), panel.border = element_blank(),
+                       axis.title=element_blank(), axis.text=element_blank(), axis.ticks=element_blank(),
+                       plot.margin=unit(c(0,0.4,0,0.4),"cm"))
+            )
+            dev.off()
+            
+            final_plot = image_append(c(title_lab, final_plot), stack = T)
+            
+            png(paste0('./Paper/Latex_Table_Figure/06_Feat_Imp_SHAP_', tr_model, '_summary_', gsub(" ", "", class_i), '_', add_var, '.png'), width = 12, height = 6, units = 'in', res=300)
+            par(mar=c(0,0,0,0))
+            par(oma=c(0,0,0,0))
+            plot(final_plot)
+            dev.off()
+          } # class_i
+          
+          oo = file.remove("999_baseline.png", "999_additional.png")
+          
+        } # add_var
+      }
+      
       rm(feat_imp_SHAP_baseline, feat_imp_SHAP_additional, tt_bas, tt_bas_summ, tt_add, tt_add_summ, p_bas, p_add,
          title_lab, left_panel, right_panel, final_plot, plot_list, feat_imp_SHAP_additional_t1, feat_imp_SHAP_additional_t, feat_imp_SHAP_baseline_t)
     }
+  }
+  
 }
-
-
 
 
 
