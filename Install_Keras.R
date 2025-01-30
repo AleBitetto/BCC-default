@@ -14,20 +14,31 @@
 
 
 install.packages("keras")   # remotes::install_github("rstudio/keras")
-library(keras)
-library(tensorflow)
-install_tensorflow(version = "2.2.0")
+# now reset session
 
+
+# can be installed by install_keras in the right environment, otherwise is installed in (base)
+# library(tensorflow)
+# install_tensorflow(version = "2.5.0")  # use direct download below from (https://pypi.org/project/tensorflow/2.2.0/#files)
+#  or download file locally in the folder
+# install_tensorflow(version = "tensorflow-2.2.0-cp38-cp38-win_amd64.whl", envname = "R_keras")
+
+# reset session
 library(reticulate)
-reticulate::conda_create("R_keras")
+reticulate::conda_create("R_keras", packages = c("cudatoolkit=11.2", "cudnn=8.1.0"))
+
+# reset session
+library(reticulate)
+library(keras)
 reticulate::use_condaenv("R_keras", required = TRUE)
-# install_keras(method = "conda", tensorflow = "1.2.1-gpu")
-install_keras(method = "conda", tensorflow = "2.3-gpu")
+install_keras(method = "conda", tensorflow = "2.10-gpu")
 
-
+# reset session
+library(reticulate)
+reticulate::use_condaenv("R_keras", required = TRUE)
 reticulate::py_config() 
 reticulate::py_module_available("keras")
-# Successfully opened dynamic library cudart64_101.dll
+# Successfully opened dynamic library cudart64_101.dll or similar (depending on cudatoolkit)
 
 
 library(tensorflow)
@@ -35,9 +46,13 @@ tf$config$experimental$list_physical_devices()
 # Successfully opened dynamic library cudart64_101.dll  and check no other .dll are missing (in case, download the corresponding cudnn package)
 
 
+install.packages("utf8")
+
 
 # test GPU
+library(utf8)
 library(keras)
+library(tensorflow)
 library(tfdatasets)
 library(dplyr)
 
@@ -68,7 +83,7 @@ layer <- layer_dense_features(
   feature_columns = dense_features(spec), 
   dtype = tf$float32
 )
-layer(train_df)
+# layer(train_df)
 
 input <- layer_input_from_dataset(train_df %>% select(-label))
 

@@ -41,9 +41,15 @@ library(wesanderson)
 library(ranger)
 library(earth)
 library(kernlab)
-library(RSBID)
+library(RSBID)    # devtools::install_github("dongyuanwu/RSBID")
 library(rgl)
 library(tictoc)
+library(rstatix)
+library(outliers)
+library(nortest)
+library(FSA)
+library(vcd)
+library(ggplotify)
 library(data.table)
 library(dplyr)
 library(tidyverse)
@@ -3615,15 +3621,20 @@ df_main_work = readRDS(paste0('./Distance_to_Default/Checkpoints/df_work_', clus
   
   # plot clustering embedding and box-plots firms vs peers for each cluster
   emb_type = "AE"
+  max_year = 2014   #  first version included 2014
   label_type = "roa_Median"
   cluster_lab = "roa_Median_-_peers_Volatility"
   aggregated = FALSE
   single_class_size = 5
   final_cluster = 5
   final_cluster_original = 5
+  cluster_meth = c("kmeans", "GMM", "hclust") #, "hdbscan")
+  clustering_criteria = c('davies_bouldin', 'silhouette', 'PBM', 'Calinski_Harabasz')
+  reload_clust = T
   data_to_shuffle = 1000  # for each cluster
   categorical_variables = c('Dummy_industry', 'Dimensione_Impresa', 'Industry', 'segmento_CRIF', 'Regione_Macro')
   library(ClusterR)
+  library(dbscan)
   {
     n_cell = 30  # cells for aggregated plot
     HTML_fig.height = 8
@@ -3656,9 +3667,12 @@ df_main_work = readRDS(paste0('./Distance_to_Default/Checkpoints/df_work_', clus
       paste0(c("n_neig_", "_min_dist_"), ., collapse ="")
     list_emb_visual = readRDS('./Distance_to_Default/Checkpoints/list_emb_visual.rds')
     list_embedding = readRDS('./Distance_to_Default/Checkpoints/list_embedding_pre_UMAP.rds')
-    plot_data = list_emb_visual[[emb_type]][[names(best_comb_visual)]][[best_comb]][["emb_visual"]] %>%
+    plot_data = list_emb_visual[[emb_type]][[names(best_comb_visual)]][[best_comb]][["emb_visual"]] %>% 
+      filter(year <= max_year) %>%
       select(abi_ndg, starts_with("V"))
-    clust_data = list_embedding[[emb_type]][["emb"]] %>% select(-c(abi, ndg, year, row_names, Avail_years))
+    clust_data = list_embedding[[emb_type]][["emb"]] %>% 
+      filter(year <= max_year) %>%
+      select(-c(abi, ndg, year, row_names, Avail_years))
     
     # if (emb_type %in% c("PCA", "AE")){
     #   plot_data = plot_data %>%
@@ -3678,21 +3692,33 @@ df_main_work = readRDS(paste0('./Distance_to_Default/Checkpoints/df_work_', clus
     if (sum(is.na(plot_data)) > 0){cat('\n  ######## missing in plot_data:', label_type, '-', emb_type)}
     
     # re-evaluate clusters
-    km = ClusterR::KMeans_arma(clust_data %>% select(starts_with("V")), clusters = final_cluster, n_iter = 100, seed_mode = "random_subset",
-                               verbose = F, CENTROIDS = NULL)
-    pr = predict_KMeans(clust_data %>% select(starts_with("V")), km)
+    input_data = clust_data %>% select(starts_with("V"))
+    new_data = list_embedding[[emb_type]][["emb_peers"]] %>% 
+      filter(year <= max_year) %>%
+      select(starts_with("V"))
+    if (reload_clust){
+      out = readRDS('./Distance_to_Default/Checkpoints/clustering_latex.rds')
+    } else {
+      out = eval_cluster(input_data = input_data, cluster_meth = cluster_meth,
+                         n_clust = final_cluster, clustering_criteria = clustering_criteria, new_data = new_data)
+      saveRDS(out, './Distance_to_Default/Checkpoints/clustering_latex.rds')
+    }
+    write.table(out$perf, './Paper/Latex_Table_Figure/04_clustering_on_embedding_latex.csv', sep = ';', row.names = F, append = F)
+    best_meth = "GMM_eucl_dist" # "hclust_maha_dist_ward.D"
+    pr = out[["cluster"]][[best_meth]][["input_label"]]
+    pr_peers = out[["cluster"]][[best_meth]][["new_label"]]
+    
     plot_data$Label = factor(paste0("cl_", pr), levels = paste0("cl_", 1:final_cluster))
     
+    # assign label to peers
     plot_data_peers = list_emb_visual[[emb_type]][[names(best_comb_visual)]][[best_comb]][["emb_predict_visual"]] %>%
+      filter(year <= max_year) %>%
       mutate(size = 1) %>%
       setNames(gsub('^[V]', "Dim", names(.))) 
-    
-    # assign label to peers
     df_label = map_cluster_on_peers(label_type, categorical_variables, df_peers_long, ORBIS_mapping, ORBIS_label)
     plot_data_peers = plot_data_peers %>%
       left_join(df_label, by = "Company_name_Latin_alphabet")
     if (sum(is.na(plot_data_peers)) > 0){cat('\n  ######## missing in plot_data_peers:', label_type, '-', emb_type)}
-    pr_peers = predict_KMeans(list_embedding[[emb_type]][["emb_peers"]] %>% select(starts_with("V")), km)
     plot_data_peers$Label = factor(paste0("cl_", pr_peers), levels = paste0("cl_", 1:final_cluster))
     
     # create aggregated points input
@@ -3748,7 +3774,7 @@ df_main_work = readRDS(paste0('./Distance_to_Default/Checkpoints/df_work_', clus
       }
     }
 
-    pr_peers = predict_KMeans(list_embedding[[emb_type]][["emb_peers"]] %>% select(starts_with("V")), km)
+    pr_peers = predict_KMeans(list_embedding[[emb_type]][["emb_peers"]] %>% filter(year <= max_year) %>% select(starts_with("V")), km)
     plot_data_peers_orig$Label = factor(paste0("cl_", pr_peers), levels = paste0("cl_", 1:final_cluster_original))
     
     for (cl in unique(plot_data_peers_orig$Label)){
@@ -3785,8 +3811,271 @@ df_main_work = readRDS(paste0('./Distance_to_Default/Checkpoints/df_work_', clus
         pl_data = plot_list_tt[[1]]
       }
     
+    
+    
+    # ANOVA test for clusters from embeddings and original data as variable
+    char_var = c("Dimensione_Impresa", "Regione_Macro", "Industry", "Dummy_industry")
+    variable_set = df_final_small %>% select(starts_with("BILA_"), all_of(char_var)) %>% colnames()
+    group_var = "Label"
+    df_anova = df_final_small %>%
+      filter(year <= max_year) %>%
+      select(abi, ndg, starts_with("BILA_"), all_of(char_var)) %>%
+      mutate(abi_ndg = paste0(abi, "_", ndg)) %>%
+      left_join(pl_data$data %>%
+                  group_by(abi_ndg) %>%
+                  # summarise(Label = Mode(Label)) %>%
+                  summarize(Label = calculate_mode(Label), .groups = "drop"), by = "abi_ndg")
+    anova_pval = 0.05
+    
+    rr = cluster_ANOVA(df_anova, group_var, variable_set, anova_pval)
+    var_res = rr$var_res
+    var_res_summary = rr$var_res_summary
+    conf_mat = rr$conf_mat
+    stat_data = rr$stat_data
+    
+    write.table(var_res, './Paper/Latex_Table_Figure/04_Clustering_ANOVA_embedding_log.csv', sep = ';', row.names = F, append = F)
+    write.table(var_res_summary, './Paper/Latex_Table_Figure/04_Clustering_ANOVA_embedding_summary.csv', sep = ';', row.names = F, append = F)
+    
+    # plot boxplot from ANOVA
+    var_to_show = var_res_summary %>% filter(type == "num") %>% pull(variable)
+    char_var_to_show = c("Dimensione_Impresa", "Regione_Macro", "Industry", "Dummy_industry")
+    tot_plot_col = 3    # number of pairs of plots 3means 6 plot per row
+    tot_plot_col_char = 2
+    {
+
+      # plot boxplot and confusion matrix for numeric variables
+      {
+        # get layout grid size
+        tot_plot = length(var_to_show)# + length(char_var_to_show)
+        tot_plot_row = ceiling(tot_plot / tot_plot_col)
+        tot_plot_second_last_row = tot_plot_col - (tot_plot %% tot_plot_col)    # plots in the second-last row with no plot underneath
+        
+        plot_cc = 1
+        plot_list = list()
+        layout_mat = rep(NA, tot_plot_row * tot_plot_col)
+        for (var in var_to_show){
+
+          first_col = ifelse(plot_cc %% tot_plot_col == 1, T, F)
+          bottom_row = ifelse((ceiling(plot_cc / tot_plot_col) == tot_plot_row) |
+                                ((ceiling(plot_cc / tot_plot_col) == (tot_plot_row - 1)) & (tot_plot_col - plot_cc %% tot_plot_col < tot_plot_second_last_row)) |
+                                ((ceiling(plot_cc / tot_plot_col) == (tot_plot_row - 1)) & (tot_plot_col - plot_cc %% tot_plot_col == tot_plot_col)), T, F)
+          
+          # boxplot
+          plot_data = stat_data %>%
+            filter(variable == var)
+          x_lab = var_res %>% filter(variable == var) %>% select(group, n_differences)
+          
+          p_left = ggplot(plot_data, aes(x=group, y=val, fill=group)) + 
+            geom_boxplot(outlier.shape = NA) +
+            guides(fill = guide_legend(title = "Cluster")) +
+            scale_fill_manual(values = c('dodgerblue3', 'firebrick2', 'chartreuse3', 'cadetblue2', 'gold1',
+                                         'darkorange', 'slategray4', 'violet', 'yellow1'),
+                              labels = paste0("Cluster ", 1:uniqueN(plot_data$group))) +
+            scale_x_discrete(breaks = x_lab$group, labels = x_lab$n_differences) +
+            labs(title = variable_mapping %>% filter(orig == var) %>% pull(new),
+                 x = ifelse(bottom_row, "Total differences with\nother clusters", ""),
+                 y = ifelse(first_col, "Value", "")) +
+            theme(
+              legend.title = element_text(size = 30),
+              legend.text = element_text(size = 25),
+              legend.key = element_rect(fill = "white"),
+              legend.key.size = unit(2.5, "cm"),
+              legend.position="bottom",
+              legend.box="vertical",
+              legend.box.just = "left",
+              axis.title=element_text(size = 18),
+              axis.text = element_text(size = 14),
+              plot.title = element_textbox(
+                size = 20,                  # Font size
+                color = "black",            # Text color
+                fill = "grey",          # Background color
+                box.color = "black",        # Box border color
+                # box.size = 1.5,             # Thickness of the border
+                halign = 0.5,               # Horizontal alignment (centered)
+                padding = margin(5, 5, 5, 5), # Padding inside the box
+                # margin = margin(10, 0, 10, 0), # Margin around the box
+                width = unit(1, "npc")
+              ),
+              plot.margin = margin(0, 0, 0, 0)) 
+          p_legend <- cowplot::get_plot_component(p_left, 'guide-box-bottom', return_all = F)
+          p_left = p_left + guides(fill="none")
+          
+          # confusion matrix
+          df = data.frame(conf_mat[[var]]) %>%
+            mutate(clr = ifelse(Freq == 1, "steelblue", NA),
+                   line_clr = ifelse(Freq == 1, "black", NA),
+                   Var1 = factor(gsub("cl_", "", Var1), levels = as.character(uniqueN(plot_data$group):1)),
+                   Var2 = factor(gsub("cl_", "", Var2), levels = as.character(1:uniqueN(plot_data$group))))
+          p_right = ggplot(df, aes(x = Var2, y = Var1, fill = clr)) +
+            geom_tile(aes(color = line_clr), size = 0.5, width = 0.8, height = 0.8, lwd = 1, linetype = 1) +
+            coord_fixed() +
+            scale_fill_identity() +
+            scale_color_identity() +
+            scale_x_discrete(position = "top", limits = as.character(2:uniqueN(plot_data$group))) +
+            scale_y_discrete(limits = as.character((uniqueN(plot_data$group)-1):1)) +
+            labs(title = "Difference between\nclusters", subtitle = paste0("Significance level: ", round((1-anova_pval) * 100, 2), "%"),
+                 x = "Cluster", y = "Cluster") + 
+            theme(axis.title=element_text(size = 17),
+                  axis.text = element_text(size = 14),
+                  plot.title = element_text(size = 19),
+                  plot.subtitle = element_text(size = 15),
+                  panel.background = element_rect(fill = "white", colour = "black"),
+                  panel.grid.major = element_line(colour = "grey", linetype = 'dashed', linewidth = 0.4),
+                  panel.grid.minor = element_line(colour = "grey", linetype = 'dashed', linewidth = 0.4),
+                  plot.margin = margin(0, 0, 0, 0))
+
+          p = arrangeGrob(grobs = list(p_left, p_right), widths = c(1, 1), heights = c(0, 1, 0.4),
+                      layout_matrix = rbind(c(1, NA), c(1, 2), c(1, NA)), padding = unit(0, "lines"))
+          
+          plot_list = c(plot_list, list(p))
+          layout_mat[plot_cc] = plot_cc
+          plot_cc = plot_cc + 1
+        } # var
+        layout_mat = matrix(layout_mat, ncol = tot_plot_col, byrow = T)
+        layout_mat = rbind(layout_mat, rep(plot_cc, tot_plot_col))
+        
+        tit = textGrob("ANOVA test for differences in clusters", gp = gpar(fontsize = 34), x = 0, hjust = 0)
+        
+        png('./Paper/Latex_Table_Figure/04_Clustering_ANOVA_embedding.png', width = 9 * tot_plot_col, height = 5 * tot_plot_row, units = 'in', res=300)
+        grid.draw(
+          grid.arrange(
+            gtable_col('title', grobs = list(tit), heights = unit.c(grobHeight(tit) + 0*unit(0.2, "line"))),#, grobHeight(subtit) + unit(0.5, "line"))),
+            arrangeGrob(grobs = c(plot_list, list(p_legend)),  widths = rep(1, tot_plot_col), heights = c(rep(1, tot_plot_row), 0.4),
+                        layout_matrix =layout_mat, padding = unit(0, "lines")),
+            heights = c(0.1, 1))
+        )
+        dev.off()
+      }
+      
+      # plot barplot for character variables
+      {
+        tot_plot_col = tot_plot_col_char
+        tot_plot = length(char_var_to_show)
+        tot_plot_row = ceiling(tot_plot / tot_plot_col)
+        tot_plot_second_last_row = tot_plot_col - (tot_plot %% tot_plot_col)    # plots in the second-last row with no plot underneath
+        
+        plot_cc = 1
+        plot_list = list()
+        layout_mat = rep(NA, tot_plot_row * tot_plot_col)
+        for (var in char_var_to_show){
+          
+          var_lab = variable_mapping %>% filter(orig == var) %>% pull(new)
+          df = df_anova %>%
+            select(Label, all_of(var)) %>%
+            mutate(Label = gsub("cl_", "", Label)) %>%
+            rename(Cluster = Label,
+                   !!sym(var_lab) := !!sym(var))
+          if (var == "Industry"){
+            df = df %>%
+              # separate(!!sym(var_lab), c("letter", "descr"), sep = " - ") %>%
+              # left_join(industry_short, by = c("descr" = "orig")) %>%
+              # select(Cluster, new) %>%
+              # rename(!!sym(var_lab) := new)
+              separate(!!sym(var_lab), c("letter", "descr"), sep = " - ") %>%
+              select(Cluster, letter) %>%
+              rename(!!sym(var_lab) := letter)
+          }
+          if (var == "Dimensione_Impresa"){
+            df = df %>%
+              mutate(!!sym(var_lab) := factor(!!sym(var_lab), levels = c("LARGE", "MEDIUM", "SMALL", "MICRO")))
+          } else if (var == "Regione_Macro"){
+            df = df %>%
+              mutate(!!sym(var_lab) := factor(!!sym(var_lab), levels = c("NORD-EST", "NORD-OVEST", "CENTRO", "SUD", "ISOLE")))
+          } else {
+            df = df %>%
+              mutate(!!sym(var_lab) := factor(!!sym(var_lab)))
+          }
+          
+          plot_data_perc = df %>%
+            rename(var = !!sym(var_lab)) %>%
+            group_by(var, Cluster) %>%
+            summarise(count = n(), .groups = "drop") %>%
+            group_by(Cluster) %>%
+            mutate(perc = round(count / sum(count) * 100),
+                   Cluster = as.factor(Cluster))
+          
+          p_left = ggplot(plot_data_perc, aes(x = Cluster, y = perc, fill = var)) +
+            geom_bar(stat = "identity", position = "fill") +
+            geom_text(aes(label = paste0(perc, "%")), position = position_fill(vjust = 0.5), size = 5) +  # Add percentage labels
+            scale_y_continuous(labels = scales::percent) +  # Format y-axis as percentages
+            labs(x = "Cluster", y = "Observations (%)", fill = "Values", title = var_lab) +
+            theme_minimal() +
+            guides(fill = guide_legend(reverse = TRUE)) +
+            theme(axis.text =  element_text(size = 14),
+                  axis.title = element_text(size = 18),
+                  legend.text=element_text(size=14),
+                  legend.title=element_text(size=16),
+                  panel.background = element_rect(fill = "white", colour = "black"),
+                  panel.grid.major.x = element_line(colour = "grey", linetype = 'dashed', linewidth = 0.4),
+                  panel.grid.minor.x = element_line(colour = "grey", linetype = 'dashed', linewidth = 0.4),
+                  plot.title = element_textbox(
+                    size = 20,                  # Font size
+                    color = "black",            # Text color
+                    fill = "grey",          # Background color
+                    box.color = "black",        # Box border color
+                    # box.size = 1.5,             # Thickness of the border
+                    halign = 0.5,               # Horizontal alignment (centered)
+                    padding = margin(5, 5, 5, 5), # Padding inside the box
+                    # margin = margin(10, 0, 10, 0), # Margin around the box
+                    width = unit(1, "npc")
+                  ),
+                  plot.margin = margin(0, 0, 0, 0)) 
+          
+          p_right = suppressWarnings(as.ggplot(~
+            mosaic(table(df[, c("Cluster", var_lab)]), gp = shading_hsv, 
+                            split_vertical = T, shade = T,
+                            main="Chi-Square contribution",
+                            labeling = labeling_left(tl_labels = c(F, T), tl_varnames = c(F, T), pos_varnames = "center", pos_labels = "center",
+                                                     rot_labels = c(0, 0, 0, 0), clip = F, offset_label =c(0,0,0, 3),
+                                                     gp_labels = gpar(fontsize = 14), gp_varnames = gpar(fontsize = 18)),
+                   margins = unit(c(1, 0, 5, 0), "lines"),
+                            legend = legend_resbased(pdigits = 2, fontsize = 14),
+                            return_grob = T
+          )))
+
+          p = arrangeGrob(grobs = list(p_left, p_right), widths = c(1, 1.3), heights = c(0, 2, 0.7),
+                         layout_matrix = rbind(c(1, NA), c(1, 2), c(1, NA)), padding = unit(0, "lines"))
+          
+          plot_list = c(plot_list, list(p))
+          layout_mat[plot_cc] = plot_cc
+          plot_cc = plot_cc + 1
+        }  # var
+        layout_mat = matrix(layout_mat, ncol = tot_plot_col, byrow = T)
+        
+        tit = textGrob("Chi-Square test for differences in clusters", gp = gpar(fontsize = 34), x = 0, hjust = 0)
+        
+        png('./Paper/Latex_Table_Figure/04_Clustering_ANOVA_embedding_categorical.png', width = 12 * tot_plot_col, height = 5 * tot_plot_row, units = 'in', res=300)
+        grid.draw(
+          grid.arrange(
+            gtable_col('title', grobs = list(tit), heights = unit.c(grobHeight(tit) + 0*unit(0.2, "line"))),#, grobHeight(subtit) + unit(0.5, "line"))),
+            arrangeGrob(grobs = plot_list,  widths = rep(1, tot_plot_col), heights = rep(1, tot_plot_row),
+                        layout_matrix =layout_mat, padding = unit(0, "lines")),
+            heights = c(0.1, 1))
+        )
+        dev.off()
+        
+        
+      }
+      
+      
+    }
+    
+    ###   todo: fai i grafici dove confronti le distribuzioni (o meglio i box plot), aggiungendo anche le le variabili di controllo (regione, industria, dimensione, ecc)
+    #  capisci se mettere le confusion matrix?
+    
+      
+    
+    
+    
+    
+    
+    
     # box-plot for original variables
     {
+      calculate_mode <- function(x) {
+        ux <- unique(x)                          # Get unique values
+        ux[which.max(tabulate(match(x, ux)))]    # Return the most frequent value
+      }
       stats_numeric = read.csv('./Paper/Latex_Table_Figure/00_statistics_num.csv', sep = ';', stringsAsFactors = F)
       box_data_peers = list_emb_input$df_emb_input_peers_header %>%
         select(European_VAT_number, year) %>%
@@ -3794,12 +4083,14 @@ df_main_work = readRDS(paste0('./Distance_to_Default/Checkpoints/df_work_', clus
         gather("Variable", "Value", -c(European_VAT_number, year)) %>%
         left_join(pl_data$additional_data %>% select(European_VAT_number, year, Label), by = c("European_VAT_number", "year")) %>%
         filter(!is.na(Label)) %>%  # remove 2011
+        filter(year <= max_year) %>%
         group_by(Label, Variable) %>%
         summarise(Mean = mean(Value),
                   Sd = sd(Value), .groups = "drop") %>%
         left_join(pl_data$additional_data %>%
                     group_by(European_VAT_number) %>%
-                    summarise(Label = Mode(Label)) %>%
+                    # summarise(Label = Mode(Label)) %>%
+                    summarize(Label = calculate_mode(Label), .groups = "drop") %>%
                     group_by(Label) %>%
                     summarise(Count = n(), .groups = "drop"), by = "Label") %>%
         left_join(variable_mapping, by = c("Variable" = "orig")) %>%
@@ -3810,6 +4101,7 @@ df_main_work = readRDS(paste0('./Distance_to_Default/Checkpoints/df_work_', clus
         mutate(Cluster = factor(Cluster))
       
       box_data = list_emb_visual[[emb_type]]$UMAP[[1]][["emb_visual"]] %>%
+        filter(year <= max_year) %>%
         select(abi, ndg, year) %>%
         bind_cols(pl_data$data %>% select(Label)) %>%
         left_join(df_final_small %>% select(abi, ndg, year, starts_with("BILA_")), by = c("abi", "ndg", "year")) %>%
@@ -3862,7 +4154,7 @@ df_main_work = readRDS(paste0('./Distance_to_Default/Checkpoints/df_work_', clus
                 axis.text.y=element_text(size = 20),
                 plot.title = element_text(size = 40, margin=margin(15,0,30,0)),
                 strip.text.x = element_text(size = 22, face = 'bold'),
-                strip.background = element_rect(color = "black", size = 1)) +
+                strip.background = element_rect(color = "black", linewidth = 1)) +
           ggtitle('Peers vs MSMEs original variables distribution in each cluster')
       )
       dev.off()
@@ -3881,7 +4173,8 @@ df_main_work = readRDS(paste0('./Distance_to_Default/Checkpoints/df_work_', clus
                   Sd = sd(Value), .groups = "drop") %>%
         left_join(pl_data$additional_data %>%
                     group_by(European_VAT_number) %>%
-                    summarise(Label = Mode(Label)) %>%
+                    # summarise(Label = Mode(Label)) %>%
+                    summarize(Label = calculate_mode(Label), .groups = "drop") %>%
                     group_by(Label) %>%
                     summarise(Count = n(), .groups = "drop"), by = "Label") %>%
         mutate(Cluster = paste0("Cluster ", gsub("cl_", "", Label), "\n(", Count, " matched peers)")) %>%
@@ -3941,7 +4234,7 @@ df_main_work = readRDS(paste0('./Distance_to_Default/Checkpoints/df_work_', clus
                 axis.text.y=element_text(size = 20),
                 plot.title = element_text(size = 40, margin=margin(15,0,30,0)),
                 strip.text.x = element_text(size = 22, face = 'bold'),
-                strip.background = element_rect(color = "black", size = 1)) +
+                strip.background = element_rect(color = "black", linewidth = 1)) +
           ggtitle('Peers vs MSMEs embedding variables distribution in each cluster')
       )
       dev.off()

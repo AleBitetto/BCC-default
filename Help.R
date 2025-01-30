@@ -3864,3 +3864,368 @@ evaluate_feature_importance = function(df_work, model_setting_block, method,
   
   return(feat_imp)
 }
+
+suppressMessages(Rcpp::sourceCpp(code='
+  // [[Rcpp::depends(RcppArmadillo, RcppEigen)]]
+
+#include <RcppArmadillo.h>
+#include <RcppEigen.h>
+
+
+// [[Rcpp::export]]
+SEXP eigenMapMatMult(const Eigen::Map<Eigen::MatrixXd> A, Eigen::Map<Eigen::MatrixXd> B){
+    Eigen::MatrixXd C = A * B;
+
+    return Rcpp::wrap(C);
+}'))
+
+# capture toc() and return time in different formats
+toc_capture = function(){
+  # run toc_capture() after tic(). Works also for nested tic()
+  tot_time =  lubridate::seconds_to_period(as.numeric(strsplit(capture.output(toc()), " ")[[1]][1]))
+  tot_time_sec = lubridate::period_to_seconds(tot_time)
+  tot_time_lab = paste0(lubridate::hour(tot_time), 'h:', lubridate::minute(tot_time), 'm:', round(lubridate::second(tot_time)), 's')
+  
+  return(list(tot_time = tot_time,             # is seconds_to_period()
+              tot_time_sec = tot_time_sec,     # in seconds (int)
+              tot_time_lab = tot_time_lab      # formatted string "1h:2m:34s"
+  ))
+}
+
+# evaluate clustering
+eval_cluster = function(input_data, cluster_meth, n_clust, clustering_criteria, new_data){
+  
+  # cluster_meth: "kmeans", "GMM", "hdbscan", "hclust"
+  # clustering_criteria: 'davies_bouldin', 'silhouette', 'PBM', 'Calinski_Harabasz'   see clusterCrit::intCriteria()
+  # input_data, new_data: data.frame
+  
+  
+  # evaluate distance
+  eval_dist = function(x, met){
+    # met: "eucl_dist", "maha_dist", "cosine_dist"
+    
+    if (met == "eucl_dist"){
+      dd = dist(x, method = "euclidean")
+    }
+    if (met == "maha_dist"){
+      dd = dist(x, method = "manhattan")
+    }
+    if (met == "cosine_dist"){
+      
+      dd <- as.matrix(x / sqrt(rowSums(x^2)))
+      dd =  eigenMapMatMult(dd, t(dd))   # dd %*% t(dd)
+      dd = as.dist(dd)
+      names(dd) = rownames(x)
+    }
+    
+    return(dd)
+  }
+  
+  
+  
+  out = list()
+  df_perf = c()
+  if ("kmeans" %in% cluster_meth){
+    tic()
+    cat(paste0('\n  ** Evaluating: "K-means" with distance "eucl_dist"   - last interaction: ', format(Sys.time(), "%Y-%m-%d - %H:%M:%S"), '          '))
+    
+    km = ClusterR::KMeans_arma(input_data, clusters = n_clust, n_iter = 100, seed_mode = "random_subset",
+                               verbose = F, CENTROIDS = NULL)
+    pr = predict_KMeans(input_data, km)
+    pr_new = predict_KMeans(new_data, km)
+    
+    out[["kmeans"]] = list(input_label = pr,
+                           new_label = pr_new)
+    df_perf = df_perf %>%
+      bind_rows(
+        data.frame(intCriteria(traj = input_data %>% as.matrix(), part = as.integer(pr), crit = clustering_criteria)) %>%
+          mutate(Clustering = "kmeans",
+                 Cluster_obs = paste0(table(pr), collapse = "-")))
+    cat('\n      Done in ', toc_capture()$tot_time_lab)
+  }
+  
+  if ("GMM" %in% cluster_meth){
+    cc = 1
+    dist_set = c("eucl_dist", "maha_dist")
+    tic()
+    cat('\n')
+    for (dd in dist_set){
+      cat(paste0('  ** Evaluating: "GMM" with distance "', dd, '" (', cc, '/', length(dist_set), ')   - last interaction: ', format(Sys.time(), "%Y-%m-%d - %H:%M:%S"), '          '), end = '\r')
+      gmm = GMM(input_data, gaussian_comps = n_clust, dist_mode = dd, "random_subset", km_iter = 50, em_iter = 50)
+      pr = predict_GMM(input_data, gmm$centroids, gmm$covariance_matrices, gmm$weights)$cluster_labels
+      pr_new = predict_GMM(new_data, gmm$centroids, gmm$covariance_matrices, gmm$weights)$cluster_labels
+      
+      out[[paste0("GMM_", dd)]] = list(input_label = pr,
+                                       new_label = pr_new)
+      df_perf = df_perf %>%
+        bind_rows(
+          data.frame(intCriteria(traj = input_data %>% as.matrix(), part = as.integer(pr), crit = clustering_criteria)) %>%
+            mutate(Clustering = paste0("GMM_", dd),
+                   Cluster_obs = paste0(table(pr), collapse = "-")))
+      cc = cc + 1
+    } # dd
+    cat('\n      Done in ', toc_capture()$tot_time_lab)
+  }
+  
+  if ("hdbscan" %in% cluster_meth){
+    cc = 1
+    dist_set = c("eucl_dist", "maha_dist", "cosine_dist")
+    tic()
+    cat('\n')
+    for (dd in dist_set){
+      
+      cat(paste0('  ** Evaluating: "HDBSCAN" with distance "', dd, '" (', cc, '/', length(dist_set), ')    - last interaction: ', format(Sys.time(), "%Y-%m-%d - %H:%M:%S"), '          '), end = '\r')
+      
+      t_in = eval_dist(input_data, met = dd)
+      t_new = eval_dist(new_data, met = dd)
+      
+      res = hdbscan(t_in, minPts = 2 * ncol(input_data))
+      # pr = res$cluster
+      pr = cutree(res$hc, n_clust)
+      pr_new = predict(res, t_new, t_in)     # todo: to be checked
+      
+      out[[paste0("hdbscan_", dd)]] = list(input_label = pr,
+                                           new_label = pr_new)
+      df_perf = df_perf %>%
+        bind_rows(
+          data.frame(intCriteria(traj = input_data %>% as.matrix(), part = as.integer(pr), crit = clustering_criteria)) %>%
+            mutate(Clustering = paste0("hdbscan_", dd),
+                   Cluster_obs = paste0(table(pr), collapse = "-")))
+      cc = cc + 1
+    } # dd
+    cat('\n      Done in ', toc_capture()$tot_time_lab)
+  }
+  
+  if ("hclust" %in% cluster_meth){
+    cc = 1
+    dist_set = c("eucl_dist", "maha_dist", "cosine_dist")
+    link_set = c("ward.D", "single", "complete", "average")
+    tic()
+    cat('\n')
+    for (dd in dist_set){
+      
+      t_in = eval_dist(input_data, met = dd)
+      
+      for (lin in link_set){
+        
+        cat(paste0('  ** Evaluating: "H-CLUST" with distance "', dd, '" and linkage "', lin, '" (', cc, '/', length(dist_set) * length(link_set),
+                   ')    - last interaction: ', format(Sys.time(), "%Y-%m-%d - %H:%M:%S"), '          '), end = '\r')
+        
+        hc = hclust(t_in, method = lin)
+        pr = cutree(hc, n_clust)
+        
+        # evaluate centroids and assign cluster based on closest one
+        centroid = input_data %>%
+          mutate(cluster = paste0("centroid_", pr)) %>%
+          group_by(cluster) %>%
+          summarise_all(mean) %>%
+          column_to_rownames("cluster")
+        
+        df_match = new_data %>%
+          mutate(rrr = paste0("row_", 1:n())) %>%
+          remove_rownames %>%
+          column_to_rownames("rrr") %>%
+          bind_rows(centroid)
+        
+        df_assign = eval_dist(df_match, met = dd) %>%
+          as.matrix() %>%
+          data.frame() %>%
+          select(starts_with("centroid_")) %>%
+          rownames_to_column("ff") %>%
+          filter(!ff %in% rownames(centroid)) %>%
+          select(-ff) %>%
+          rowwise() %>%
+          mutate(cluster = names(.)[which.min(c_across(everything()))]) %>%
+          ungroup() %>%
+          mutate(cluster = gsub("centroid_", "", cluster) %>% as.numeric())
+        pr_new = df_assign$cluster
+        
+        
+        out[[paste0("hclust_", dd, "_", lin)]] = list(input_label = pr,
+                                                      new_label = pr_new)
+        df_perf = df_perf %>%
+          bind_rows(
+            data.frame(intCriteria(traj = input_data %>% as.matrix(), part = as.integer(pr), crit = clustering_criteria)) %>%
+              mutate(Clustering = paste0("hclust_", dd, "_", lin),
+                     Cluster_obs = paste0(table(pr), collapse = "-")))
+        cc = cc + 1
+      } # lin
+    } # dd
+    cat('\n      Done in ', toc_capture()$tot_time_lab)
+  }
+  
+  df_perf = df_perf %>%
+    mutate(Tot_clust = n_clust) %>%
+    relocate(Cluster_obs, .before = 1) %>%
+    relocate(Tot_clust, .before = 1) %>%
+    relocate(Clustering, .before = 1)
+  
+  out = list(cluster = out,
+             perf = df_perf)
+  
+  return(out)
+}
+
+# Evaluate ANOVA to assess differences in clusters
+cluster_ANOVA = function(df_anova, group_var, variable_set, anova_pval){
+  
+  # If variable is categorical, chi-square is performed
+  
+  # https://www.datanovia.com/en/lessons/anova-in-r/#three-way-independent-anova
+  # https://statsandr.com/blog/kruskal-wallis-test-nonparametric-version-anova/
+  # https://www.sthda.com/english/wiki/chi-square-test-of-independence-in-r
+  
+  # group_var: string with the name of the variable to be used to group ANOVA, i.e. clusters. Must be factor.
+  # df_anova: data.frame that contains variable_set and group_var
+  # variable_set: array of strings with variables to be tested (one-by-one) for the ANOVA according to group_var
+  # anova_pval: p-value to keep significant differences
+  
+  # returns:
+  #   var_res: data.frame with results for every cluster and variable
+  #   var_res_summary: data.frame with summary statistics for every variable
+  #   conf_mat: list of confusion matrix for every variable for difference pairs
+  #   stat_data: data.frame of data used to evaluate ANOVA. Differs from df_anova because outliers might be removed
+  
+  
+  var_res = c()
+  conf_mat = list()
+  stat_data = c()
+  cc = 1
+  for (var in variable_set){
+    
+    cat('ANOVA for clusters for variable: ', var, paste0('  (', cc , '/', length(variable_set), ')                         '), end = '\r')
+    
+    df = df_anova %>%
+      rename(group = !!sym(group_var),
+             var = !!sym(var)) %>%
+      select(group, var) %>%
+      mutate(row_ref = 1:n())
+    
+    ## Chi-square
+    if (class(df$var) == "character"){
+      
+      cs = chisq.test(table(df$group, df$var))
+
+      conf_mat[[var]] = round(cs$residuals, 3)
+
+      var_res = var_res %>%
+        bind_rows(data.frame(round(cs$residuals^2 / cs$statistic * 100, 2)) %>%
+                    rename(group = Var1) %>%
+                    group_by(group) %>%
+                    summarise(contribution_perc = sum(Freq), .groups = "drop") %>%
+                    left_join(df %>%
+                                group_by(group) %>%
+                                summarise(tot_obs = n(), .groups = "drop"), by = "group") %>%
+                    mutate(variable = var,
+                           chi_square_pval = cs$p.value %>% round(8),
+                           type = "char") %>%
+                    select(variable, type, group, tot_obs, chi_square_pval, contribution_perc))
+    }
+    
+    ## ANOVA
+    if (class(df$var) != "character"){
+      
+      # test outliers (in case, you should use "WRS2" package?)
+      df = df %>%
+        group_by(group) %>%
+        mutate(outlier = outliers:::outlier(var, opposite = FALSE, logical = T)) %>%
+        ungroup()
+      out = df %>%
+        group_by(group) %>%
+        summarise(tot_obs = n(),
+                  outliers_tot = sum(outlier),
+                  outliers_perc = round(sum(outlier) / n() * 100, 2))
+      out = out %>%
+        mutate(outliers_all = sum(out$outliers_tot),
+               outliers_all_perc = round(outliers_all / sum(tot_obs) * 100, 2))
+      if (nrow(out) > 0){
+        df = df %>%
+          filter(outlier == F)
+      } else {
+        out = df %>%
+          group_by(group) %>%
+          summarise(tot_obs = n(), .groups = "drop") %>%
+          mutate(outliers_all = NA,
+                 outliers_all_perc = NA,
+                 outliers_tot = NA,
+                 outliers_perc = NA)
+      }
+      out = out %>%
+        select(group, tot_obs, outliers_all, outliers_all_perc, everything())
+      stat_data = stat_data %>%
+        bind_rows(df %>%
+                    rename(val = var) %>%
+                    mutate(variable = var) %>%
+                    select(-outlier))
+      
+      # normality test
+      norm_t = df %>%
+        group_by(group) %>%
+        summarise(AD_test_big_is_normal = nortest:::ad.test(var)$p.value %>% round(8), .groups = "drop")   # small p-val means NON normality
+      
+      # homogeneity of variance
+      hom = levene_test(df, var ~ group)$p    # small p-val means ETEROGENEITY
+      
+      # ANOVA via Kruskal-Wallis test
+      kw = kruskal.test(var ~ group, data = df)      # small p-val means there is difference among groups
+      
+      # post-hoc test via Dunn test
+      ph = FSA:::dunnTest(var ~ group, data = df, method = "holm")
+      anova_res = ph$res %>%
+        filter(P.adj < anova_pval) %>%
+        separate(Comparison, c('g1', 'g2'), sep= ' - ', remove = F) %>%
+        select(g1, g2) %>%
+        unlist() %>%
+        table() %>%
+        data.frame() %>%
+        column_to_rownames(".") %>%
+        rename(n_differences = Freq) %>%
+        rownames_to_column("group")
+      # t() %>%
+      # as.data.frame() %>%
+      # setNames(paste0("n_different_", names(.))) %>%
+      # remove_rownames()
+      
+      tt = ph$res %>%
+        filter(P.adj < anova_pval) %>%
+        separate(Comparison, c('g1', 'g2'), sep= ' - ', remove = F) 
+      conf_mat[[var]] = table(tt$g1, tt$g2)
+      
+      var_res = var_res %>%
+        bind_rows(out %>%
+                    full_join(norm_t, by = "group") %>%
+                    mutate(homog_variance_big_is_ok = hom %>% round(8),
+                           variable = var,
+                           type = "num") %>%
+                    left_join(anova_res, by = "group") %>%
+                    mutate(n_different_all = sum(anova_res$n_differences)) %>%
+                    select(variable, type, group, everything()) %>%
+                    relocate(n_different_all, .after = tot_obs))
+    }
+    
+    cc = cc + 1
+  } # var
+  cat('\n')
+  
+  var_res_summary = var_res %>%
+    filter(type == "num") %>%
+    group_by(variable, type) %>%
+    summarise(tot_obs = sum(tot_obs),
+              n_different_all = unique(n_different_all),
+              outliers_all = unique(outliers_all),
+              outliers_all_perc = unique(outliers_all_perc), .groups = "drop") %>%
+    arrange(desc(n_different_all)) %>%
+    bind_rows(var_res %>%
+                filter(type == "char") %>%
+                group_by(variable, type) %>%
+                summarise(tot_obs = sum(tot_obs),
+                          chi_square_pval = unique(chi_square_pval), .groups = "drop") %>%
+                arrange(desc(chi_square_pval)))
+  
+  return(list(var_res = var_res,
+              var_res_summary = var_res_summary,
+              conf_mat = conf_mat,
+              stat_data = stat_data
+  ))
+}
+
