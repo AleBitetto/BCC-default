@@ -1814,7 +1814,7 @@ create_stratified_fold = function(df_work, inn_cross_val_fold, out_cross_val_fol
   )
 }
 
-# fit glmnet and select optimal lambda with cross-validation
+# fit "glmnet" and select optimal lambda with cross-validation
 fit_cv_glmnet = function(x, y, alpha = 1, standardize = F, intercept = T, parallel = T,
                          type.measure = "auc", lambda_final = "lambda.1se", family = "binomial",
                          fixed_variables = c(), n_fold_cvgmlnet = 10, x_test_predict = NULL){
@@ -2264,7 +2264,26 @@ balance_abi_ndg_class1 = function(data_train, data_test, abi_ndg_row_reference_c
               summary_movement = summary_movement))
 }
 
-# fit Random Forest with ranger
+# evaluates confusion matrix and Matthews correlation coefficient 
+conf_mat_mcc = function(y_true, y_pred){
+  
+  ind_pred_0 = y_pred == 0
+  ind_pred_1 = y_pred == 1
+  tp = sum(y_true[ind_pred_1] == 1)
+  fp = sum(y_true[ind_pred_1] == 0)
+  tn = sum(y_true[ind_pred_0] == 0)
+  fn = sum(y_true[ind_pred_0] == 1)
+  cm = matrix(c(tp, fn, fp, tn), ncol = 2, byrow = T)
+  rownames(cm) = c("True_1", "True_0")
+  colnames(cm) = c("Pred_1", "Pred_0")
+  
+  mcc = (tp * tn - fp * fn) / (sqrt((tp + fp)) * sqrt((tp + fn)) * sqrt((tn + fp)) * sqrt((tn + fn)))
+  
+  return(list(conf_mat = cm,
+              mcc = mcc))
+}
+
+# fit Random Forest with "ranger"
 fit_RandomForest = function(data_train, data_test, num.trees, mtry, min.node.size){
   
   # data_train: must contain target variable as "y" and factor
@@ -2303,7 +2322,7 @@ fit_RandomForest = function(data_train, data_test, num.trees, mtry, min.node.siz
                              min.node.size = min.node.size)))
 }
 
-# fit MARS
+# fit MARS with "earth"
 fit_MARS = function(data_train, data_test, degree){
   
   # http://www.milbo.org/doc/earth-notes.pdf
@@ -2355,24 +2374,87 @@ fit_MARS = function(data_train, data_test, degree){
               options = list(degree = degree)))
 }
 
-# fit SVM with RBF
+# fit SVM with RBF with "kernlab"
 fit_SVM_RBF = function(data_train, data_test, sigma, C, scaled = F){
   
   # https://cran.r-project.org/web/packages/kernlab/kernlab.pdf
   # data_train: must contain target variable as "y" and factor
   # data_test: same columns of data_train ("y" not required)
   
-  # fit model
-  fit <-  ksvm(y~., data = data_train, type = "C-svc", prob.model = T, scaled = scaled,
-               kernel="rbfdot", kpar=list(sigma = sigma), C=C)
+  # class weights
+  fraction_0 <- 1 - sum(data_train$y == 0) / nrow(data_train)
+  fraction_1 <- 1 - sum(data_train$y == 1) / nrow(data_train)
+  weights = c("0" = fraction_0, "1" = fraction_1)    # names are useless, class order matters
+  
+  # fit model with e1071
+  # fit <-  e1071::svm(y~., data = data_train, type = "C-classification", probability = T, scale = scaled,
+  #                    kernel="radial", gamma = sigma, cost=C, fitted = F, class.weights = weights, cachesize = 300)
+  # pred_prob_train = attr(predict(fit, newdata = data_train, probability = T), "probabilities")[,2] %>%
+  #   data.frame() %>%
+  #   setNames("Prob") %>%
+  #   `rownames<-`(rownames(data_train))
+  
+  # fit model with kernlab
+  try_continue = T
+  try_count = 1
+  run_ok = F
+  set.seed(666)
+  while (try_continue & try_count <= 5){     # sometimes "line search fails" error occurs. Try different runs
+    oo <- capture.output(
+      fit <-  kernlab::ksvm(y~., data = data_train, type = "C-svc", prob.model = T, scaled = scaled,
+                            kernel="rbfdot", kpar=list(sigma = sigma), C=C, class.weights = weights, cache = 300),
+      silent = T)
+    
+    err_check = try(pp <- kernlab::predict(fit, newdata = data_train[1,], type = "probabilities"), silent = T)
+    if (class(err_check) != "try-error"){try_continue = F; run_ok = T}
+    try_count = try_count + 1
+  }
   
   # predict on train and test
-  pred_prob_train = predict(fit, newdata = data_train, type = "probabilities")[,2] %>%
+  pred_prob_test = pred_prob_train = data.frame()
+  if (run_ok){
+    pred_prob_train = kernlab::predict(fit, newdata = data_train, type = "probabilities")[,2] %>%
+      data.frame() %>%
+      setNames("Prob") %>%
+      `rownames<-`(rownames(data_train))
+    if (!is.null(data_test)){
+      pred_prob_test = kernlab::predict(fit, newdata = data_test, type = "probabilities")[,2] %>%
+        data.frame() %>%
+        setNames("Prob") %>%
+        `rownames<-`(rownames(data_test))
+    } else {
+      pred_prob_test = NULL
+    }
+  }
+  
+  return(list(fit = fit,
+              pred_prob_train = pred_prob_train,
+              pred_prob_test = pred_prob_test,
+              options = list(sigma = sigma,
+                             C = C,
+                             scaled = scaled,
+                             run_ok = run_ok,
+                             tot_repetition = try_count - 1)))
+}
+
+# fit k-nearest neighbor with "kknn"
+fit_kNN = function(data_train, data_test, k, scale = F, kernel = "optimal", distance = 2){
+  
+  # data_train: must contain target variable as "y" and factor
+  # data_test: same columns of data_train ("y" not required)
+  
+  # fit model
+  set.seed(666)
+  fit <- train.kknn(y ~ ., data = data_train, ks = k,
+                    scale = scale, kernel = kernel, distance = distance)
+  
+  # predict on train and test
+  pred_prob_train = predict(fit, data_train, type = "prob")[, 2] %>%
     data.frame() %>%
     setNames("Prob") %>%
     `rownames<-`(rownames(data_train))
   if (!is.null(data_test)){
-    pred_prob_test = predict(fit, newdata = data_test, type = "probabilities")[,2] %>%
+    pred_prob_test = predict(fit, data_test, type = "prob")[, 2] %>%
       data.frame() %>%
       setNames("Prob") %>%
       `rownames<-`(rownames(data_test))
@@ -2383,16 +2465,192 @@ fit_SVM_RBF = function(data_train, data_test, sigma, C, scaled = F){
   return(list(fit = fit,
               pred_prob_train = pred_prob_train,
               pred_prob_test = pred_prob_test,
-              options = list(sigma = sigma,
-                             C = C,
-                             scaled = scaled)))
+              options = list(k = k,
+                             scale = scale,
+                             kernel = kernel,
+                             distance = distance)))
+}
+
+# fit polyMARS with "polspline"
+fit_polyMARS = function(data_train, data_test, maxdim, use_weight, penalty = 0){
+  
+  # data_train: must contain target variable as "y"
+  # data_test: same columns of data_train ("y" not required)
+  
+  # class weights
+  if (use_weight == "yes"){
+    fraction_0 <- 1 - sum(data_train$y == 0) / nrow(data_train)
+    fraction_1 <- 1 - sum(data_train$y == 1) / nrow(data_train)
+    weights = rep(fraction_0, nrow(data_train))
+    weights[data_train$y == 1] <- fraction_1
+  } else {
+    weights = rep(1, nrow(data_train))
+  }
+  
+  # fit model
+  oo <- capture.output(
+    fit <- polyclass(data = data_train$y, cov = data_train %>% select(-y) %>% as.matrix(), weight = weights,
+                     penalty = penalty, silent = T, normweight = T, additive = F, maxdim = maxdim, seed = 666),
+    silent = T)
+  
+  # predict on train and test
+  pred_prob_test = pred_prob_train = data.frame()
+  pred_prob_train = ppolyclass(data_train %>% select(-y) %>% as.matrix(), fit)[, 2] %>%
+    data.frame() %>%
+    setNames("Prob") %>%
+    `rownames<-`(rownames(data_train))
+  if (!is.null(data_test)){
+    pred_prob_test = ppolyclass(data_test %>% select(-y) %>% as.matrix(), fit)[, 2] %>%
+      data.frame() %>%
+      setNames("Prob") %>%
+      `rownames<-`(rownames(data_test))
+  } else {
+    pred_prob_test = NULL
+  }
+  
+  
+  return(list(fit = fit,
+              pred_prob_train = pred_prob_train,
+              pred_prob_test = pred_prob_test,
+              options = list(maxdim = maxdim,
+                             use_weight = use_weight,
+                             penalty = penalty)))
+}
+
+# fit model in parallel on all folds
+fit_model_cv_parallel = function(fold_i, parameter_set = parameter_set){
+  
+  test_ind = cv_ind %>%
+    filter(fold == fold_i) %>%
+    pull(ind)
+  train_ind = cv_ind %>%
+    filter(fold != fold_i) %>%
+    pull(ind)
+  data_test = df_work[test_ind, ]
+  data_train = df_work[train_ind, ]# %>%
+  # group_by(y) %>%
+  # filter(row_number() <= 1500) %>%   # todo: rimuovi
+  # ungroup()
+  
+  # downsample train set for y=0
+  if (!is.null(train_downsample_perc)){
+    obs_0_to_remove = (sum(data_train$y == 0) * (1 - train_downsample_perc)) %>% as.integer()
+    set.seed(66)
+    index_to_remove = sample(which(data_train$y == 0), obs_0_to_remove, replace = F)
+    data_train = data_train[-index_to_remove, ]
+  }
+  
+  # balance distribution of abi_ndg between train and test when y=1
+  if (balance_abi_ndg_fold & nrow(data_test) != 0){
+    bal = balance_abi_ndg_class1(data_train, data_test, abi_ndg_row_reference_class1, abi_ndg_row_index)
+    data_train = bal$data_train_new
+    data_test = bal$data_test_new
+  }
+  
+  if (nrow(data_test) == 0){data_test = NULL}
+  
+  # return column data.frame "Prob" of predicted probabilities for train and test set
+  if (algo_type == "Elastic-net"){
+    
+    alpha = parameter_set$alpha
+    standardize = parameter_set$standardize
+    intercept = parameter_set$intercept
+    parallel = parameter_set$parallel
+    type.measure = parameter_set$type.measure
+    lambda_final = parameter_set$lambda_final
+    family = parameter_set$family
+    n_fold_cvgmlnet = parameter_set$n_fold_cvgmlnet
+    fixed_variables = parameter_set$fixed_variables
+    
+    if (is.null(data_test)){
+      data_test_glmnet = NULL
+    } else {
+      data_test_glmnet = data_test %>% select(-y)
+    }
+    fit_train = fit_cv_glmnet(x = data_train %>% select(-y), y = data_train$y, alpha = alpha, standardize = standardize, intercept = intercept, parallel = parallel,
+                              type.measure = type.measure, lambda_final = lambda_final, family = family,
+                              fixed_variables = fixed_variables, n_fold_cvgmlnet = n_fold_cvgmlnet, x_test_predict = data_test_glmnet)
+    
+  } else if (algo_type == "Random_Forest"){
+    
+    num.trees = parameter_set$num.trees
+    mtry = parameter_set$mtry
+    min.node.size = parameter_set$min.node.size
+    
+    fit_train = fit_RandomForest(data_train = data_train %>% mutate(y = as.factor(y)), data_test = data_test,
+                                 num.trees = num.trees, mtry = mtry, min.node.size = min.node.size)
+    
+  } else if (algo_type == "MARS"){
+    
+    degree = parameter_set$degree
+
+    fit_train = fit_MARS(data_train = data_train %>% mutate(y = as.factor(y)), data_test = data_test, degree = degree)
+    
+  } else if (algo_type == "polyMARS"){
+    
+    maxdim = parameter_set$maxdim
+    use_weight = parameter_set$use_weight
+    penalty = parameter_set$penalty
+    
+    fit_train = fit_polyMARS(data_train = data_train, data_test = data_test, maxdim = maxdim, use_weight = use_weight, penalty = penalty)
+    
+  } else if (algo_type == "SVM-RBF"){
+    
+    sigma = parameter_set$sigma
+    C = parameter_set$C
+    scaled = parameter_set$scaled
+    
+    fit_train = fit_SVM_RBF(data_train = data_train %>% mutate(y = as.factor(y)), data_test = data_test, sigma = sigma, C = C, scaled = scaled)
+    
+  }
+  else if (algo_type == "k-NN"){
+    
+    k = parameter_set$k
+    scale = parameter_set$scale
+    kernel = parameter_set$kernel
+    distance = parameter_set$distance
+    
+    fit_train = fit_kNN(data_train = data_train %>% mutate(y = as.factor(y)), data_test = data_test, k = k,
+                        scale = scale, kernel = kernel, distance = distance)
+    
+  }
+  prob_train = fit_train$pred_prob_train
+  prob_test = fit_train$pred_prob_test
+  
+  # save fold prediction for both train and test - df with "set" = "train"/"test" and "Prob" and "y_true"
+  pred_to_bind = prob_train %>%
+    rownames_to_column("rows") %>%
+    left_join(data_train %>%
+                select(y) %>%
+                rownames_to_column("rows"), by = "rows") %>%
+    mutate(set = "train")
+  
+  if (!is.null(data_test)){
+    pred_to_bind = pred_to_bind %>%
+      bind_rows(
+        prob_test %>%
+          rownames_to_column("rows") %>%
+          left_join(data_test %>%
+                      select(y) %>%
+                      rownames_to_column("rows"), by = "rows") %>%
+          mutate(set = "test")
+      )
+  }
+  pred_to_bind = pred_to_bind %>%
+    mutate(y = as.character(y)) %>%
+    rename(y_true = y) %>%
+    # column_to_rownames("rows") %>%
+    mutate(fold = fold_i)
+  
+  return(list(pred_to_bind = pred_to_bind,
+              fit_train = fit_train))
 }
 
 # fit model with or without cross-validation
-fit_model_with_cv = function(df_work, cv_ind, algo_type, parameter_set, non_tunable_param = NULL, no_cv_train_ind = NULL, no_cv_test_ind = NULL,
-                             prob_thresh_cv = 0.5, tuning_crit = "F1_test", tuning_crit_minimize = F,
+fit_model_with_cv = function(df_work, cv_ind, algo_type, parameter_set = NULL, non_tunable_param = NULL, no_cv_train_ind = NULL, no_cv_test_ind = NULL,
+                             prob_thresh_cv = 0.5, tuning_crit = "F1_test", tuning_crit_minimize = F, prob_calibration = c("no", "platt", "isoreg"),
                              balance_abi_ndg_fold = F, abi_ndg_row_reference_class1 = NULL, abi_ndg_row_index = NULL,
-                             train_downsample_perc = NULL){
+                             train_downsample_perc = NULL, n_workers = 1){
   
   # fit model on each fold, evaluate class based on threshold prob_thresh_cv and return final performance tuning_crit
   
@@ -2406,9 +2664,11 @@ fit_model_with_cv = function(df_work, cv_ind, algo_type, parameter_set, non_tuna
   # prob_thresh_cv: threshold to convert probabilities into class. If "best" optimal value is evaluated according to tuning_crit
   # tuning_crit: criterion to be optimized - "AUC" or "Precision" or "Recall" or "Accuracy" for "_test" or "_train"
   # tuning_crit_minimize: whether to minimize or maximize tuning_crit
+  # prob_calibration: method to calibrate probability. "no", "platt", "isoreg"
   # balance_abi_ndg_fold: if TRUE balance distribution of abi_ndg between train and test when y=1 in cross-validation using balance_abi_ndg_class1()
   # abi_ndg_row_reference_class1, abi_ndg_row_index: input for balance_abi_ndg_class1()
   # train_downsample_perc: if not NULL downsample train set for y=0. New y=0 will account to train_downsample_perc*n_total_0    # todo va eventualmente inclusa come input nella funzione di tuning
+  # n_workers: if > 1 fit model on folds with parallel workers
   
   # check target variable
   if (!"y" %in% colnames(df_work)){stop('No target variable "y" found')}
@@ -2427,223 +2687,410 @@ fit_model_with_cv = function(df_work, cv_ind, algo_type, parameter_set, non_tuna
     total_folds = unique(cv_ind$fold) %>% sort()
   }
   
-  fold_prediction = c()
-  fold_model_fit = list()
   start_time = Sys.time()
-  for (fold_i in total_folds){
-    test_ind = cv_ind %>%
-      filter(fold == fold_i) %>%
-      pull(ind)
-    train_ind = cv_ind %>%
-      filter(fold != fold_i) %>%
-      pull(ind)
-    data_test = df_work[test_ind, ]
-    data_train = df_work[train_ind, ]# %>%
-    # group_by(y) %>%
-    # filter(row_number() <= 1500) %>%   # todo: rimuovi
-    # ungroup()
-    if (nrow(data_test) == 0){data_test = NULL}
+  out = list()
+  try_out = myCatch({
     
-    # downsample train set for y=0
-    if (!is.null(train_downsample_perc)){
-      obs_0_to_remove = (sum(data_train$y == 0) * (1 - train_downsample_perc)) %>% as.integer()
-      set.seed(66)
-      index_to_remove = sample(which(data_train$y == 0), obs_0_to_remove, replace = F)
-      data_train = data_train[-index_to_remove, ]
-    }
+    # fold_prediction = c()
+    # fold_model_fit = list()
+    # for (fold_i in total_folds){
+    #   test_ind = cv_ind %>%
+    #     filter(fold == fold_i) %>%
+    #     pull(ind)
+    #   train_ind = cv_ind %>%
+    #     filter(fold != fold_i) %>%
+    #     pull(ind)
+    #   data_test = df_work[test_ind, ]
+    #   data_train = df_work[train_ind, ]# %>%
+    #   # group_by(y) %>%
+    #   # filter(row_number() <= 1500) %>%   # todo: rimuovi
+    #   # ungroup()
+    #   
+    #   # downsample train set for y=0
+    #   if (!is.null(train_downsample_perc)){
+    #     obs_0_to_remove = (sum(data_train$y == 0) * (1 - train_downsample_perc)) %>% as.integer()
+    #     set.seed(66)
+    #     index_to_remove = sample(which(data_train$y == 0), obs_0_to_remove, replace = F)
+    #     data_train = data_train[-index_to_remove, ]
+    #   }
+    #   
+    #   # balance distribution of abi_ndg between train and test when y=1
+    #   if (balance_abi_ndg_fold & nrow(data_test) != 0){
+    #     bal = balance_abi_ndg_class1(data_train, data_test, abi_ndg_row_reference_class1, abi_ndg_row_index)
+    #     data_train = bal$data_train_new
+    #     data_test = bal$data_test_new
+    #   }
+    #   
+    #   if (nrow(data_test) == 0){data_test = NULL}
+    #   
+    #   # return column data.frame "Prob" of predicted probabilities for train and test set
+    #   if (algo_type == "Elastic-net"){
+    #     
+    #     alpha = parameter_set$alpha
+    #     standardize = parameter_set$standardize
+    #     intercept = parameter_set$intercept
+    #     parallel = parameter_set$parallel
+    #     type.measure = parameter_set$type.measure
+    #     lambda_final = parameter_set$lambda_final
+    #     family = parameter_set$family
+    #     n_fold_cvgmlnet = parameter_set$n_fold_cvgmlnet
+    #     fixed_variables = parameter_set$fixed_variables
+    #     
+    #     if (is.null(data_test)){
+    #       data_test_glmnet = NULL
+    #     } else {
+    #       data_test_glmnet = data_test %>% select(-y)
+    #     }
+    #     fit_train = fit_cv_glmnet(x = data_train %>% select(-y), y = data_train$y, alpha = alpha, standardize = standardize, intercept = intercept, parallel = parallel,
+    #                               type.measure = type.measure, lambda_final = lambda_final, family = family,
+    #                               fixed_variables = fixed_variables, n_fold_cvgmlnet = n_fold_cvgmlnet, x_test_predict = data_test_glmnet)
+    #     
+    #   } else if (algo_type == "Random_Forest"){
+    #     
+    #     num.trees = parameter_set$num.trees
+    #     mtry = parameter_set$mtry
+    #     min.node.size = parameter_set$min.node.size
+    #     
+    #     fit_train = fit_RandomForest(data_train = data_train %>% mutate(y = as.factor(y)), data_test = data_test,
+    #                                  num.trees = num.trees, mtry = mtry, min.node.size = min.node.size)
+    #     
+    #   } else if (algo_type == "MARS"){
+    #     
+    #     degree = parameter_set$degree
+    #     
+    #     fit_train = fit_MARS(data_train = data_train %>% mutate(y = as.factor(y)), data_test = data_test, degree = degree)
+    #     
+    #   } else if (algo_type == "SVM-RBF"){
+    #     
+    #     sigma = parameter_set$sigma
+    #     C = parameter_set$C
+    #     scaled = parameter_set$scaled
+    #     
+    #     fit_train = fit_SVM_RBF(data_train = data_train %>% mutate(y = as.factor(y)), data_test = data_test, sigma = sigma, C = C, scaled = scaled)
+    #     
+    #   }
+    #   else if (algo_type == "k-NN"){
+    #     
+    #     k = parameter_set$k
+    #     scale = parameter_set$scale
+    #     kernel = parameter_set$kernel
+    #     distance = parameter_set$distance
+    #     
+    #     fit_train = fit_kNN(data_train = data_train %>% mutate(y = as.factor(y)), data_test = data_test, k = k,
+    #                         scale = scale, kernel = kernel, distance = distance)
+    #     
+    #   }
+    #   prob_train = fit_train$pred_prob_train
+    #   prob_test = fit_train$pred_prob_test
+    #   fold_model_fit[[paste0("fold_", fold_i)]] = fit_train
+    #   
+    #   # save fold prediction for both train and test - df with "set" = "train"/"test" and "Prob" and "y_true"
+    #   pred_to_bind = prob_train %>%
+    #     rownames_to_column("rows") %>%
+    #     left_join(data_train %>%
+    #                 select(y) %>%
+    #                 rownames_to_column("rows"), by = "rows") %>%
+    #     mutate(set = "train")
+    #   
+    #   if (!is.null(data_test)){
+    #     pred_to_bind = pred_to_bind %>%
+    #       bind_rows(
+    #         prob_test %>%
+    #           rownames_to_column("rows") %>%
+    #           left_join(data_test %>%
+    #                       select(y) %>%
+    #                       rownames_to_column("rows"), by = "rows") %>%
+    #           mutate(set = "test")
+    #       )
+    #   }
+    #   pred_to_bind = pred_to_bind %>%
+    #     mutate(y = as.character(y)) %>%
+    #     rename(y_true = y) %>%
+    #     # column_to_rownames("rows") %>%
+    #     mutate(fold = fold_i)
+    #   
+    #   fold_prediction = fold_prediction %>%
+    #     bind_rows(pred_to_bind)
+    # } # fold_i
     
-    # balance distribution of abi_ndg between train and test when y=1
-    if (balance_abi_ndg_fold & nrow(data_test) != 0){
-      bal = balance_abi_ndg_class1(data_train, data_test, abi_ndg_row_reference_class1, abi_ndg_row_index)
-      data_train = bal$data_train_new
-      data_test = bal$data_test_new
-    }
-    
-    # return column data.frame "Prob" of predicted probabilities for train and test set
-    if (algo_type == "Elastic-net"){
+    # run in parallel for all folds
+    parallel_index = total_folds
+    names(parallel_index) = paste0("fold_", parallel_index)
+    all_objects <- ls()   # to get function names
+    if (n_workers > 1){
       
-      alpha = parameter_set$alpha
-      standardize = parameter_set$standardize
-      intercept = parameter_set$intercept
-      parallel = parameter_set$parallel
-      type.measure = parameter_set$type.measure
-      lambda_final = parameter_set$lambda_final
-      family = parameter_set$family
-      n_fold_cvgmlnet = parameter_set$n_fold_cvgmlnet
-      fixed_variables = parameter_set$fixed_variables
+      plan(multisession, workers = n_workers, split = T)
       
-      if (is.null(data_test)){
-        data_test_glmnet = NULL
+      list_parallel <- future_lapply(parallel_index, fit_model_cv_parallel, parameter_set = parameter_set, future.seed = NULL,
+                                     future.packages = c("data.table", "tidyverse", "HEMDAG", "parallel",
+                                                         "glmnet", "ranger", "earth", "kknn", "kernlab", "polspline"),
+                                     future.globals = c("fit_cv_glmnet", "fit_RandomForest", "fit_MARS", "fit_kNN", "fit_SVM_RBF", "fit_polyMARS",
+                                                        "df_work", "cv_ind", "train_downsample_perc", "balance_abi_ndg_fold", "algo_type"))
+      future:::ClusterRegistry("stop")
+    } else {
+      list_parallel = list()
+      for (fold_i in parallel_index){
+        list_parallel[[fold_i]] = fit_model_cv_parallel(fold_i, parameter_set = parameter_set)
+      } # fold_i
+    }
+    fold_prediction = bind_rows(Map(function(x) x[["pred_to_bind"]], list_parallel))
+    fold_model_fit = c(Map(function(x) x[["fit_train"]], list_parallel))
+    if (nrow(fold_prediction) != length(total_folds) * nrow(df_work) & is.null(no_cv_train_ind) & is.null(train_downsample_perc)){
+      cat('\n\n###### mismatch in fold evaluation: total observation mismatch - ', algo_type, '\n')
+      print(unlist(parameter_set))}
+    missing_pred = fold_prediction %>%
+      group_by(fold) %>%
+      summarise(missing_pred = sum(is.na(Prob)))
+    if (sum(missing_pred$missing_pred) > 0){
+      cat('\n\n      ** warning: NA produced in predictions - ', algo_type, ':', sum(missing_pred$missing_pred), '\n')
+      print(unlist(parameter_set))
+      fold_prediction = fold_prediction %>%
+        filter(!is.na(Prob))
+    }
+    fold_prediction = fold_prediction %>%
+      mutate(prob_calib = "no")
+    
+    # probability calibration and optimal threshold
+    # prob_calib_set = unique(c("no", prob_calibration))
+    fold_calib_fit = list()
+    df_thresh = c()
+    for (calib_meth in prob_calib_set){
+      
+      flat_prob_check = c(999)    # isoreg seems to return flat probabilities (it should be fixed with sk-learn?)
+      # select set to evaluate tuning_crit
+      if (calib_meth == "no"){
+        final_performance = fold_prediction %>%
+          filter(set == tuning_crit_set)
+        
       } else {
-        data_test_glmnet = data_test %>% select(-y)
+        
+        calib_fit_data = fold_prediction %>%
+          filter(set != tuning_crit_set)
+        calib_pred_data = fold_prediction %>%
+          filter(set == tuning_crit_set)
+        if (nrow(calib_fit_data) == 0){     # if tuning_crit_set = "train", calibration and prediction are made on train set only
+          calib_fit_data = fold_prediction %>%
+            filter(set == tuning_crit_set)
+        }
+        
+        # calibrate predictions
+        final_performance = c()
+        fold_prediction_tt = c()
+        for (fold_i in total_folds){
+          
+          # Platt scaling
+          # https://rdrr.io/github/bioinf-jku/platt/f/inst/doc/platt.pdf
+          if (calib_meth == "platt"){
+            calib_fit = plattScaling(calib_fit_data %>% filter(fold == fold_i) %>% pull(Prob),
+                                     calib_fit_data %>% filter(fold == fold_i) %>% pull(y_true) %>% as.numeric())
+            calib_pred = predictProb(calib_fit, calib_pred_data %>% filter(fold == fold_i) %>% pull(Prob))
+            calib_fold_prediction = predictProb(calib_fit, fold_prediction %>% filter(prob_calib == "no") %>% filter(fold == fold_i) %>% pull(Prob))  # calibrate full fold sample
+          }
+          # Isotonic regression
+          # https://search.r-project.org/CRAN/refmans/CORElearn/html/calibrate.html
+          if (calib_meth == "isoreg"){
+            calib_fit = CORElearn:::calibrate(calib_fit_data %>% filter(fold == fold_i) %>% pull(y_true) %>% as.numeric() %>% factor(levels = c(0, 1)),
+                                              calib_fit_data %>% filter(fold == fold_i) %>% pull(Prob), class1=1, 
+                                              method="isoReg", assumeProbabilities=TRUE)
+            calib_pred = applyCalibration(calib_pred_data %>% filter(fold == fold_i) %>% pull(Prob), calib_fit)
+            calib_fold_prediction = applyCalibration(fold_prediction %>% filter(prob_calib == "no") %>% filter(fold == fold_i) %>% pull(Prob), calib_fit)
+            flat_prob_check = c(flat_prob_check, uniqueN(calib_pred))
+          }
+          fold_calib_fit[[paste0("fold_", fold_i)]][[calib_meth]] = calib_fit
+          fold_prediction_tt = fold_prediction_tt %>%
+            bind_rows(fold_prediction %>% filter(prob_calib == "no") %>% filter(fold == fold_i) %>% mutate(Prob = calib_fold_prediction))
+          
+          final_performance = final_performance %>%
+            bind_rows(calib_pred_data %>%
+                        filter(fold == fold_i) %>%
+                        mutate(Prob = calib_pred))
+        } # total_folds
       }
-      fit_train = fit_cv_glmnet(x = data_train %>% select(-y), y = data_train$y, alpha = alpha, standardize = standardize, intercept = intercept, parallel = parallel,
-                                type.measure = type.measure, lambda_final = lambda_final, family = family,
-                                fixed_variables = fixed_variables, n_fold_cvgmlnet = n_fold_cvgmlnet, x_test_predict = data_test_glmnet)
       
-    } else if (algo_type == "Random_Forest"){
+      # evaluate optimal threshold
+      if (suppressWarnings(min(flat_prob_check)) <= 3){
+        df_thresh_tt = data.frame(threshold = NA, perf = NA)
+      } else {
+        
+        if (calib_meth != "no"){
+          fold_prediction = fold_prediction %>%
+            bind_rows(fold_prediction_tt %>%
+                        mutate(prob_calib = calib_meth))
+        }
+        
+        df_thresh_tt = c()
+        for (fold_i in total_folds){
+          if (prob_thresh_cv == "best"){
+            thresh_set = NULL
+          } else {
+            thresh_set = prob_thresh_cv
+          }
+          tt = find_best_threshold(final_performance %>%
+                                     filter(fold == fold_i), prob_thresh_perf = tuning_crit_perf,
+                                   prob_thresh_perf_minimize = tuning_crit_minimize, thresh_set = thresh_set)
+          tt = tt$threshold_results %>% rename(!!sym(paste0("fold_", fold_i)) := perf)
+          if (is.null(df_thresh_tt)){
+            df_thresh_tt = tt
+          } else {
+            df_thresh_tt = df_thresh_tt %>%
+              full_join(tt, by = "threshold")
+          }
+        } # fold_i
+        df_thresh_tt = df_thresh_tt %>%
+          drop_na() %>%
+          mutate(perf = rowMeans(select(., -threshold), na.rm = T))
+        df_thresh_tt = df_thresh_tt %>%
+          filter(is.finite(perf)) %>%
+          arrange(desc(perf))
+        if (tuning_crit_minimize){
+          df_thresh_tt = df_thresh_tt %>%
+            arrange(perf)
+        }
+        df_thresh_tt = df_thresh_tt %>%
+          mutate(best = c("x", rep("", nrow(df_thresh_tt) - 1)))
+      }
       
-      num.trees = parameter_set$num.trees
-      mtry = parameter_set$mtry
-      min.node.size = parameter_set$min.node.size
-      
-      fit_train = fit_RandomForest(data_train = data_train %>% mutate(y = as.factor(y)), data_test = data_test,
-                                   num.trees = num.trees, mtry = mtry, min.node.size = min.node.size)
-      
-    } else if (algo_type == "MARS"){
-      
-      degree = parameter_set$degree
-      
-      fit_train = fit_MARS(data_train = data_train %>% mutate(y = as.factor(y)), data_test = data_test, degree = degree)
-      
-    } else if (algo_type == "SVM-RBF"){
-      
-      sigma = parameter_set$sigma
-      C = parameter_set$C
-      scaled = parameter_set$scaled
-      
-      fit_train = fit_SVM_RBF(data_train = data_train %>% mutate(y = as.factor(y)), data_test = data_test, sigma = sigma, C = C, scaled = scaled)
-      
-    }
-    prob_train = fit_train$pred_prob_train
-    prob_test = fit_train$pred_prob_test
-    fold_model_fit[[paste0("fold_", fold_i)]] = fit_train
-    
-    # save fold prediction for both train and test - df with "set" = "train"/"test" and "Prob" and "y_true"
-    pred_to_bind = prob_train %>%
-      rownames_to_column("rows") %>%
-      left_join(data_train %>%
-                  select(y) %>%
-                  rownames_to_column("rows"), by = "rows") %>%
-      mutate(set = "train")
-    
-    if (!is.null(data_test)){
-      pred_to_bind = pred_to_bind %>%
-        bind_rows(
-          prob_test %>%
-            rownames_to_column("rows") %>%
-            left_join(data_test %>%
-                        select(y) %>%
-                        rownames_to_column("rows"), by = "rows") %>%
-            mutate(set = "test")
-        )
-    }
-    pred_to_bind = pred_to_bind %>%
-      mutate(y = as.character(y)) %>%
-      rename(y_true = y) %>%
-      select(-rows) %>%
-      mutate(fold = fold_i)
-    
-    fold_prediction = fold_prediction %>%
-      bind_rows(pred_to_bind)
-  } # fold_i
-  if (nrow(fold_prediction) != fold_i * nrow(df_work) & is.null(no_cv_train_ind) & is.null(train_downsample_perc)){
-    cat('\n\n###### mismatch in fold evaluation: total observation mismatch - ', algo_type, '\n')
-    print(unlist(parameter_set))}
-  
-  # select set to evaluate tuning_crit
-  final_performance = fold_prediction %>%
-    filter(set == tuning_crit_set)
-  
-  # evaluate optimal threshold
-  df_thresh = c()
-  for (fold_i in total_folds){
-    if (prob_thresh_cv == "best"){
-      thresh_set = NULL
-    } else {
-      thresh_set = prob_thresh_cv
-    }
-    tt = find_best_threshold(final_performance %>%
-                               filter(fold == fold_i), prob_thresh_perf = tuning_crit_perf,
-                             prob_thresh_perf_minimize = tuning_crit_minimize, thresh_set = thresh_set)
-    tt = tt$threshold_results %>% rename(!!sym(paste0("fold_", fold_i)) := perf)
-    if (is.null(df_thresh)){
-      df_thresh = tt
-    } else {
       df_thresh = df_thresh %>%
-        full_join(tt, by = "threshold")
-    }
-  } # fold_i
-  df_thresh = df_thresh %>%
-    drop_na() %>%
-    mutate(perf = rowMeans(select(., -threshold), na.rm = T))
-  df_thresh = df_thresh %>%
-    filter(is.finite(perf)) %>%
-    arrange(desc(perf))
-  if (tuning_crit_minimize){
-    df_thresh = df_thresh %>%
-      arrange(perf)
-  }
-  best_threshold = df_thresh$threshold[1]
-  
-  # evaluate all performance on both train and test with best threshold
-  fold_all_performance = c()
-  list_ROC = list()
-  for (fold_i in total_folds){
-    pred_train = fold_prediction %>%
-      filter(set == "train" & fold == fold_i) %>%
-      mutate(y_pred = ifelse(Prob >= best_threshold, 1, 0) %>% as.character())
-    pred_test = fold_prediction %>%
-      filter(set == "test" & fold == fold_i) %>%
-      mutate(y_pred = ifelse(Prob >= best_threshold, 1, 0) %>% as.character())
+        bind_rows(df_thresh_tt %>%
+                    mutate(prob_calib = ifelse(calib_meth == "", "no", calib_meth)))
+    } # calib_meth
+    df_thresh_best = df_thresh %>%
+      filter(best == "x") %>%
+      arrange(if(tuning_crit_minimize) perf else desc(perf))
     
-    fold_all_performance = fold_all_performance %>%
-      bind_rows(
-        data.frame(tuned_param) %>%
-          bind_cols(
-            data.frame(threshold = best_threshold, fold = fold_i, obs_train = nrow(pred_train), obs_test = max(c(0, nrow(pred_test))),
-                       perc_1_train = round(sum(pred_train$y_true == "1") / nrow(pred_train), 2),
-                       perc_1_test = round(sum(pred_test$y_true == "1") / nrow(pred_test), 2),
-                       AUC_train = MLmetrics::AUC(y_pred = pred_train$Prob, y_true = pred_train$y_true),
-                       AUC_test = ifelse(nrow(pred_test) != 0, MLmetrics::AUC(y_pred = pred_test$Prob, y_true = pred_test$y_true), NA),
-                       F1_train = MLmetrics::F1_Score(y_true = pred_train$y_true, y_pred = pred_train$y_pred, positive = "1"),
-                       F1_test = ifelse(nrow(pred_test) != 0, MLmetrics::F1_Score(y_true = pred_test$y_true, y_pred = pred_test$y_pred, positive = "1"), NA),
-                       Precision_train = MLmetrics::Precision(y_true = pred_train$y_true, y_pred = pred_train$y_pred, positive = "1"),
-                       Precision_test = ifelse(nrow(pred_test) != 0, MLmetrics::Precision(y_true = pred_test$y_true, y_pred = pred_test$y_pred, positive = "1"), NA),
-                       Recall_train = MLmetrics::Recall(y_true = pred_train$y_true, y_pred = pred_train$y_pred, positive = "1"),
-                       Recall_test = ifelse(nrow(pred_test) != 0, MLmetrics::Recall(y_true = pred_test$y_true, y_pred = pred_test$y_pred, positive = "1"), NA),
-                       Accuracy_train = MLmetrics::Accuracy(y_true = pred_train$y_true, y_pred = pred_train$y_pred),
-                       Accuracy_test = ifelse(nrow(pred_test) != 0, MLmetrics::Accuracy(y_true = pred_test$y_true, y_pred = pred_test$y_pred), NA), stringsAsFactors = F)
+    best_threshold = df_thresh_best$threshold[1]
+    best_calib = df_thresh_best$prob_calib[1]
+    
+    # evaluate all performances on both train and test with best threshold
+    fold_all_performance = c()
+    fold_prediction_final = c()
+    list_curves = list()
+    for (calib_meth in df_thresh_best$prob_calib){
+      best_threshold_t = df_thresh_best %>%
+        filter(prob_calib == calib_meth) %>%
+        pull(threshold)
+      
+      for (fold_i in total_folds){
+        pred_train = fold_prediction %>%
+          filter(prob_calib == calib_meth) %>%
+          filter(set == "train" & fold == fold_i) %>%
+          mutate(y_pred = ifelse(Prob >= best_threshold_t, 1, 0) %>% as.character())
+        pred_test = fold_prediction %>%
+          filter(prob_calib == calib_meth) %>%
+          filter(set == "test" & fold == fold_i) %>%
+          mutate(y_pred = ifelse(Prob >= best_threshold_t, 1, 0) %>% as.character())
+        
+        conf_mat_train = conf_mat_mcc(y_true = pred_train$y_true, y_pred = pred_train$y_pred)
+        if (nrow(pred_test) != 0){
+          conf_mat_test = conf_mat_mcc(y_true = pred_test$y_true, y_pred = pred_test$y_pred)
+        } else {
+          conf_mat_test = NULL
+        }
+        
+        if (uniqueN(pred_train$y_pred) == 1){
+          F1_train = Precision_train = Recall_train = -99
+        } else {
+          F1_train = MLmetrics::F1_Score(y_true = pred_train$y_true, y_pred = pred_train$y_pred, positive = "1")
+          Precision_train = MLmetrics::Precision(y_true = pred_train$y_true, y_pred = pred_train$y_pred, positive = "1")
+          Recall_train = MLmetrics::Recall(y_true = pred_train$y_true, y_pred = pred_train$y_pred, positive = "1")
+        }
+        if (nrow(pred_test) != 0){
+          if (uniqueN(pred_test$y_pred) == 1){
+            F1_test = Precision_test = Recall_test = -99
+          } else {
+            F1_test = MLmetrics::F1_Score(y_true = pred_test$y_true, y_pred = pred_test$y_pred, positive = "1")
+            Precision_test = MLmetrics::Precision(y_true = pred_test$y_true, y_pred = pred_test$y_pred, positive = "1")
+            Recall_test = MLmetrics::Recall(y_true = pred_test$y_true, y_pred = pred_test$y_pred, positive = "1")
+          }
+        } else {
+          F1_test = Precision_test = Recall_test = NA
+        }
+
+        fold_all_performance = fold_all_performance %>%
+          bind_rows(
+            data.frame(tuned_param) %>%
+              bind_cols(
+                data.frame(prob_calib = calib_meth, threshold = best_threshold_t, fold = fold_i, obs_train = nrow(pred_train), obs_test = max(c(0, nrow(pred_test))),
+                           perc_1_train = round(sum(pred_train$y_true == "1") / nrow(pred_train), 2),
+                           perc_1_test = round(sum(pred_test$y_true == "1") / nrow(pred_test), 2),
+                           AUC_train = MLmetrics::AUC(y_pred = pred_train$Prob, y_true = pred_train$y_true),
+                           PRAUC_train = MLmetrics::PRAUC(y_pred = pred_train$Prob, y_true = pred_train$y_true),
+                           AUC_test = ifelse(nrow(pred_test) != 0, MLmetrics::AUC(y_pred = pred_test$Prob, y_true = pred_test$y_true), NA),
+                           PRAUC_test = ifelse(nrow(pred_test) != 0, MLmetrics::PRAUC(y_pred = pred_test$Prob, y_true = pred_test$y_true), NA),
+                           F1_train = F1_train,
+                           F1_test = F1_test,
+                           Precision_train = Precision_train,
+                           Precision_test = Precision_test,
+                           Recall_train = Recall_train,
+                           Recall_test = Recall_test,
+                           Accuracy_train = MLmetrics::Accuracy(y_true = pred_train$y_true, y_pred = pred_train$y_pred),
+                           Accuracy_test = ifelse(nrow(pred_test) != 0, MLmetrics::Accuracy(y_true = pred_test$y_true, y_pred = pred_test$y_pred), NA),
+                           MCC_train = conf_mat_train$mcc,
+                           MCC_test = ifelse(!is.null(conf_mat_test), conf_mat_test$mcc, NA), stringsAsFactors = F)
+              )
           )
-      )
+        
+        # evaluate predicted class for all folds
+        fold_prediction_final = fold_prediction_final %>%
+          bind_rows(fold_prediction %>%
+                      filter(prob_calib == calib_meth) %>%
+                      mutate(y_pred = ifelse(Prob >= best_threshold_t, 1, 0) %>% as.character(),
+                             threshold = best_threshold_t))
+        
+        roc_pr_curves_train = evalmod(scores = pred_train$Prob, labels = pred_train$y_true)
+        ROC_train = data.frame(x = roc_pr_curves_train$rocs[[1]]$x, y = roc_pr_curves_train$rocs[[1]]$y)
+        PRC_train = data.frame(x = roc_pr_curves_train$prcs[[1]]$x, y = roc_pr_curves_train$prcs[[1]]$y)
+        if (nrow(pred_test) != 0){
+          roc_pr_curves_test = evalmod(scores = pred_test$Prob, labels = pred_test$y_true)
+          ROC_test = data.frame(x = roc_pr_curves_test$rocs[[1]]$x, y = roc_pr_curves_test$rocs[[1]]$y)
+          PRC_test = data.frame(x = roc_pr_curves_test$prcs[[1]]$x, y = roc_pr_curves_test$prcs[[1]]$y)
+        } else {
+          ROC_test = NULL
+          PRC_test = NULL
+        }
+        
+        list_curves[[paste0("fold_", fold_i)]] = list(ROC_train = ROC_train,
+                                                      ROC_test = ROC_test,
+                                                      PRC_train = PRC_train,
+                                                      PRC_test = PRC_test)
+      } # fold_i
+    } # calib_meth
+    fold_all_performance = fold_all_performance %>%
+      left_join(missing_pred, by = "fold") %>%
+      relocate(missing_pred, .after = obs_test)
     
-    # evaluate predicted class for all folds
-    fold_prediction = fold_prediction %>%
-      mutate(y_pred = ifelse(Prob >= best_threshold, 1, 0) %>% as.character(),
-             threshold = best_threshold)
+    out = list(
+      best_threshold = best_threshold,
+      best_calib = best_calib,
+      optim_perf = df_thresh_best$perf[1],
+      threshold_list = df_thresh,
+      fold_all_performance = fold_all_performance,
+      fold_prediction = fold_prediction_final,
+      list_curves = list_curves,
+      fold_model_fit = fold_model_fit,
+      fold_calib_fit = fold_calib_fit
+    )
     
-    ROC_train = rocit(score= pred_train$Prob, class=pred_train$y_true)
-    ROC_train = data.frame(x = ROC_train$FPR, y = ROC_train$TPR)
-    if (nrow(pred_test) != 0){
-      ROC_test = rocit(score= pred_test$Prob, class=pred_test$y_true)
-      ROC_test = data.frame(x = ROC_test$FPR, y = ROC_test$TPR)
-    } else {
-      ROC_test = NULL
-    }
-    list_ROC[[paste0("fold_", fold_i)]] = list(ROC_train = ROC_train,
-                                               ROC_test = ROC_test)
-  } # fold_i
-  
+  })   # tryCatch
   tot_diff=seconds_to_period(difftime(Sys.time(), start_time, units='secs'))
   total_time = paste0(lubridate::hour(tot_diff), 'h:', lubridate::minute(tot_diff), 'm:', round(lubridate::second(tot_diff)))
   
-  return(list(best_threshold = best_threshold,
-              optim_perf = df_thresh$perf[1],
-              threshold_list = df_thresh,
-              fold_all_performance = fold_all_performance,
-              fold_prediction = fold_prediction,
-              list_ROC = list_ROC,
-              fold_model_fit = fold_model_fit,
-              parameter_set = parameter_set,
-              tuned_param = tuned_param,
-              total_time = total_time))
+  out = c(out, list(
+    parameter_set = parameter_set,
+    tuned_param = tuned_param,
+    total_time = total_time,
+    status = try_out[1],
+    message = try_out[2]
+  ))
+  
+  return(out)
 }
 
 # Bayesian tuning machine learning
 ml_tuning = function(df_work, algo_type, cv_ind, prob_thresh_cv, tuning_crit = "F1_test", tuning_crit_minimize = F,
-                     save_RDS_additional_lab = '',
-                     rds_folder = './Distance_to_Default/Checkpoints/ML_model/',
-                     balance_abi_ndg_fold = F, abi_ndg_row_reference_class1 = NULL, abi_ndg_row_index = NULL){
+                     prob_calibration = c("no", "platt", "isoreg"),
+                     save_RDS_additional_lab = '', rds_folder = './Distance_to_Default/Checkpoints/ML_model/',
+                     balance_abi_ndg_fold = F, abi_ndg_row_reference_class1 = NULL, abi_ndg_row_index = NULL, n_workers = 1){
   
   # https://mlrmbo.mlr-org.com/articles/supplementary/mixed_space_optimization.html
   
@@ -2654,9 +3101,11 @@ ml_tuning = function(df_work, algo_type, cv_ind, prob_thresh_cv, tuning_crit = "
   # prob_thresh_cv: threshold to convert probabilities into class. If "best" optimal value is evaluated according to tuning_crit
   # tuning_crit: criterion to be optimized - "AUC" or "Precision" or "Recall" or "Accuracy" for "_test" or "_train"
   # tuning_crit_minimize: whether to minimize or maximize tuning_crit
+  # prob_calibration: method to calibrate probability. "no", "platt", "isoreg"
   # save_RDS_additional_lab: adds prefix to saved rds for parameters combination reloading
   # rds_folder: folder for checkpoints - should finish with "/"
   # balance_abi_ndg_fold, abi_ndg_row_reference_class1, abi_ndg_row_index: balance abi_ndg when y=1. See fit_model_with_cv()
+  # n_workers: if > 1 fit model on folds with parallel workers
   
   # bayes_options: list of options
   #                - par.set: tunable parameters (makeParamSet)
@@ -2669,6 +3118,9 @@ ml_tuning = function(df_work, algo_type, cv_ind, prob_thresh_cv, tuning_crit = "
     summarise(obs = n(), .groups = "drop") %>%
     pull(obs) %>%
     min()
+  n_obs = nrow(df_work) - n_obs   # exclude test fold
+  maxdim <- floor(4 * (n_obs)^(1/3)) + 1    # for polyMARS
+  maxdim <- abs(min(n_obs/2, 250 - 1, (uniqueN(df_work$y) - 1) * maxdim))
   bayes_parameter_set = list(
     `Elastic-net` = list(
       par.set = makeParamSet(
@@ -2682,19 +3134,19 @@ ml_tuning = function(df_work, algo_type, cv_ind, prob_thresh_cv, tuning_crit = "
                                family = "binomial",
                                n_fold_cvgmlnet = 10,
                                fixed_variables = fixed_variables),
-      max_iter = 20,   # todo: rimetti
-      design_iter = 10   # todo: rimetti
+      max_iter = 20,  # todo: rimetti
+      design_iter = 10  # todo: rimetti
     ),
     
     Random_Forest = list(
       par.set = makeParamSet(
-        makeIntegerParam("num.trees", 50, 500),#makeIntegerParam("num.trees", 50, 500),   # todo: rimetti
+        makeIntegerParam("num.trees", 50, 500),
         makeIntegerParam("mtry", 1, (n_vars - 1)),
         makeIntegerParam("min.node.size", 1, as.integer(n_obs / 2))
       ),
       non_tunable_param = NULL,
-      max_iter = 30,   # todo: rimetti
-      design_iter = 20   # todo: rimetti
+      max_iter = 30,  # todo: rimetti
+      design_iter = 20  # todo: rimetti
     ),
     
     MARS = list(
@@ -2703,17 +3155,40 @@ ml_tuning = function(df_work, algo_type, cv_ind, prob_thresh_cv, tuning_crit = "
       ),
       non_tunable_param = NULL,
       max_iter = 1,
-      design_iter = 5
+      design_iter = 5   # todo: rimetti
     ),
     
     `SVM-RBF` = list(
       par.set = makeParamSet(
-        makeNumericParam("sigma", 0.0001, 10),
-        makeNumericParam("C", 0.0001, 100)
+        # makeNumericParam("sigma", 0.0001, 10),
+        # makeNumericParam("C", 0.001, 1000)
+        makeDiscreteParam("sigma", values = c(0.001, 0.01, 0.1, 1, 10, 100)),
+        makeDiscreteParam("C", values = c(0.001, 0.01, 0.1, 1, 10, 100, 1000))
       ),
       non_tunable_param = list(scaled = T),
-      max_iter = 20,
-      design_iter = 10
+      max_iter = 10,  # todo: rimetti
+      design_iter = 20  # todo: rimetti
+    ),
+    
+    `k-NN` = list(
+      par.set = makeParamSet(
+        makeIntegerParam("k", 1, min(floor(sqrt(n_obs)), 30))
+      ),
+      non_tunable_param = list(scale = F,
+                               kernel = "optimal",
+                               distance = 2),
+      max_iter = 10,   # todo: rimetti
+      design_iter = 5   # todo: rimetti
+    ),
+    
+    `polyMARS` = list(
+      par.set = makeParamSet(
+        makeIntegerParam("maxdim", 2, maxdim),
+        makeDiscreteParam("use_weight", values = c("yes", "no"))
+      ),
+      non_tunable_param = list(penalty = 0),
+      max_iter = 5,  # todo: rimetti
+      design_iter = 10  # todo: rimetti
     )
   )
   bayes_options = bayes_parameter_set[[algo_type]]
@@ -2727,7 +3202,8 @@ ml_tuning = function(df_work, algo_type, cv_ind, prob_thresh_cv, tuning_crit = "
   if (substr(rds_folder, nchar(rds_folder), nchar(rds_folder)) != "/"){rds_folder = paste0(rds_folder, "/")}
   
   # save RDS with vector of rds path to reload model_fit in order to retrieve all folds performance fold_all_performance from fit_model_with_cv()
-  saveRDS(c(), paste0(rds_folder, "current_model_path_list.rds"))
+  saveRDS(c(), paste0(rds_folder, "current_model_path_list_", algo_type, ".rds"))
+  saveRDS(1, paste0(rds_folder, "current_model_iter_count_", algo_type, ".rds"))
   
   # function to be optimized
   fun = function(x) {
@@ -2743,23 +3219,33 @@ ml_tuning = function(df_work, algo_type, cv_ind, prob_thresh_cv, tuning_crit = "
                        param_compact_label, '.rds')
     reload_err = try(model_fit <- suppressWarnings(readRDS(paste0(rds_folder, out_label))), silent = T)
     
+    curr_iter = readRDS(paste0(rds_folder, "current_model_iter_count_", algo_type, ".rds"))
+    cat('            * tuning parameters...  ', curr_iter, '/', max_iter + design_iter, ' - last interaction ',
+        format(Sys.time(), "%Y-%m-%d - %H:%M:%S"), '               ', end = '\r')
+    
     if (class(reload_err) == "try-error"){
       model_fit = fit_model_with_cv(df_work = df_work, cv_ind = cv_ind, algo_type = algo_type,
-                                    parameter_set = x, non_tunable_param = non_tunable_param,
+                                    parameter_set = x,
+                                    non_tunable_param = non_tunable_param,
                                     no_cv_train_ind = NULL, no_cv_test_ind = NULL,
                                     prob_thresh_cv = prob_thresh_cv, tuning_crit = tuning_crit, tuning_crit_minimize = tuning_crit_minimize,
-                                    balance_abi_ndg_fold = balance_abi_ndg_fold,
-                                    abi_ndg_row_reference_class1 = abi_ndg_row_reference_class1, abi_ndg_row_index = abi_ndg_row_index)
+                                    prob_calibration = prob_calibration, balance_abi_ndg_fold = balance_abi_ndg_fold,
+                                    abi_ndg_row_reference_class1 = abi_ndg_row_reference_class1, abi_ndg_row_index = abi_ndg_row_index, n_workers = n_workers)
       model_fit[["fold_model_fit"]] = NULL  # remove fitted model to save space
       model_fit$param_compact_label = param_compact_label
       saveRDS(model_fit, paste0(rds_folder, out_label))
     }
     
     # add model path to current_model_path_list
-    current_model_path_list = readRDS(paste0(rds_folder, "current_model_path_list.rds"))
-    saveRDS(c(current_model_path_list, paste0(rds_folder, out_label)), paste0(rds_folder, "current_model_path_list.rds"))
+    current_model_path_list = readRDS(paste0(rds_folder, "current_model_path_list_", algo_type, ".rds"))
+    saveRDS(c(current_model_path_list, paste0(rds_folder, out_label)), paste0(rds_folder, "current_model_path_list_", algo_type, ".rds"))
+    saveRDS(curr_iter + 1, paste0(rds_folder, "current_model_iter_count_", algo_type, ".rds"))
     
-    perf = model_fit$optim_perf
+    if (model_fit$status != "ERROR"){
+      perf = model_fit$optim_perf
+    } else {
+      perf = ifelse(tuning_crit_minimize, 99999999999, -99999999999)
+    }
     
     return(perf)
   }
@@ -2790,52 +3276,120 @@ ml_tuning = function(df_work, algo_type, cv_ind, prob_thresh_cv, tuning_crit = "
   
   # run optimizer
   start = Sys.time()
+  set.seed(666)
   mlr::configureMlr(show.info = FALSE, show.learner.output = FALSE, on.learner.warning = "quiet")
-  results = suppressWarnings(mbo(objfun, design = design, learner = surr.rf, control = control, show.info = F))
-  tot_diff=seconds_to_period(difftime(Sys.time(),start, units='secs'))
-  
+  try_out = myCatch({
+  results <- suppressWarnings(mbo(objfun, design = design, learner = surr.rf, control = control, show.info = F))
+  })
+  if (try_out[1] == "ERROR"){
+    current_model_path_list = paste0(rds_folder, list.files(path = rds_folder, pattern = paste0('^', save_RDS_additional_lab)))
+    saveRDS(current_model_path_list, "current_model_path_list.rds")
+    cat('\n            * ## Surrogate function in Bayesian Optimization failed. Reloading all tested combinations')
+    
+    opt.path_rec = c()
+    for (path in current_model_path_list){
+      model_fit = readRDS(path)
+      if (model_fit$status != "ERROR"){
+        perf_rec = model_fit$optim_perf
+      } else {
+        perf_rec = ifelse(tuning_crit_minimize, 99999999999, -99999999999)
+      }
+      opt.path_rec = opt.path_rec %>%
+        bind_rows(data.frame(model_fit$tuned_param, stringsAsFactors = F) %>%
+                    mutate(y = perf_rec,
+                           dob = NA,
+                           eol = NA,
+                           error.message = "surr.rf FAILED",
+                           exec.time =  period_to_seconds(hms(model_fit$total_time)),
+                           adabc = NA,
+                           error.model = NA,
+                           train.time = NA,
+                           prop.type = NA,
+                           propose.time = NA,
+                           se = NA,
+                           mean = NA,
+                           lambda = NA))
+    }
+    results_rec = list(opt.path = opt.path_rec,
+                       final.state = "surr.rf FAILED")
+    
+  }
+  tot_diff = seconds_to_period(difftime(Sys.time(),start, units='secs'))
+
   # reload fold performance for all combinations (both single fold and folds' average)
-  current_model_path_list = readRDS(paste0(rds_folder, "current_model_path_list.rds"))
-  oo = file.remove(paste0(rds_folder, "current_model_path_list.rds"))
+  current_model_path_list = readRDS(paste0(rds_folder, "current_model_path_list_", algo_type, ".rds"))
+  oo = suppressWarnings(file.remove(paste0(rds_folder, c("current_model_path_list_", "current_model_iter_count_"), algo_type, ".rds")))
   if (length(current_model_path_list) != nrow(as.data.frame(results$opt.path))){cat("\n #######", algo_type, "error: number of saved models doesnt't match optimization combinations")}
   fold_all_performance = c()
   for (path in current_model_path_list){
     model_fit = readRDS(path)
+    if (model_fit$status != "ERROR"){
+      add_rows = model_fit$fold_all_performance %>%
+        mutate(best_calib = ifelse(prob_calib == model_fit$best_calib, "yes", ""))
+      add_rows = add_rows
+    } else {
+      add_rows = as.data.frame(model_fit$tuned_param)
+    }
     fold_all_performance = fold_all_performance %>%
-      bind_rows(model_fit$fold_all_performance %>%
+      bind_rows(add_rows %>%
                   mutate(rds = path,
-                         param_compact_label = model_fit$param_compact_label)) %>%
+                         param_compact_label = model_fit$param_compact_label,
+                         status = model_fit$status,
+                         message = model_fit$message)) %>%
       unique()
   }
+  fold_all_performance = fold_all_performance %>%
+    relocate(status, .after = fold) %>%
+    relocate(best_calib, .after = threshold) %>%
+    relocate(rds, param_compact_label, message, .after = last_col())
   fold_all_performance_avg = fold_all_performance %>%
-    select(-starts_with("obs_"), -starts_with("perc_1_"), -fold) %>%
-    group_by_at(c(tunable_names, "threshold", "rds", "param_compact_label")) %>%
+    filter(status != "ERROR") %>%
+    select(-starts_with("obs_"), -starts_with("perc_1_"), -fold, -missing_pred) %>%
+    group_by_at(c(tunable_names, "prob_calib", "best_calib", "status", "threshold", "rds", "message", "param_compact_label")) %>%
     summarize_all(list(avg = function(x) mean(x, na.rm = T),
                        std = function(x) sd(x, na.rm = T))) %>%
     select(names(.) %>% sort()) %>%
-    select(all_of(tunable_names), threshold, everything()) %>%
-    relocate(param_compact_label, .after = last_col()) %>%
-    relocate(rds, .after = last_col()) %>%
-    unique()
+    select(all_of(tunable_names), prob_calib, threshold, best_calib, status, everything()) %>%
+    relocate(rds, param_compact_label, message, .after = last_col()) %>%
+    unique() %>%
+    bind_rows(fold_all_performance %>% filter(status == "ERROR") %>% select(where(~ !all(is.na(.))))) %>%
+    left_join(fold_all_performance %>%
+                group_by(param_compact_label, prob_calib) %>%
+                summarise(missing_pred = sum(missing_pred), .groups = "drop"), by = c("prob_calib", "param_compact_label")) %>%
+    relocate(missing_pred, .after = status)
   
+  # check tunable parameters format in results
+  op_res = as.data.frame(results$opt.path, stringsAsFactors = F)
+  conv_list = c()
+  for (tn in tunable_names){
+    if (class(op_res[, tn]) == "factor"){
+      
+      conv_tn = suppressWarnings(op_res[, tn] %>% as.character() %>% as.numeric())   # check if factors refer to numeric variable
+      if (sum(is.na(conv_tn)) != length(conv_tn)){
+        op_res[, tn] = conv_tn
+        conv_list = c(conv_list, tn)
+      }
+    }
+  } # tn
+
   # save results
-  optimization_results = as.data.frame(results$opt.path, stringsAsFactors = F) %>%
+  optimization_results = op_res %>%
     mutate(
       final_state = results$final.state,
       total_time = paste0(lubridate::hour(tot_diff), 'h:', lubridate::minute(tot_diff), 'm:', round(lubridate::second(tot_diff)))) %>%
     rename(!!sym(tuning_crit) := y) %>%
-    left_join(fold_all_performance_avg, by = tunable_names) %>%
-    select(all_of(tunable_names), threshold, everything()) %>%
+    left_join(fold_all_performance_avg, by = tunable_names, relationship = "many-to-many") %>%
+    select(all_of(tunable_names), prob_calib, threshold, best_calib, status, missing_pred, everything()) %>%
     mutate_if(is.factor, as.character) %>%
     unique()
   
-  optimization_results_all_folds = as.data.frame(results$opt.path, stringsAsFactors = F) %>%
+  optimization_results_all_folds = op_res %>%
     mutate(
       final_state = results$final.state,
       total_time = paste0(lubridate::hour(tot_diff), 'h:', lubridate::minute(tot_diff), 'm:', round(lubridate::second(tot_diff)))) %>%
     rename(!!sym(paste0("optim_", tuning_crit)) := y) %>%
-    left_join(fold_all_performance, by = tunable_names) %>%
-    select(all_of(tunable_names), threshold, fold, everything()) %>%
+    left_join(fold_all_performance, by = tunable_names, relationship = "many-to-many") %>%
+    select(all_of(tunable_names), prob_calib, threshold, best_calib, status, missing_pred, fold, obs_train, obs_test, everything()) %>%
     mutate_if(is.factor, as.character) %>%
     unique()
   
@@ -2844,29 +3398,35 @@ ml_tuning = function(df_work, algo_type, cv_ind, prob_thresh_cv, tuning_crit = "
   
   # evaluate best parameters set
   optimization_results = optimization_results %>%
-    arrange(desc(!!sym(tuning_crit)))
+    arrange(desc(best_calib), desc(!!sym(tuning_crit)))
   if (tuning_crit_minimize){
-    df_thresh = df_thresh %>%
-      arrange(!!sym(tuning_crit))
+    optimization_results = optimization_results %>%
+      arrange(desc(best_calib), !!sym(tuning_crit))
   }
   best_parameters = optimization_results %>%
-    filter(row_number() == 1) %>%
-    select(all_of(tunable_names))
+    filter(row_number() == 1)
+  
+  optimization_results = optimization_results %>%
+    mutate(status_mbo = try_out[1],
+           message_mbo = try_out[2]) %>%
+    relocate(status_mbo, .after = status)
   
   return(list(optimization_results = optimization_results,
               optimization_results_all_folds = optimization_results_all_folds,
-              best_parameters = best_parameters,
-              non_tunable_param = non_tunable_param))
+              best_parameters = best_parameters %>% select(all_of(tunable_names)),
+              best_calibration = best_parameters$prob_calib,
+              non_tunable_param = non_tunable_param,
+              conv_list = conv_list))
 }
 
 # evaluate Shapley values
 evaluate_SHAP = function(dataSample, sample_size = 100, trained_model_prediction_function = NULL, obs_index_to_evaluate = NULL,
                          obs_index_to_sample = NULL, obs_index_subset = NULL, adjust_shapley = FALSE, n_batch = 1, n_workers = 5, verbose = 1, seed = 66){
-
+  
   # evaluate local SHAP values for single observations, global (signed) features effects, global SHAP features importance and input for plot_SHAP_summary().
   # https://christophm.github.io/interpretable-ml-book/shapley.html
   # https://christophm.github.io/interpretable-ml-book/shap.html
-
+  
   # dataSample: data.frame of predictors ONLY.
   # sample_size: sample size to generate instances (coalitions) with shuffled features. The higher the more accurate the explanations become.
   # trained_model_prediction_function: named list of function(predictors) -> prediction (vector of values for regression,
@@ -2883,7 +3443,7 @@ evaluate_SHAP = function(dataSample, sample_size = 100, trained_model_prediction
   # n_workers: number of workers for parallel calculation. Try not to exceed 30-40.
   # verbose: 1 to display calculation time, 0 for silent.
   # seed: seed for reproducibility
-
+  
   # Output:
   #   list of:
   #     - local_SHAP: complete list of SHAP values for each observation
@@ -2900,17 +3460,17 @@ evaluate_SHAP = function(dataSample, sample_size = 100, trained_model_prediction
   #     - type: "SHAP". Used in plot_feat_imp().
   # If obs_index_subset != NULL additional nested list is returned for each class and all observations with global_features_effect and SHAP_feat_imp,
   # local_SHAP and summary_plot_data have an additional column "class"
-
+  
   # code adapted from https://github.com/christophM/iml/blob/master/R/Shapley.R
-
-
+  
+  
   # check for numeric predictors only
   invalid_col_type = dataSample %>% select_if(negate(is.numeric)) %>% colnames()
   if (length(invalid_col_type) > 0){
     oo = capture.output(print(sapply(dataSample %>% select(all_of(invalid_col_type)), class)))
     stop(paste0("Only numeric predictors supported:\n", paste0(oo, collapse = "\n")))
   }
-
+  
   dataSample = dataSample %>% setDT()
   n_features = ncol(dataSample)
   feature_names = colnames(dataSample)
@@ -2920,39 +3480,39 @@ evaluate_SHAP = function(dataSample, sample_size = 100, trained_model_prediction
   if (length(intersect(obs_index_to_evaluate, obs_index_to_sample)) != length(obs_index_to_evaluate)){
     stop('"obs_index_to_evaluate" must be a partition of "obs_index_to_sample"')
   }
-
+  
   generate_sample_index = function(obs_index){
     # generate indices of samples to be used as coalitions trying not to use duplicates. If sample_size > length(obs_index_to_sample)
     # duplicates are introduced.
     # Returns indices vector of length sample_size
-
+    
     set.seed(seed + obs_index)
     out = sample(obs_index_to_sample, min(c(sample_size, samp_len)), replace = FALSE)
-
+    
     if (sample_size > samp_len){
       out = c(out, sample(obs_index_to_sample, sample_size - samp_len, replace = TRUE))
     }
-
+    
     return(out)
   }
-
+  
   generate_coalitions = function(obs_index){
     # generate coalitions with shuffled features
     # final sample will have ncol=n_features
     #                        nrow=sample_size*n_features*2  - first half rows are data with features x_+j,
     #                                                         second half is x_-j of algo definition at linked page
     # column with obs_index is added as well
-
+    
     # select instance
     x.interest = dataSample[obs_index,] %>% as.data.frame()
-
+    
     n_row = nrow(dataSample)
     runs <- lapply(1:sample_size, function(m) {
-
+      
       # randomly order features
       set.seed(seed + obs_index*m)
       new.feature.order <- sample(1:n_features)
-
+      
       # randomly choose sample instance from dataSample to shuffle features order
       sample.instance.shuffled <- dataSample[list_generated_sample[[as.character(obs_index)]][m],
                                              new.feature.order,
@@ -2960,7 +3520,7 @@ evaluate_SHAP = function(dataSample, sample_size = 100, trained_model_prediction
       ]
       # shuffle interest instance with same features order
       x.interest.shuffled <- x.interest[, new.feature.order]
-
+      
       # create new instances (with and without) for each feature
       featurewise <- lapply(1:n_features, function(k) {
         k.at.index <- which(new.feature.order == k)
@@ -2980,10 +3540,10 @@ evaluate_SHAP = function(dataSample, sample_size = 100, trained_model_prediction
     runs <- data.table::rbindlist(runs)
     dat.with.k <- data.frame(runs[, 1:(ncol(runs) / 2)])
     dat.without.k <- data.frame(runs[, (ncol(runs) / 2 + 1):ncol(runs)])
-
+    
     return(rbind(dat.with.k, dat.without.k) %>% mutate(obs_index = obs_index))
   }
-
+  
   generate_shapley = function(list_index, trained_model_name){
     # generate Shapley values
     # list_index: index of the list that contains all generate_coalitions() and predictions "list_predicted_data". obs_index will be extracted inside so to avoid
@@ -2994,14 +3554,14 @@ evaluate_SHAP = function(dataSample, sample_size = 100, trained_model_prediction
     #         "phi" and "phi_std" are the average and st.dev of SHAP values over all shuffled coalitions
     #         "feature" is feature name and "feature_value" is the corresponding value from the original instance (obs_index reference)
     #         "predicted_val" and "predicted_val_avg" are predicted value of single observation and columns average, respectively
-
+    
     # select sampled data and predictions from generated list
     data_predicted = list_predicted_data[[list_index]]
     obs_index = data_predicted$obs_index %>% unique()
     var_names = data_predicted %>% select(-obs_index, -Prediction) %>% colnames()
     x.interest = dataSample[obs_index,] %>% as.data.frame()
     data_predicted = data_predicted %>% select(Prediction)
-
+    
     # evaluate Phi
     # split prediction in yhat_x_+j and yhat_-j
     y.hat.with.k <- data_predicted[1:(nrow(data_predicted) / 2), , drop = FALSE]
@@ -3024,21 +3584,21 @@ evaluate_SHAP = function(dataSample, sample_size = 100, trained_model_prediction
                   rownames_to_column("feature"), by = "feature") %>%
       mutate(obs_index = obs_index,
              model_name = trained_model_name)
-
+    
     return(y.hat.diff)
   }
-
-
+  
+  
   # suppress messages
   if (verbose == 0){sink(tempfile());on.exit(sink())}
-
+  
   # generate samples indices for coalitions
   list_generated_sample = lapply(obs_index_to_evaluate, generate_sample_index)
   names(list_generated_sample) = as.character(obs_index_to_evaluate)
-
-
+  
+  
   #### loop for each batch of obs_index_to_evaluate
-
+  
   options(future.globals.maxSize = 8000 * 1024^2)
   plan(multisession, workers = n_workers)
   list_split = split(obs_index_to_evaluate, sort(obs_index_to_evaluate %% n_batch))
@@ -3046,7 +3606,7 @@ evaluate_SHAP = function(dataSample, sample_size = 100, trained_model_prediction
   split_time_val = local_SHAP = c()
   cat('\nStart time:', as.character(Sys.time()), '\n')
   for (split_name in names(list_split)){
-
+    
     # check average batch time
     split_time = Sys.time()
     if (split_name != names(list_split)[1]){
@@ -3057,34 +3617,34 @@ evaluate_SHAP = function(dataSample, sample_size = 100, trained_model_prediction
     }
     cat('Generating coalitions and SHAP values for batch', paste0(as.numeric(split_name)+1, '/', length(list_split)),
         ' | last timestamp:', as.character(Sys.time()), avg_time_label, end = '')
-
+    
     # generate all sample to be used for all trained models
     tic()
     list_generated_coal <- future_lapply(list_split[[split_name]], generate_coalitions, future.packages = c("data.table"), future.seed = NULL)
     gen_time = capture.output(toc()) %>% strsplit(" ") %>% .[[1]] %>% .[1] %>% as.numeric() %>% seconds_to_period()
     cat(paste0('(generate: ', lubridate::hour(gen_time), 'h:', lubridate::minute(gen_time), 'm:', round(lubridate::second(gen_time))), end = '')
-
+    
     # generate SHAP values for all observations and all trained models
     tic()
     for (tr_model in names(trained_model_prediction_function)){
-
+      
       # select model from trained_model_prediction_function
       trained_model = trained_model_prediction_function[[tr_model]]
-
+      
       # predict trained model on list_generated_coal
       list_predicted_data = data.table::rbindlist(list_generated_coal)
       list_predicted_data = list_predicted_data %>%
         mutate(Prediction = trained_model(list_predicted_data %>% as.data.frame() %>% select(all_of(colnames(dataSample)))))
       list_predicted_data = split(list_predicted_data , f = list_predicted_data$obs_index)
-
+      
       # evaluate SHAP values
       list_generated_SHAP <- future_lapply(1:length(list_predicted_data), generate_shapley, trained_model_name = tr_model, future.seed = NULL)
-
+      
       # add observation predicted values and average observation predicted value
       predicted_obs = data.frame(obs_index = obs_index_to_evaluate,
                                  predicted_val = trained_model(dataSample[obs_index_to_evaluate, ] %>% as.data.frame()))
       predicted_obs_avg = trained_model(dataSample %>% summarise_all(mean))
-
+      
       # append results
       local_SHAP = local_SHAP %>%
         bind_rows(data.table::rbindlist(list_generated_SHAP) %>%
@@ -3093,7 +3653,7 @@ evaluate_SHAP = function(dataSample, sample_size = 100, trained_model_prediction
     } # tr_model
     pred_time = capture.output(toc()) %>% strsplit(" ") %>% .[[1]] %>% .[1] %>% as.numeric() %>% seconds_to_period()
     cat(paste0(' - predict: ', lubridate::hour(pred_time), 'h:', lubridate::minute(pred_time), 'm:', round(lubridate::second(pred_time)), ')'), end = '\r')
-
+    
     split_time_val = c(split_time_val, difftime(Sys.time(), split_time, units='secs'))
   } # split_name
   future:::ClusterRegistry("stop")
@@ -3104,9 +3664,9 @@ evaluate_SHAP = function(dataSample, sample_size = 100, trained_model_prediction
   }
   local_SHAP = local_SHAP %>%
     arrange(model_name, obs_index, feature)
-
+  
   #### loop for all classes (if any) to create global_features_effect and SHAP_feat_imp
-
+  
   class_set = data.frame(set = 'All observations', class = '', stringsAsFactors = F)
   if (!is.null(obs_index_subset)){
     obs_index_subset = obs_index_subset %>% mutate(class = as.character(class))  # remove factors
@@ -3118,44 +3678,44 @@ evaluate_SHAP = function(dataSample, sample_size = 100, trained_model_prediction
   }
   list_output = list()
   for (class_i in 1:nrow(class_set)){
-
+    
     if (class_set$set[class_i] != 'All observations'){
       tt_local_SHAP = local_SHAP %>%
         filter(class == class_set$class[class_i])
     } else {
       tt_local_SHAP = local_SHAP
     }
-
+    
     # evaluate average of SHAP values. Proxy for GLOBAL signed impact on predictions
     global_features_effect = tt_local_SHAP %>%
       group_by(model_name, feature) %>%
       summarize(phi = mean(phi), .groups = "drop") %>%
       arrange(model_name, desc(abs(phi)))
-
-
+    
+    
     # evaluate SHAP feature importance. Average of SHAP values absolute value
     SHAP_feat_imp = tt_local_SHAP %>%
       group_by(model_name, feature) %>%
       summarize(phi = mean(abs(phi)), .groups = "drop") %>%
       arrange(model_name, desc(phi))
-
+    
     list_output[[class_set$set[class_i]]] = list(global_features_effect = global_features_effect,
                                                  SHAP_feat_imp = SHAP_feat_imp)
-
+    
   } # class_i
   features_level = list_output$`All observations`$SHAP_feat_imp
   if (length(list_output) == 1){list_output = list_output[[1]]}   # remove "All observations" level if it is the only available
-
+  
   # evaluate input for plot_SHAP_summary()
   scaled_features = dataSample %>%    # scale input features in [0,1]
     as.data.frame() %>%
     mutate_all(~scale_range(., a=0, b=1)) %>%
     mutate(obs_index = 1:n()) %>%
     gather(key = "feature", value = "value_color", -obs_index)
-
+  
   summary_plot_data = c()
   for (tr_model in names(trained_model_prediction_function)){
-
+    
     summary_plot_data = summary_plot_data %>%
       bind_rows(
         local_SHAP %>%
@@ -3164,12 +3724,12 @@ evaluate_SHAP = function(dataSample, sample_size = 100, trained_model_prediction
           mutate(feature = factor(feature, levels = features_level %>% filter(model_name == tr_model) %>% pull(feature)))
       )
   } # tr_model
-
+  
   list_output = c(list(type = "SHAP",
                        local_SHAP = local_SHAP,
                        summary_plot_data = summary_plot_data),
                   list_output)
-
+  
   return(list_output)
 }
 
@@ -4105,9 +4665,9 @@ cluster_ANOVA = function(df_anova, group_var, variable_set, anova_pval){
     if (class(df$var) == "character"){
       
       cs = chisq.test(table(df$group, df$var))
-
+      
       conf_mat[[var]] = round(cs$residuals, 3)
-
+      
       var_res = var_res %>%
         bind_rows(data.frame(round(cs$residuals^2 / cs$statistic * 100, 2)) %>%
                     rename(group = Var1) %>%
@@ -4229,3 +4789,141 @@ cluster_ANOVA = function(df_anova, group_var, variable_set, anova_pval){
   ))
 }
 
+
+# probability calibration curve
+calibration_curve <- function(y_true = c(), y_prob_list = list(), pos_label = NULL, n_bins = 5, strategy = "uniform", curve_color = c()) {
+  
+  # y_true: vector of true classes 0 or 1
+  # y_prob_list: named list of predicted probabilities. Names will be displayed in the legend
+  # pos_label: label for the positive class. max(y_true) if not provided
+  # strategy: "uniform" or "quantile" to evaluate bins
+  # curve_color: named vector with same names of y_prob_list
+  
+  # translated from Python 
+  # https://scikit-learn.org/1.5/modules/generated/sklearn.calibration.calibration_curve.html
+  # https://scikit-learn.org/1.5/modules/generated/sklearn.calibration.CalibrationDisplay.html
+  
+  y_true <- as.numeric(y_true)
+  
+  labels <- unique(y_true)
+  if (length(labels) > 2) {
+    stop(paste("Only binary classification is supported. Provided labels:", paste(labels, collapse = ", ")))
+  }
+  if (is.null(pos_label)) {
+    pos_label <- max(labels)  # Default to the higher label
+  }
+  y_true <- as.numeric(y_true == pos_label)  # Convert to binary 0/1
+  
+  plot_data = c()
+  for (prob_name in names(y_prob_list)){
+    
+    y_prob <- as.numeric(y_prob_list[[prob_name]])
+    
+    if (length(y_true) != length(y_prob)) {
+      stop("y_true and y_prob must have the same length.")
+    }
+    
+    if (min(y_prob) < 0 || max(y_prob) > 1) {
+      stop("y_prob has values outside [0, 1].")
+    }
+    
+    # Define bin edges
+    if (strategy == "quantile") {
+      quantiles <- seq(0, 1, length.out = n_bins + 1)
+      bins <- quantile(y_prob, probs = quantiles, na.rm = TRUE)
+    } else if (strategy == "uniform") {
+      bins <- seq(0, 1, length.out = n_bins + 1)
+    } else {
+      stop("Invalid strategy. Must be 'quantile' or 'uniform'.")
+    }
+    
+    # Assign bins
+    bin_ids <- cut(y_prob, breaks = bins, include.lowest = TRUE, labels = FALSE)
+    
+    # Compute bin statistics
+    bin_sums <- tapply(y_prob, bin_ids, sum, na.rm = TRUE)
+    bin_true <- tapply(y_true, bin_ids, sum, na.rm = TRUE)
+    bin_total <- tapply(y_prob, bin_ids, length)
+    
+    # Remove bins with zero counts
+    nonzero_bins <- !is.na(bin_total) & bin_total > 0
+    prob_true <- bin_true[nonzero_bins] / bin_total[nonzero_bins]
+    prob_pred <- bin_sums[nonzero_bins] / bin_total[nonzero_bins]
+    
+    plot_data = plot_data %>%
+      bind_rows(data.frame(Model = prob_name, x_pred = prob_pred, y_true = prob_true, stringsAsFactors = F))
+  } # prob_name
+  plot_data = plot_data %>%
+    mutate(linest = "solid",
+           point_alp = 1) %>%
+    left_join(data.frame(curve_color) %>%
+                rownames_to_column("Model"), by = "Model") %>%
+    left_join(data.frame(Model = names(y_prob_list), shp = rep(15:19, 5)[1:length(y_prob_list)]), by = "Model") %>%
+    bind_rows(data.frame(Model = "Perfect Calibration", x_pred = c(0, 1), y_true = c(0, 1),
+                         shp = 3, curve_color = "black", linest = "dotted", point_alp = 0, stringsAsFactors = F)) %>%
+    mutate(Model = factor(Model, levels = rev(c("Perfect Calibration", names(y_prob_list))))) %>%
+    mutate(color_shp = interaction(curve_color, shp))
+  inter_map = plot_data %>%
+    select(curve_color, shp, color_shp, Model) %>%
+    unique()
+  
+  # plot
+  info_pos_label <- if (!is.null(pos_label)) paste0("(Positive class: ", pos_label, ")") else ""
+  
+  p = ggplot(plot_data, aes(x = x_pred, y = y_true, group = Model, color = color_shp, shape = color_shp)) +
+    geom_line(aes(linetype = linest), linewidth = 1.3) +
+    geom_point(aes(alpha = point_alp), size = 2.5) +
+    scale_linetype_identity() +
+    scale_shape_manual(name = "Model", values = setNames(inter_map$shp, as.character(inter_map$color_shp)),
+                       labels = setNames(as.character(inter_map$Model), as.character(inter_map$color_shp))) +
+    scale_color_manual(name = "Model", values = setNames(inter_map$curve_color, as.character(inter_map$color_shp)),
+                       labels = setNames(as.character(inter_map$Model), as.character(inter_map$color_shp))) +
+    scale_alpha_identity() +
+    guides(color = guide_legend(title = "Model"),
+           linetype = "none",
+           shape = guide_legend(override.aes = list(size = 4))) +
+    labs(title = "Calibration curve", x = paste("Mean predicted probability", info_pos_label), y = paste("Fraction of positive class:", pos_label)) +
+    scale_y_continuous(labels = scales::percent_format(accuracy = 1)) +
+    scale_x_continuous(labels = scales::percent_format(accuracy = 1)) +
+    theme(
+      axis.text = element_text(size = 14),
+      axis.title = element_text(size = 20),
+      plot.title = element_text(size=27),
+      legend.title=element_text(size=20),
+      legend.text=element_text(size=17),
+      legend.key.width = unit(2, "cm"),  # Increase the width of legend symbols
+      legend.key.height = unit(1, "cm"),
+      legend.position = c(0.05, 0.95),  # Move legend to top-left corner inside the plot
+      legend.justification = c(0, 1),   # Adjust the legend's anchor point to top-left
+      legend.background = element_rect(fill = "white", size = 0.5, color = "black"),  # Optional: add background to the legend
+      panel.background = element_rect(fill = "white", colour = "black"),
+      panel.grid.major.x = element_line(colour = "grey", linetype = 'dashed', linewidth = 0.4),
+      panel.grid.minor.x = element_line(colour = "grey", linetype = 'dashed', linewidth = 0.4))
+  
+  return(p)
+}
+
+# custom tryCatch so to capture warnings and continue execution
+myCatch <- function(expr){
+  
+  out <- c("OK", "")
+  tryCatch(
+    {
+      withCallingHandlers(
+        {
+          expr  # Execute the expression
+        },
+        warning = function(w) {
+          # Handle warnings
+          out <<- c("WARNING", conditionMessage(w))
+          invokeRestart("muffleWarning")  # Suppress the warning
+        }
+      )
+    },
+    error = function(e) {
+      # Handle errors
+      out <<- c("ERROR", conditionMessage(e))
+    }
+  )
+  return(out)
+}
