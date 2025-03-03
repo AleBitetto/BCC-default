@@ -2816,7 +2816,6 @@ fit_model_with_cv = function(df_work, cv_ind, algo_type, parameter_set = NULL, n
     # run in parallel for all folds
     parallel_index = total_folds
     names(parallel_index) = paste0("fold_", parallel_index)
-    all_objects <- ls()   # to get function names
     if (n_workers > 1){
       
       plan(multisession, workers = n_workers, split = T)
@@ -2830,7 +2829,7 @@ fit_model_with_cv = function(df_work, cv_ind, algo_type, parameter_set = NULL, n
     } else {
       list_parallel = list()
       for (fold_i in parallel_index){
-        list_parallel[[fold_i]] = fit_model_cv_parallel(fold_i, parameter_set = parameter_set)
+        list_parallel[[names(parallel_index)[fold_i]]] = fit_model_cv_parallel(fold_i, parameter_set = parameter_set)
       } # fold_i
     }
     fold_prediction = bind_rows(Map(function(x) x[["pred_to_bind"]], list_parallel))
@@ -4370,6 +4369,31 @@ evaluate_feature_importance = function(df_work, model_setting_block, method,
     trained_model_prediction_function[[alg_type]] = pred_function
     
   } # alg_type
+  
+  
+  # Platt scaling
+  # https://rdrr.io/github/bioinf-jku/platt/f/inst/doc/platt.pdf
+  if (calib_meth == "platt"){
+    calib_fit = plattScaling(calib_fit_data %>% filter(fold == fold_i) %>% pull(Prob),
+                             calib_fit_data %>% filter(fold == fold_i) %>% pull(y_true) %>% as.numeric())
+    calib_pred = predictProb(calib_fit, calib_pred_data %>% filter(fold == fold_i) %>% pull(Prob))
+    calib_fold_prediction = predictProb(calib_fit, fold_prediction %>% filter(prob_calib == "no") %>% filter(fold == fold_i) %>% pull(Prob))  # calibrate full fold sample
+  }
+  # Isotonic regression
+  # https://search.r-project.org/CRAN/refmans/CORElearn/html/calibrate.html
+  if (calib_meth == "isoreg"){
+    calib_fit = CORElearn:::calibrate(calib_fit_data %>% filter(fold == fold_i) %>% pull(y_true) %>% as.numeric() %>% factor(levels = c(0, 1)),
+                                      calib_fit_data %>% filter(fold == fold_i) %>% pull(Prob), class1=1, 
+                                      method="isoReg", assumeProbabilities=TRUE)
+    calib_pred = applyCalibration(calib_pred_data %>% filter(fold == fold_i) %>% pull(Prob), calib_fit)
+    calib_fold_prediction = applyCalibration(fold_prediction %>% filter(prob_calib == "no") %>% filter(fold == fold_i) %>% pull(Prob), calib_fit)
+    flat_prob_check = c(flat_prob_check, uniqueN(calib_pred))
+  }
+  
+  
+  
+  
+  
   
   # todo: rimuovi
   # tt = trained_model_prediction_function[["MARS"]]

@@ -2672,7 +2672,7 @@ run_plot_feat_imp = F    # plot feature importance
                                                       verbose = 1, n_workers = n_workers, seed = 66)
           
           saveRDS(feat_imp_SHAP,paste0('./Distance_to_Default/Checkpoints/ML_model/05_feat_imp_reload_SHAP_', rds_lab, '.rds'))
-          rm(feat_imp_PFI, feat_imp_SHAP, model_setting_block)
+          suppressWarnings(rm(feat_imp_PFI, feat_imp_SHAP, model_setting_block))
         } # run_feat_imp
       } # mod
       
