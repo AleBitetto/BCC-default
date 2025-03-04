@@ -55,6 +55,7 @@ library(vcd)
 library(ggplotify)
 library(platt)    # remotes::install_github("bioinf-jku/platt")
 library(CORElearn)
+library(digest)
 library(data.table)
 library(dplyr)
 library(tidyverse)
@@ -2629,13 +2630,17 @@ run_plot_feat_imp = F    # plot feature importance
   ### evaluate feature importance - only for "no_control" variables
   d_type = "original"   # no oversample
   mod_set_lab = "no_control"
+  best_calib_lab = "yes"      # keep only results with optimal probabilities calibration method
   performance_metric = "F1"   # used in Permutation Feature Importance
-  n_repetitions = 5    # repetitions in Permutation Feature Importance
-  compare = "difference"   # used in Permutation Feature Importance
-  sample.size = 100    # used in SHAP   # todo: rimetti 100
-  n_batch = 5    # used in SHAP to save memory
-  n_workers = 5    # workers for parallel computation
+  n_repetitions = 5           # repetitions in Permutation Feature Importance
+  compare = "difference"      # used in Permutation Feature Importance
+  sample_size = 100           # used in SHAP   # todo: rimetti 100
+  n_batch = 5                 # used in SHAP to save memory
+  n_workers = 5               # workers for parallel computation
+  reload_coalitions = T       # reload coalitions for SHAP
+  checkpoints_folder = './Distance_to_Default/Checkpoints/Feature_Importance/'
   {
+    feat_imp_log = c()
     for (cl_lab in log_fitting$cluster_lab %>% unique()){
       
       cat('\n\n\n===================== ', cl_lab, ' =====================')
@@ -2646,7 +2651,7 @@ run_plot_feat_imp = F    # plot feature importance
         
         if (run_feat_imp){
           
-          cat('\n *** Evaluating:', mod)
+          cat('\n\n *** Evaluating:', mod, '\n')
           
           # reload dataset
           df_work = readRDS(paste0('./Distance_to_Default/Checkpoints/ML_model/04_feature_importance_input_',
@@ -2656,20 +2661,29 @@ run_plot_feat_imp = F    # plot feature importance
             filter(cluster_lab == cl_lab) %>%
             filter(model_setting_lab == mod_set_lab) %>%
             filter(model == mod) %>%
-            select(model_setting_lab, cluster_lab, data_type, model, algo_type, rds)
+            filter(best_calib == best_calib_lab) %>%
+            select(model_setting_lab, cluster_lab, data_type, model, algo_type, prob_calib, rds)
           
           # Permutation Feature Importance
-          feat_imp_PFI = evaluate_feature_importance(df_work, # %>% group_by(y) %>% filter(row_number() <= 300) %>% ungroup(),  # todo: togli
+          feat_imp_PFI = evaluate_feature_importance(df_work, # %>% group_by(y) %>% filter(row_number() <= 100) %>% ungroup(),  # todo: togli
                                                      model_setting_block, method = "Permutation",
                                                      performance_metric = performance_metric, n_repetitions = n_repetitions, compare = compare,
-                                                     verbose = 1, n_workers = n_workers, seed = 66)
+                                                     verbose = 1, n_workers = n_workers, seed = 66, checkpoints_folder = checkpoints_folder)
           
           saveRDS(feat_imp_PFI, paste0('./Distance_to_Default/Checkpoints/ML_model/05_feat_imp_reload_PFI_', rds_lab, '.rds'))
           
           # SHAP values
           feat_imp_SHAP = evaluate_feature_importance(df_work, model_setting_block, method = "SHAP",
-                                                      sample.size = sample.size, n_batch = n_batch,
-                                                      verbose = 1, n_workers = n_workers, seed = 66)
+                                                      sample_size = sample_size, n_batch = n_batch,
+                                                      verbose = 1, n_workers = n_workers, reload_coalitions = reload_coalitions,
+                                                      seed = 66, checkpoints_folder = checkpoints_folder)
+          
+          feat_imp_log = feat_imp_log %>%
+            bind_rows(model_setting_block %>%
+                        select(-rds, -algo_type, -prob_calib) %>%
+                        unique() %>%
+                        mutate(method = "SHAP") %>%
+                        bind_cols(data.frame(rds_coalitions = feat_imp_SHAP$coalition_rds_list, stringsAsFactors = F)))
           
           saveRDS(feat_imp_SHAP,paste0('./Distance_to_Default/Checkpoints/ML_model/05_feat_imp_reload_SHAP_', rds_lab, '.rds'))
           suppressWarnings(rm(feat_imp_PFI, feat_imp_SHAP, model_setting_block))
@@ -2876,13 +2890,15 @@ run_plot_feat_imp = F    # plot feature importance
       }
       
     } # cl_lab
+    write.table(feat_imp_log, './Distance_to_Default/Results/06_06_Feat_Imp_checkpoints_log.csv', sep = ';', row.names = F, append = F, na = "")
   }
   
   
   
   ### create report
-  plt_perf = "F1"    # performance to plot
-  fig_per_row = 3    # used to split control variables for probability distribution and ROC curve plot
+  plt_perf = "F1"          # performance to plot
+  fig_per_row = 3          # used to split control variables for probability distribution and ROC curve plot
+  best_calib_lab = "yes"   # keep only results with optimal probabilities calibration method
   {
     for (cl_lab in unique(log_fitting$cluster_lab)){
       for (d_type in log_fitting %>% filter(cluster_lab == cl_lab) %>% pull(data_type) %>% unique()){
@@ -2895,13 +2911,14 @@ run_plot_feat_imp = F    # plot feature importance
           only_full_set = F  # doesn't show performance on cross-validation test set
           {
             perf_lab = ifelse(plt_perf == "F1", "F1-score", plt_perf)
-            y_lim = c(log_fitting %>% pull(paste0(plt_perf, "_train")), log_tuning %>% pull(paste0(plt_perf, "_test_avg"))) %>% range()
+            y_lim = c(log_fitting %>% pull(paste0(plt_perf, "_train")), log_tuning %>% pull(paste0(plt_perf, "_test_avg"))) %>% range(na.rm = T)
             dist_baseline = 1    # x-label spacing
             dist_dataset = 0.5
             tt = log_fitting %>%
               filter(data_type == d_type) %>%
               filter(cluster_lab == cl_lab) %>%
               filter(algo_type == alg_type) %>%
+              filter(best_calib)
               left_join(log_tuning %>%
                           select(model_setting_lab, cluster_lab, data_type, model, algo_type, param_compact_label, matches("_avg|_std")),
                         by = c("model_setting_lab", "cluster_lab", "data_type", "model", "algo_type", "param_compact_label")) %>%

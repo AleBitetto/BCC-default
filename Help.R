@@ -2494,13 +2494,14 @@ fit_polyMARS = function(data_train, data_test, maxdim, use_weight, penalty = 0){
     silent = T)
   
   # predict on train and test
+  variables_order = colnames(data_train %>% select(-y))
   pred_prob_test = pred_prob_train = data.frame()
   pred_prob_train = ppolyclass(data_train %>% select(-y) %>% as.matrix(), fit)[, 2] %>%
     data.frame() %>%
     setNames("Prob") %>%
     `rownames<-`(rownames(data_train))
   if (!is.null(data_test)){
-    pred_prob_test = ppolyclass(data_test %>% select(-y) %>% as.matrix(), fit)[, 2] %>%
+    pred_prob_test = ppolyclass(data_test %>% select(all_of(variables_order)) %>% as.matrix(), fit)[, 2] %>%
       data.frame() %>%
       setNames("Prob") %>%
       `rownames<-`(rownames(data_test))
@@ -2514,7 +2515,8 @@ fit_polyMARS = function(data_train, data_test, maxdim, use_weight, penalty = 0){
               pred_prob_test = pred_prob_test,
               options = list(maxdim = maxdim,
                              use_weight = use_weight,
-                             penalty = penalty)))
+                             penalty = penalty,
+                             variables_order = colnames(data_train %>% select(-y)))))
 }
 
 # fit model in parallel on all folds
@@ -3133,8 +3135,8 @@ ml_tuning = function(df_work, algo_type, cv_ind, prob_thresh_cv, tuning_crit = "
                                family = "binomial",
                                n_fold_cvgmlnet = 10,
                                fixed_variables = fixed_variables),
-      max_iter = 20,  # todo: rimetti
-      design_iter = 10  # todo: rimetti
+      max_iter = 10,  # todo: rimetti
+      design_iter = 20  # todo: rimetti
     ),
     
     Random_Forest = list(
@@ -3144,8 +3146,8 @@ ml_tuning = function(df_work, algo_type, cv_ind, prob_thresh_cv, tuning_crit = "
         makeIntegerParam("min.node.size", 1, as.integer(n_obs / 2))
       ),
       non_tunable_param = NULL,
-      max_iter = 30,  # todo: rimetti
-      design_iter = 20  # todo: rimetti
+      max_iter = 20,  # todo: rimetti
+      design_iter = 30  # todo: rimetti
     ),
     
     MARS = list(
@@ -3176,8 +3178,8 @@ ml_tuning = function(df_work, algo_type, cv_ind, prob_thresh_cv, tuning_crit = "
       non_tunable_param = list(scale = F,
                                kernel = "optimal",
                                distance = 2),
-      max_iter = 10,   # todo: rimetti
-      design_iter = 5   # todo: rimetti
+      max_iter = 5,   # todo: rimetti
+      design_iter = 10   # todo: rimetti
     ),
     
     `polyMARS` = list(
@@ -3420,7 +3422,8 @@ ml_tuning = function(df_work, algo_type, cv_ind, prob_thresh_cv, tuning_crit = "
 
 # evaluate Shapley values
 evaluate_SHAP = function(dataSample, sample_size = 100, trained_model_prediction_function = NULL, obs_index_to_evaluate = NULL,
-                         obs_index_to_sample = NULL, obs_index_subset = NULL, adjust_shapley = FALSE, n_batch = 1, n_workers = 5, verbose = 1, seed = 66){
+                         obs_index_to_sample = NULL, obs_index_subset = NULL, adjust_shapley = FALSE, 
+                         n_batch = 1, n_workers = 5, reload_coalitions = TRUE, verbose = 1, seed = 66, checkpoints_folder = ''){
   
   # evaluate local SHAP values for single observations, global (signed) features effects, global SHAP features importance and input for plot_SHAP_summary().
   # https://christophm.github.io/interpretable-ml-book/shapley.html
@@ -3440,6 +3443,7 @@ evaluate_SHAP = function(dataSample, sample_size = 100, trained_model_prediction
   #               model's prediction for of each observation and the average prediction over all the dataset.
   # n_batch: number of batch to split the evaluation. May speed up evaluation and save memory.
   # n_workers: number of workers for parallel calculation. Try not to exceed 30-40.
+  # reload_coalitions: if TRUE, reload coalition generated for each batch. Hashing is used to ensure reproducibility.
   # verbose: 1 to display calculation time, 0 for silent.
   # seed: seed for reproducibility
   
@@ -3602,8 +3606,8 @@ evaluate_SHAP = function(dataSample, sample_size = 100, trained_model_prediction
   plan(multisession, workers = n_workers)
   list_split = split(obs_index_to_evaluate, sort(obs_index_to_evaluate %% n_batch))
   start_time = Sys.time()
-  split_time_val = local_SHAP = c()
-  cat('\nStart time:', as.character(Sys.time()), '\n')
+  split_time_val = local_SHAP = coalition_rds_list = c()
+  cat('\n     * Start time:', as.character(Sys.time()), '\n')
   for (split_name in names(list_split)){
     
     # check average batch time
@@ -3614,14 +3618,23 @@ evaluate_SHAP = function(dataSample, sample_size = 100, trained_model_prediction
     } else {
       avg_time_label = ''
     }
-    cat('Generating coalitions and SHAP values for batch', paste0(as.numeric(split_name)+1, '/', length(list_split)),
-        ' | last timestamp:', as.character(Sys.time()), avg_time_label, end = '')
+    cat('     * Generating coalitions and SHAP values for batch', paste0(as.numeric(split_name)+1, ' / ', length(list_split)),
+        '  - last interaction:', as.character(Sys.time()), avg_time_label, end = '')
     
     # generate all sample to be used for all trained models
-    tic()
-    list_generated_coal <- future_lapply(list_split[[split_name]], generate_coalitions, future.packages = c("data.table"), future.seed = NULL)
-    gen_time = capture.output(toc()) %>% strsplit(" ") %>% .[[1]] %>% .[1] %>% as.numeric() %>% seconds_to_period()
-    cat(paste0('(generate: ', lubridate::hour(gen_time), 'h:', lubridate::minute(gen_time), 'm:', round(lubridate::second(gen_time))), end = '')
+    coal_hash_rds = file.path(checkpoints_folder,
+                              paste0("SHAP_", digest::digest(dataSample), "_", digest::digest(list_split[[split_name]]), "_", sample_size, "_", n_batch, "_", seed, ".rds"))
+    r_err = try(list_generated_coal <- suppressWarnings(readRDS(coal_hash_rds)), silent = T)
+    if (class(r_err) == "try-error" | !reload_coalitions){
+      tic()
+      list_generated_coal <- future_lapply(list_split[[split_name]], generate_coalitions, future.packages = c("data.table"), future.seed = NULL)
+      gen_time = capture.output(toc()) %>% strsplit(" ") %>% .[[1]] %>% .[1] %>% as.numeric() %>% seconds_to_period()
+      saveRDS(list_generated_coal, coal_hash_rds)
+      cat(paste0('(generate: ', lubridate::hour(gen_time), 'h:', lubridate::minute(gen_time), 'm:', round(lubridate::second(gen_time))), end = '')
+    } else {
+      cat('(generate: reloaded', end = '')
+    }
+    coalition_rds_list = c(coalition_rds_list, coal_hash_rds)
     
     # generate SHAP values for all observations and all trained models
     tic()
@@ -3657,7 +3670,7 @@ evaluate_SHAP = function(dataSample, sample_size = 100, trained_model_prediction
   } # split_name
   future:::ClusterRegistry("stop")
   tot_diff=seconds_to_period(difftime(Sys.time(), start_time, units='secs'))
-  cat('\nTotal elapsed time', paste0(lubridate::hour(tot_diff), 'h:', lubridate::minute(tot_diff), 'm:', round(lubridate::second(tot_diff))), ' ', as.character(Sys.time()), '\n')
+  cat('\n     * Total elapsed time', paste0(lubridate::hour(tot_diff), 'h:', lubridate::minute(tot_diff), 'm:', round(lubridate::second(tot_diff))), ' ', as.character(Sys.time()), '\n')
   if (n_features * length(obs_index_to_evaluate) * length(trained_model_prediction_function) != nrow(local_SHAP)){
     warning("Expected number of rows in generated local SHAP values doesn't match")
   }
@@ -3725,6 +3738,7 @@ evaluate_SHAP = function(dataSample, sample_size = 100, trained_model_prediction
   } # tr_model
   
   list_output = c(list(type = "SHAP",
+                       coalition_rds_list = coalition_rds_list,
                        local_SHAP = local_SHAP,
                        summary_plot_data = summary_plot_data),
                   list_output)
@@ -3736,7 +3750,7 @@ evaluate_SHAP = function(dataSample, sample_size = 100, trained_model_prediction
 evaluate_Perm_Feat_Imp = function(dataSample, trained_model_prediction_function = NULL, n_repetitions = 5, compare = "difference",
                                   obs_index_to_evaluate = NULL, obs_index_to_shuffle = NULL, obs_index_subset = NULL,
                                   perf_metric = NULL, perf_metric_add_pars = NULL, true_val_name = NULL, prediction_name = NULL, perf_metric_minimize = F,
-                                  verbose = 1, n_workers = 5, seed = 66){
+                                  verbose = 1, n_workers = 5, seed = 66, checkpoints_folder = ''){
   
   # evaluate Permutation Feature Importance.
   
@@ -3761,6 +3775,7 @@ evaluate_Perm_Feat_Imp = function(dataSample, trained_model_prediction_function 
   # verbose: 1 to display calculation time, 0 for silent.
   # n_workers: number of workers for parallel calculation. Try not to exceed 30-40.
   # seed: seed for reproducibility
+  # checkpoints_folder: folder for checkpoints
   
   # Output:
   #   list of:
@@ -3769,6 +3784,8 @@ evaluate_Perm_Feat_Imp = function(dataSample, trained_model_prediction_function 
   #                           "importance", ".std", ".5" and ".95" are the average, st.dev, 5th and 95th percentile of feature importance over repetitions.
   #     - type: "SHAP". Used in plot_feat_imp().
   # If obs_index_subset != NULL additional nested list is returned for each class and all observations with Permutation_feat_imp
+  
+  EXCLUDE_PACKAGE = c("XML")
   
   # check input index and target variable
   if (is.null(obs_index_to_evaluate)){obs_index_to_evaluate = c(1:nrow(dataSample))}
@@ -3820,7 +3837,8 @@ evaluate_Perm_Feat_Imp = function(dataSample, trained_model_prediction_function 
   options(future.globals.maxSize = 8000 * 1024^2)
   plan(multisession, workers = n_workers)
   start_time = Sys.time()
-  cat('Evaluating feature importance...', end = '\r')
+  if (length(EXCLUDE_PACKAGE) > 0){cat(paste0('     *\033[31m Packages excluded in future_lapply(): \033[0m', paste0('"', EXCLUDE_PACKAGE, '"', collapse = ', ')), '\n')}
+  cat('     * Generating permutations...', end = '\n')
   
   #### generate shuffled data for all features and repetitions
   list_generated_perm <- future_lapply(1:tot_features, generate_permutations, future.seed = NULL)
@@ -3848,20 +3866,25 @@ evaluate_Perm_Feat_Imp = function(dataSample, trained_model_prediction_function 
     }
     
     Permutation_feat_imp = c()
+    cc = 1
     for (tr_model in names(trained_model_prediction_function)){
+      
+      cat('     * Evaluating feature importance... ', cc, '/', length(trained_model_prediction_function),
+          paste0('  ', str_pad(paste0('"', tr_model, '"'), 20, side = "right"), '  - last interaction: ', format(Sys.time(), "%Y-%m-%d - %H:%M:%S"), '              '), end = '\r')
       
       # select model from trained_model_prediction_function
       trained_model = trained_model_prediction_function[[tr_model]]
       
       # predict for all features and repetitions
       pred_function = function(x){
-        x %>% mutate(!!sym(prediction_name) := trained_model(x %>% as.data.frame() %>% select(all_of(feat_names)))) %>%
-          rename(!!sym(true_val_name) := y) %>%
-          select(obs_index, feature, rep_num, all_of(c(true_val_name, prediction_name)))
+
+        x %>% dplyr::mutate(!!sym(prediction_name) := trained_model(x %>% as.data.frame() %>% dplyr::select(all_of(feat_names)))) %>%
+          dplyr::rename(!!sym(true_val_name) := y) %>%
+          dplyr::select(obs_index, feature, rep_num, all_of(c(true_val_name, prediction_name)))
       }
       
-      list_predicted_data = future_lapply(list_generated_perm, future.packages = loadedNamespaces(), pred_function, future.seed = NULL)
-      
+      list_predicted_data = future_lapply(list_generated_perm, future.packages = setdiff(loadedNamespaces(), EXCLUDE_PACKAGE), pred_function, future.seed = NULL)
+
       # evaluate performance for all features and repetitions
       perf_function = function(x){
         f_name = x$feature %>% unique()
@@ -3878,7 +3901,7 @@ evaluate_Perm_Feat_Imp = function(dataSample, trained_model_prediction_function 
         return(out)
       }
       df_final_perf = future_lapply(list_predicted_data, perf_function, future.seed = NULL) %>% data.table::rbindlist()
-      
+
       # original performance
       original_pred = pred_function(dataSample %>%
                                       filter(obs_index %in% class_index) %>%
@@ -3905,6 +3928,7 @@ evaluate_Perm_Feat_Imp = function(dataSample, trained_model_prediction_function 
             select(model_name, everything())
         )
       
+      cc = cc + 1
     } # tr_model
     
     list_output[[class_set$set[class_i]]] = list(Permutation_feat_imp = Permutation_feat_imp %>%
@@ -3913,7 +3937,7 @@ evaluate_Perm_Feat_Imp = function(dataSample, trained_model_prediction_function 
   } # class_i
   future:::ClusterRegistry("stop")
   tot_diff=seconds_to_period(difftime(Sys.time(), start_time, units='secs'))
-  cat('Done in', paste0(lubridate::hour(tot_diff), 'h:', lubridate::minute(tot_diff), 'm:', round(lubridate::second(tot_diff))), ' ', as.character(Sys.time()), '\n')
+  cat('\n       Done in', paste0(lubridate::hour(tot_diff), 'h:', lubridate::minute(tot_diff), 'm:', round(lubridate::second(tot_diff))), ' ', as.character(Sys.time()), '\n')
   if (tot_features * length(trained_model_prediction_function) != nrow(list_output$`All observations`$Permutation_feat_imp)){
     warning("Expected number of rows in generated Permutation_feat_imp doesn't match")
   }
@@ -3942,6 +3966,9 @@ plot_SHAP_summary = function(list_input, sina_method = "counts", sina_bins = 20,
   # bold_color: if bold_features != c() color of bold features
   # save_path: if not '', save all plots. Only modelName_Class.png will be added. "_" at the end of save_path is automatically added if not provided.
   # plot_width, plot_height: width and height of saved plot
+  
+  # remove coalition rds
+  list_input[["coalition_rds_list"]] = NULL
   
   # check last character of save_path
   if (substr(save_path, nchar(save_path), nchar(save_path)) != "_" & save_path != ''){save_path = paste0(save_path, "_")}
@@ -4107,6 +4134,9 @@ plot_feat_imp = function(list_input, normalize = F, color_pos = "blue", color_ne
   
   # todo: aggiungi le barre di errore nel caso della PFI e capisci cosa viene fuori se la PFI è negativa
   
+  # remove coalition rds
+  list_input[["coalition_rds_list"]] = NULL
+  
   # check last character of save_path
   if (substr(save_path, nchar(save_path), nchar(save_path)) != "_" & save_path != ''){save_path = paste0(save_path, "_")}
   
@@ -4249,8 +4279,8 @@ plot_feat_imp = function(list_input, normalize = F, color_pos = "blue", color_ne
 # evaluate feature importance
 evaluate_feature_importance = function(df_work, model_setting_block, method,
                                        performance_metric = "F1", n_repetitions = 5, compare = "difference",
-                                       sample_size = 100, n_batch = 5,
-                                       verbose = 1, n_workers = 5, seed = 66){
+                                       sample_size = 100, n_batch = 5, reload_coalitions = T,
+                                       verbose = 1, n_workers = 5, seed = 66, checkpoints_folder = ''){
   
   # Evaluate feature importance with SHAP or Permutation Feature Importance. SHAP will use a subset of observations, i.e. y=0 are downsampled to match y=1.
   
@@ -4265,11 +4295,15 @@ evaluate_feature_importance = function(df_work, model_setting_block, method,
   #  --- Arguments for SHAP
   # sample_size: sample size to generate shuffled instances (coalitions). The higher the more accurate the explanations become.
   # n_batch: number of batch to split the evaluation. May speed up evaluation and save memory.
+  # reload_coalitions: if TRUE, reload coalition generated for each batch. Hashing is used to ensure reproducibility.
   #
   # verbose: 1 to display calculation time, 0 for silent.
   # n_workers: number of workers for parallel calculation. Try not to exceed 30-40.
   # seed: seed for reproducibility
+  # checkpoints_folder: folder for checkpoints
   
+  # create checkpoints folder
+  if (checkpoints_folder != ''){suppressWarnings(dir.create(checkpoints_folder, recursive = T))}
   
   # set performance metric for permutation feature importance (see evaluate_Perm_Feat_Imp() input)
   if (performance_metric == "F1"){
@@ -4308,6 +4342,7 @@ evaluate_feature_importance = function(df_work, model_setting_block, method,
     
     # reload model
     fit_fullset = readRDS(model_setting_block %>% filter(algo_type == alg_type) %>% pull(rds))
+    fit_fullset_calib = fit_fullset$best_calib
     
     # create predict model
     if (alg_type == "Elastic-net"){
@@ -4316,9 +4351,18 @@ evaluate_feature_importance = function(df_work, model_setting_block, method,
       lambda_opt = fit_fullset$fold_model_fit$fold_1$lambda_opt
       family = fit_fullset$fold_model_fit$fold_1$options$family
       best_threshold_Elastic_net = fit_fullset$best_threshold
+      if (fit_fullset_calib != "no"){
+        calib_fit_Elastic_net = fit_fullset$fold_calib_fit$fold_1[[fit_fullset_calib]]
+        calib_meth_Elastic_net = fit_fullset_calib
+      } else {
+        calib_fit_Elastic_net = NULL
+      }
       
       pred_function = function(x){
         out = predict(model_Elastic_net, newx = x %>% as.matrix(), s = lambda_opt, family = family, type="response") %>% as.numeric()
+        if (!is.null(calib_fit_Elastic_net)){
+          out = apply_probability_calibration(calib_fit = calib_fit_Elastic_net, calib_meth = calib_meth_Elastic_net, prob = out)
+        }
         if (pred_type == "class"){
           out = ifelse(out >= best_threshold_Elastic_net, 1, 0) %>% as.character()
         }
@@ -4329,9 +4373,18 @@ evaluate_feature_importance = function(df_work, model_setting_block, method,
       
       model_Random_Forest = fit_fullset$fold_model_fit$fold_1$fit
       best_threshold_Random_Forest = fit_fullset$best_threshold
+      if (fit_fullset_calib != "no"){
+        calib_fit_Random_Forest = fit_fullset$fold_calib_fit$fold_1[[fit_fullset_calib]]
+        calib_meth_Random_Forest = fit_fullset_calib
+      } else {
+        calib_fit_Random_Forest = NULL
+      }
       
       pred_function = function(x){
         out = predict(model_Random_Forest, data = x, type = "response")$predictions[, 2] %>% as.numeric()
+        if (!is.null(calib_fit_Random_Forest)){
+          out = apply_probability_calibration(calib_fit = calib_fit_Random_Forest, calib_meth = calib_meth_Random_Forest, prob = out)
+        }
         if (pred_type == "class"){
           out = ifelse(out >= best_threshold_Random_Forest, 1, 0) %>% as.character()
         }
@@ -4342,9 +4395,18 @@ evaluate_feature_importance = function(df_work, model_setting_block, method,
       
       model_MARS = fit_fullset$fold_model_fit$fold_1$fit
       best_threshold_MARS = fit_fullset$best_threshold
+      if (fit_fullset_calib != "no"){
+        calib_fit_MARS = fit_fullset$fold_calib_fit$fold_1[[fit_fullset_calib]]
+        calib_meth_MARS = fit_fullset_calib
+      } else {
+        calib_fit_MARS = NULL
+      }
       
       pred_function = function(x){
         out = predict(model_MARS, newdata = x, type = "response") %>% as.numeric()
+        if (!is.null(calib_fit_MARS)){
+          out = apply_probability_calibration(calib_fit = calib_fit_MARS, calib_meth = calib_meth_MARS, prob = out)
+        }
         if (pred_type == "class"){
           out = ifelse(out >= best_threshold_MARS, 1, 0) %>% as.character()
         }
@@ -4355,64 +4417,77 @@ evaluate_feature_importance = function(df_work, model_setting_block, method,
       
       model_SVM_RBF = fit_fullset$fold_model_fit$fold_1$fit
       best_threshold_SVM_RBF = fit_fullset$best_threshold
+      if (fit_fullset_calib != "no"){
+        calib_fit_SVM_RBF = fit_fullset$fold_calib_fit$fold_1[[fit_fullset_calib]]
+        calib_meth_SVM_RBF = fit_fullset_calib
+      } else {
+        calib_fit_SVM_RBF = NULL
+      }
       
       pred_function = function(x){
-        out = predict(model_SVM_RBF, newdata = x, type = "probabilities")[,2] %>% as.numeric()
+        out = kernlab::predict(model_SVM_RBF, newdata = x, type = "probabilities")[,2] %>% as.numeric()
+        if (!is.null(calib_fit_SVM_RBF)){
+          out = apply_probability_calibration(calib_fit = calib_fit_SVM_RBF, calib_meth = calib_meth_SVM_RBF, prob = out)
+        }
         if (pred_type == "class"){
           out = ifelse(out >= best_threshold_SVM_RBF, 1, 0) %>% as.character()
         }
         return(out)
       }
       
+    } else if (alg_type == "k-NN"){
+      
+      model_kNN = fit_fullset$fold_model_fit$fold_1$fit
+      best_threshold_kNN = fit_fullset$best_threshold
+      if (fit_fullset_calib != "no"){
+        calib_fit_kNN = fit_fullset$fold_calib_fit$fold_1[[fit_fullset_calib]]
+        calib_meth_kNN = fit_fullset_calib
+      } else {
+        calib_fit_kNN = NULL
+      }
+      
+      pred_function = function(x){
+        out = predict(model_kNN, x, type = "prob")[, 2] %>% as.numeric()
+        if (!is.null(calib_fit_kNN)){
+          out = apply_probability_calibration(calib_fit = calib_fit_kNN, calib_meth = calib_meth_kNN, prob = out)
+        }
+        if (pred_type == "class"){
+          out = ifelse(out >= best_threshold_kNN, 1, 0) %>% as.character()
+        }
+        return(out)
+      }
+      
+    } else if (alg_type == "polyMARS"){
+      
+      model_polyMARS = fit_fullset$fold_model_fit$fold_1$fit
+      best_threshold_polyMARS = fit_fullset$best_threshold
+      variables_order_polyMARS = fit_fullset$fold_model_fit$fold_1$options$variables_order
+      if (fit_fullset_calib != "no"){
+        calib_fit_polyMARS = fit_fullset$fold_calib_fit$fold_1[[fit_fullset_calib]]
+        calib_meth_polyMARS = fit_fullset_calib
+      } else {
+        calib_fit_polyMARS = NULL
+      }
+      
+      pred_function = function(x){
+        out = ppolyclass(x %>% dplyr::select(all_of(variables_order_polyMARS)) %>% as.matrix(), model_polyMARS)[, 2]
+        if (!is.null(calib_fit_polyMARS)){
+          out = apply_probability_calibration(calib_fit = calib_fit_polyMARS, calib_meth = calib_meth_polyMARS, prob = out)
+        }
+        if (pred_type == "class"){
+          out = ifelse(out >= best_threshold_polyMARS, 1, 0) %>% as.character()
+        }
+        return(out)
+      }
+      
     }
-    
+      
     trained_model_prediction_function[[alg_type]] = pred_function
     
   } # alg_type
-  
-  
-  # Platt scaling
-  # https://rdrr.io/github/bioinf-jku/platt/f/inst/doc/platt.pdf
-  if (calib_meth == "platt"){
-    calib_fit = plattScaling(calib_fit_data %>% filter(fold == fold_i) %>% pull(Prob),
-                             calib_fit_data %>% filter(fold == fold_i) %>% pull(y_true) %>% as.numeric())
-    calib_pred = predictProb(calib_fit, calib_pred_data %>% filter(fold == fold_i) %>% pull(Prob))
-    calib_fold_prediction = predictProb(calib_fit, fold_prediction %>% filter(prob_calib == "no") %>% filter(fold == fold_i) %>% pull(Prob))  # calibrate full fold sample
-  }
-  # Isotonic regression
-  # https://search.r-project.org/CRAN/refmans/CORElearn/html/calibrate.html
-  if (calib_meth == "isoreg"){
-    calib_fit = CORElearn:::calibrate(calib_fit_data %>% filter(fold == fold_i) %>% pull(y_true) %>% as.numeric() %>% factor(levels = c(0, 1)),
-                                      calib_fit_data %>% filter(fold == fold_i) %>% pull(Prob), class1=1, 
-                                      method="isoReg", assumeProbabilities=TRUE)
-    calib_pred = applyCalibration(calib_pred_data %>% filter(fold == fold_i) %>% pull(Prob), calib_fit)
-    calib_fold_prediction = applyCalibration(fold_prediction %>% filter(prob_calib == "no") %>% filter(fold == fold_i) %>% pull(Prob), calib_fit)
-    flat_prob_check = c(flat_prob_check, uniqueN(calib_pred))
-  }
-  
-  
-  
-  
-  
-  
-  # todo: rimuovi
-  # tt = trained_model_prediction_function[["MARS"]]
-  # tt(df_predictors)[1:10]
-  # predict(model_MARS, newdata = df_predictors, type = "response")[1:10]
-  # 
-  # 
-  # tt = trained_model_prediction_function[["Random_Forest"]]
-  # tt(df_predictors)[1:10]
-  # predict(model_Random_Forest, data = df_predictors, type = "response")$predictions[, 2][1:10]
-  # 
-  # 
-  # tt = trained_model_prediction_function[["Elastic-net"]]
-  # tt(df_predictors)[1:10]
-  # predict(model_Elastic_net, newx = df_predictors %>% as.matrix(), s = lambda_opt, family = family, type="response")[1:10]
-  
-  
+
   if (method == "Permutation"){
-    cat('\n    - Permutation Feature Importance\n\n')
+    cat('\n    - Permutation Feature Importance\n')
     
     obs_index_to_evaluate = NULL
     obs_index_to_shuffle = NULL
@@ -4423,7 +4498,7 @@ evaluate_feature_importance = function(df_work, model_setting_block, method,
                                       obs_index_to_evaluate = obs_index_to_evaluate, obs_index_to_shuffle = obs_index_to_shuffle, obs_index_subset = obs_index_subset,
                                       perf_metric = perf_metric, perf_metric_add_pars = perf_metric_add_pars, true_val_name = true_val_name,
                                       prediction_name = prediction_name, perf_metric_minimize = perf_metric_minimize,
-                                      verbose = verbose, n_workers = n_workers, seed = seed)
+                                      verbose = verbose, n_workers = n_workers, seed = seed, checkpoints_folder = checkpoints_folder)
   }
   
   if (method == "SHAP"){
@@ -4443,7 +4518,8 @@ evaluate_feature_importance = function(df_work, model_setting_block, method,
     feat_imp = evaluate_SHAP(dataSample = df_work %>% select(-y),
                              sample_size = sample_size, trained_model_prediction_function = trained_model_prediction_function,
                              obs_index_to_evaluate = obs_index_to_evaluate, obs_index_to_sample = obs_index_to_sample, obs_index_subset = obs_index_subset,
-                             n_batch = n_batch, verbose = verbose, n_workers = n_workers, seed = seed)
+                             n_batch = n_batch, verbose = verbose, n_workers = n_workers, reload_coalitions = reload_coalitions,
+                             seed = seed, checkpoints_folder = checkpoints_folder)
   }
   
   return(feat_imp)
@@ -4925,6 +5001,24 @@ calibration_curve <- function(y_true = c(), y_prob_list = list(), pos_label = NU
       panel.grid.minor.x = element_line(colour = "grey", linetype = 'dashed', linewidth = 0.4))
   
   return(p)
+}
+
+# apply fitted probability calibration
+apply_probability_calibration = function(calib_fit, calib_meth, prob){
+  
+  # Platt scaling
+  # https://rdrr.io/github/bioinf-jku/platt/f/inst/doc/platt.pdf
+  if (calib_meth == "platt"){
+    calib_prob = predictProb(calib_fit, prob)
+  }
+  
+  # Isotonic regression
+  # https://search.r-project.org/CRAN/refmans/CORElearn/html/calibrate.html
+  if (calib_meth == "isoreg"){
+    calib_prob = applyCalibration(prob, calib_fit)
+  }
+  
+  return(calib_prob)
 }
 
 # custom tryCatch so to capture warnings and continue execution
