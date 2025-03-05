@@ -2295,9 +2295,11 @@ fit_RandomForest = function(data_train, data_test, num.trees, mtry, min.node.siz
   weights = c("0" = fraction_0, "1" = fraction_1)    # names are useless, class order matters
   
   # fit model
-  fit <- ranger(y ~ ., data = data_train, num.trees = num.trees, mtry = mtry, min.node.size = min.node.size,
-                probability = T, replace = F, class.weights = weights,
-                seed = 66, save.memory = FALSE)
+  oo <- capture.output(
+    fit <- ranger(y ~ ., data = data_train, num.trees = num.trees, mtry = mtry, min.node.size = min.node.size,
+                  probability = T, replace = F, class.weights = weights,
+                  seed = 66, save.memory = FALSE),
+    silent = T)
   
   # predict on train and test
   pred_prob_train = predict(fit, data=data_train, type = "response")$predictions[, 2] %>%
@@ -2520,7 +2522,7 @@ fit_polyMARS = function(data_train, data_test, maxdim, use_weight, penalty = 0){
 }
 
 # fit model in parallel on all folds
-fit_model_cv_parallel = function(fold_i, parameter_set = parameter_set){
+fit_model_cv_parallel = function(fold_i, df_work, parameter_set, cv_ind, train_downsample_perc, balance_abi_ndg_fold, algo_type){
   
   test_ind = cv_ind %>%
     filter(fold == fold_i) %>%
@@ -2822,16 +2824,19 @@ fit_model_with_cv = function(df_work, cv_ind, algo_type, parameter_set = NULL, n
       
       plan(multisession, workers = n_workers, split = T)
       
-      list_parallel <- future_lapply(parallel_index, fit_model_cv_parallel, parameter_set = parameter_set, future.seed = NULL,
+      list_parallel <- future_lapply(parallel_index, fit_model_cv_parallel, df_work = df_work, parameter_set = parameter_set, cv_ind = cv_ind,
+                                     train_downsample_perc = train_downsample_perc, balance_abi_ndg_fold = balance_abi_ndg_fold, algo_type = algo_type,
+                                     future.seed = NULL,
                                      future.packages = c("data.table", "tidyverse", "HEMDAG", "parallel",
                                                          "glmnet", "ranger", "earth", "kknn", "kernlab", "polspline"),
-                                     future.globals = c("fit_cv_glmnet", "fit_RandomForest", "fit_MARS", "fit_kNN", "fit_SVM_RBF", "fit_polyMARS",
-                                                        "df_work", "cv_ind", "train_downsample_perc", "balance_abi_ndg_fold", "algo_type"))
+                                     future.globals = c("fit_cv_glmnet", "fit_RandomForest", "fit_MARS", "fit_kNN", "fit_SVM_RBF", "fit_polyMARS"))
       future:::ClusterRegistry("stop")
     } else {
       list_parallel = list()
       for (fold_i in parallel_index){
-        list_parallel[[names(parallel_index)[fold_i]]] = fit_model_cv_parallel(fold_i, parameter_set = parameter_set)
+        list_parallel[[names(parallel_index)[fold_i]]] = fit_model_cv_parallel(fold_i, df_work = df_work, parameter_set = parameter_set, cv_ind = cv_ind,
+                                                                               train_downsample_perc = train_downsample_perc,
+                                                                               balance_abi_ndg_fold = balance_abi_ndg_fold, algo_type = algo_type)
       } # fold_i
     }
     fold_prediction = bind_rows(Map(function(x) x[["pred_to_bind"]], list_parallel))
@@ -3607,7 +3612,7 @@ evaluate_SHAP = function(dataSample, sample_size = 100, trained_model_prediction
   list_split = split(obs_index_to_evaluate, sort(obs_index_to_evaluate %% n_batch))
   start_time = Sys.time()
   split_time_val = local_SHAP = coalition_rds_list = c()
-  cat('\n     * Start time:', as.character(Sys.time()), '\n')
+  cat('     * Start time:', as.character(Sys.time()), '\n')
   for (split_name in names(list_split)){
     
     # check average batch time
@@ -3618,8 +3623,9 @@ evaluate_SHAP = function(dataSample, sample_size = 100, trained_model_prediction
     } else {
       avg_time_label = ''
     }
-    cat('     * Generating coalitions and SHAP values for batch', paste0(as.numeric(split_name)+1, ' / ', length(list_split)),
-        '  - last interaction:', as.character(Sys.time()), avg_time_label, end = '')
+    running_message = paste('     * Generating coalitions and SHAP values for batch', paste0(as.numeric(split_name)+1, ' / ', length(list_split)),
+                            '  - last interaction:', format(Sys.time(), "%H:%M:%S"), avg_time_label)
+    cat(running_message, '                                                                                                               ', end = '\r')
     
     # generate all sample to be used for all trained models
     coal_hash_rds = file.path(checkpoints_folder,
@@ -3630,23 +3636,32 @@ evaluate_SHAP = function(dataSample, sample_size = 100, trained_model_prediction
       list_generated_coal <- future_lapply(list_split[[split_name]], generate_coalitions, future.packages = c("data.table"), future.seed = NULL)
       gen_time = capture.output(toc()) %>% strsplit(" ") %>% .[[1]] %>% .[1] %>% as.numeric() %>% seconds_to_period()
       saveRDS(list_generated_coal, coal_hash_rds)
-      cat(paste0('(generate: ', lubridate::hour(gen_time), 'h:', lubridate::minute(gen_time), 'm:', round(lubridate::second(gen_time))), end = '')
+      running_message = paste0(running_message, paste0('(generate: ', lubridate::hour(gen_time), 'h:', lubridate::minute(gen_time), 'm:', round(lubridate::second(gen_time))))
+      cat(running_message, end = '\r')
     } else {
-      cat('(generate: reloaded', end = '')
+      running_message = paste0(running_message, '(generate: reloaded')
+      cat(running_message, end = '\r')
     }
     coalition_rds_list = c(coalition_rds_list, coal_hash_rds)
     
     # generate SHAP values for all observations and all trained models
     tic()
+    cc = 1
     for (tr_model in names(trained_model_prediction_function)){
+      
+      running_message_t = paste0(running_message, paste0(' - predict: ', cc, ' / ', length(trained_model_prediction_function), ' "', tr_model,
+                                                       '" - last interaction: ', format(Sys.time(), "%H:%M:%S")))
+      cat(running_message_t, '                                       ', end = '\r')
       
       # select model from trained_model_prediction_function
       trained_model = trained_model_prediction_function[[tr_model]]
       
       # predict trained model on list_generated_coal
       list_predicted_data = data.table::rbindlist(list_generated_coal)
-      list_predicted_data = list_predicted_data %>%
-        mutate(Prediction = trained_model(list_predicted_data %>% as.data.frame() %>% select(all_of(colnames(dataSample)))))
+      oo <- capture.output(
+        list_predicted_data <- list_predicted_data %>%
+          mutate(Prediction = trained_model(list_predicted_data %>% as.data.frame() %>% select(all_of(colnames(dataSample))))),
+        silent = T)
       list_predicted_data = split(list_predicted_data , f = list_predicted_data$obs_index)
       
       # evaluate SHAP values
@@ -3662,9 +3677,12 @@ evaluate_SHAP = function(dataSample, sample_size = 100, trained_model_prediction
         bind_rows(data.table::rbindlist(list_generated_SHAP) %>%
                     left_join(predicted_obs, by = "obs_index") %>%
                     mutate(predicted_val_avg = predicted_obs_avg))
+      cc = cc + 1
     } # tr_model
     pred_time = capture.output(toc()) %>% strsplit(" ") %>% .[[1]] %>% .[1] %>% as.numeric() %>% seconds_to_period()
-    cat(paste0(' - predict: ', lubridate::hour(pred_time), 'h:', lubridate::minute(pred_time), 'm:', round(lubridate::second(pred_time)), ')'), end = '\r')
+    running_message = paste0(running_message_t,
+                             paste0(' - Total time: ', lubridate::hour(pred_time), 'h:', lubridate::minute(pred_time), 'm:', round(lubridate::second(pred_time)), ')'))
+    cat(running_message, end = '\r')
     
     split_time_val = c(split_time_val, difftime(Sys.time(), split_time, units='secs'))
   } # split_name
@@ -3837,6 +3855,7 @@ evaluate_Perm_Feat_Imp = function(dataSample, trained_model_prediction_function 
   options(future.globals.maxSize = 8000 * 1024^2)
   plan(multisession, workers = n_workers)
   start_time = Sys.time()
+  cat('     * Start time:', as.character(Sys.time()), '\n')
   if (length(EXCLUDE_PACKAGE) > 0){cat(paste0('     *\033[31m Packages excluded in future_lapply(): \033[0m', paste0('"', EXCLUDE_PACKAGE, '"', collapse = ', ')), '\n')}
   cat('     * Generating permutations...', end = '\n')
   
@@ -5044,4 +5063,167 @@ myCatch <- function(expr){
     }
   )
   return(out)
+}
+
+# Plot ROC and Precision-Recall curves for all model_setting_lab
+plot_ROC_PRC = function(log_fitting, log_fitting_summary, cl_lab, d_type, alg_type, best_calib_lab, plot_type = c("ROC", "PRC"),
+                        curves_list = NULL, fig_per_row = 3, save_path = ''){
+  
+  # Loop for "model_setting_lab", i.e. "no control", "Dummy_industry", "Regione_Macro", etc in log_fitting / log_fitting_summary
+  # Curves are read from rds by log_fitting$rds. Otherwise curves_list can be provided by user and log_fitting can be omitted.
+  
+  # curves_list: list() if not NULL, user provided as list of
+  #                       $model_set_lab_1 = list(baseline = list(ROC_train, PRC_train) , additional_var = list(ROC_train, PRC_train))
+  #                       $model_set_lab_2 = list(baseline = list(ROC_train, PRC_train) , additional_var = list(ROC_train, PRC_train))
+  
+  tot_mod_set_lab = log_fitting_summary %>% filter(cluster_lab == cl_lab & data_type == d_type & algo_type == alg_type) %>% pull(model_setting_lab) %>% unique()
+  
+  # reload curves if not provided
+  if (is.null(curves_list)){
+    curves_list = list()
+    for (mod_set_lab in tot_mod_set_lab){
+      
+      rds_ref = log_fitting %>%
+        filter(data_type == d_type) %>%
+        filter(cluster_lab == cl_lab) %>%
+        filter(algo_type == alg_type) %>%
+        filter(model_setting_lab == mod_set_lab) %>%
+        filter(best_calib == best_calib_lab)
+      
+      curves_list[[mod_set_lab]][["baseline"]] = readRDS(rds_ref %>% filter(model == "baseline") %>% pull(rds))$list_curves$fold_1
+      curves_list[[mod_set_lab]][["additional_var"]] = readRDS(rds_ref %>% filter(model == "additional_var") %>% pull(rds))$list_curves$fold_1
+    } # mod_set_lab
+  }
+  
+  for (pl_type in plot_type){
+    
+    if (pl_type == "ROC"){
+      perf_col = "AUC"
+      perf_lab = "AUROC"
+      title_lab = "ROC curve"
+      x_lab = "False Positive Rate"
+      y_lab = "True Positive Rate"
+    }
+    if (pl_type == "PRC"){
+      perf_col = "PRAUC"
+      perf_lab = "AUPRC"
+      title_lab = "Precision-Recall curve"
+      x_lab = "Recall"
+      y_lab = "Precision"
+    }
+    
+    row_list = list()
+    fig_count = 1
+    for (mod_set_lab in names(curves_list)){
+      
+      cat('- Plotting', pl_type, 'curve for model_lab', fig_count, '/', length(curves_list), '                                          \r')
+      
+      if (fig_count %% fig_per_row == 1){row_img = c()}
+
+      perf_ref = log_fitting_summary %>%
+        filter(data_type == d_type) %>%
+        filter(cluster_lab == cl_lab) %>%
+        filter(algo_type == alg_type) %>%
+        filter(model_setting_lab == mod_set_lab) %>%
+        filter(best_calib == best_calib_lab)
+
+      tt_bas = curves_list[[mod_set_lab]][["baseline"]][[paste0(pl_type, "_train")]]
+      tt_add = curves_list[[mod_set_lab]][["additional_var"]][[paste0(pl_type, "_train")]]
+      
+      # reduce number of points
+      if (nrow(tt_bas) > 300){tt_bas = suppressWarnings(DouglasPeuckerNbPoints(tt_bas$x, tt_bas$y, nbPoints = 300))}
+      if (nrow(tt_add) > 300){tt_add = suppressWarnings(DouglasPeuckerNbPoints(tt_add$x, tt_add$y, nbPoints = 300))}
+      
+      tt = tt_bas %>%
+        mutate(Model = paste0("Baseline (", perf_lab, " = ", perf_ref %>% filter(model == "baseline") %>% pull(perf_col), ")"),
+               color_w = "blue") %>%
+        bind_rows(
+          tt_add %>%
+            mutate(Model = paste0("With PD (", perf_lab, " = ", perf_ref %>% filter(model == "additional_var") %>% pull(perf_col), ")"),
+                   color_w = "red")
+        ) %>%
+        mutate(Model = factor(Model))
+      col_map = tt %>% select(Model, color_w) %>% unique()
+      
+      leg_pos_x = ifelse(pl_type == "ROC", .95, .5)   # left for PRC, right for ROC
+      # move legend on the top right if performance are low for PRC curve
+      leg_pos_y = ifelse(min(perf_ref %>% pull(perf_col) %>% gsub("%", "", .) %>% as.numeric()) < 50 & pl_type == "PRC", .95, .25)
+      leg_pos_x = ifelse(min(perf_ref %>% pull(perf_col) %>% gsub("%", "", .) %>% as.numeric()) < 50 & pl_type == "PRC", .95, leg_pos_x)
+      
+      
+      p_curve = ggplot(data=tt, aes(x=x, y=y, color = Model)) +
+        geom_line(linewidth = 2, alpha = 0.8) +
+        scale_color_manual(values = setNames(col_map$color_w, col_map$Model)) +
+        guides(color = guide_legend(override.aes = list(shape = 15, size = 10), position = "inside")) +
+        labs(title = gsub("control_", "", mod_set_lab) %>% gsub("_", " ", .),
+             y = y_lab, x = x_lab) +
+        scale_x_continuous(limits = c(0 ,1), expand = c(0, 0.02)) +
+        scale_y_continuous(limits = c(0, 1), expand = c(0, 0.02)) +
+        theme(axis.text.y = element_text(size = 16),
+              axis.text.x = element_text(size = 18),
+              axis.title = element_text(size = 24),
+              plot.title = element_text(size=30),
+              legend.title=element_text(size=20),
+              legend.text=element_text(size=17),
+              legend.position.inside = c(leg_pos_x, leg_pos_y),  # c(x, y)
+              legend.justification = c("right", "top"),
+              legend.box.background = element_rect(color="black", linewidth=2),
+              panel.background = element_rect(fill = "white", colour = "black"))
+      
+      if (pl_type == "ROC"){
+        p_curve = p_curve +
+          annotate("segment", x = 0, xend = 1, y = 0, yend = 1, color = "black", linewidth = 2, linetype = "dashed")
+      }
+      if (pl_type == "PRC"){
+        p_curve = p_curve +
+          annotate("segment", x = 0, xend = 1, y = 0.5, yend = 0.5, color = "black", linewidth = 2, linetype = "dashed")
+      }
+      
+      png(paste0('999_vvv_', fig_count, '.png'), width = 8, height = 8, units = 'in', res=300)
+      par(mar=c(0,0,0,0))
+      par(oma=c(0,0,0,0))
+      suppressWarnings(print(p_curve))
+      dev.off()
+      
+      row_img = c(row_img, paste0('999_vvv_', fig_count, '.png'))
+      
+      if (fig_count %% fig_per_row == 0 | fig_count == length(curves_list)){row_list = c(row_list, list(row_img))}
+      fig_count = fig_count + 1
+    } # mod_set_lab
+    
+    cat('- Plotting', pl_type, 'curve for model_lab', fig_count-1, '/', length(curves_list), ' -> Assembling in single figure          \r')
+    
+    # assemble columns for each row
+    list_final = c()
+    for (i in 1:length(row_list)){
+      eval(parse(text=paste0("list_final = c(list_final, image_append(c(", paste0("image_read('", row_list[[i]], "')", collapse = ","), "), stack = F))")))
+    }
+    
+    # assemble rows
+    eval(parse(text=paste0('final_plot = image_append(c(', paste0('list_final[[', 1:length(list_final), ']]', collapse = ','), '), stack = T)')))
+    
+    # add title
+    title_lab = image_graph(res = 100, width = image_info(final_plot)$width, height = 300, clip = F)
+    plot(
+      ggplot(mtcars, aes(x = wt, y = mpg)) + geom_blank() + xlim(0, 1) + ylim(0, 6) +
+        annotate(geom = "text", x = 0, y = 4.5, label = title_lab, cex = 35, hjust = 0, vjust = 0.5) +
+        # annotate(geom = "text", x = 0, y = 1.5, label = "Vertical lines represent probability to class thresholds", cex = 25, hjust = 0, vjust = 0.5) +
+        theme_bw() +
+        theme( panel.grid.major = element_blank(), panel.grid.minor = element_blank(), panel.border = element_blank(),
+               axis.title=element_blank(), axis.text=element_blank(), axis.ticks=element_blank(),
+               plot.margin=unit(c(0,0.4,0,0.4),"cm"))
+    )
+    dev.off()
+    
+    final_plot = image_append(c(title_lab, final_plot), stack = T)
+    
+    png(paste0(save_path, pl_type, '_curve_', cl_lab, '_', d_type, '_', alg_type, '.png'), width = 6*4, height = 6*3, units = 'in', res=300)
+    par(mar=c(0,0,0,0))
+    par(oma=c(0,0,0,0))
+    plot(final_plot)
+    dev.off()
+    
+    oo = file.remove(row_list %>% unlist())
+    cat('\n')
+  } # pl_type
 }

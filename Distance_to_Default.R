@@ -2424,7 +2424,7 @@ run_plot_feat_imp = F    # plot feature importance
                 
                 png(paste0('./Distance_to_Default/Results/01_', additional_var, '_distribution_vs_target_', cluster_lab, '.png'), width = 10, height = 8, units = 'in', res=200)
                 plot(ggplot(data_plot, aes(x=x, y=var)) +
-                       geom_line(size = 1.5, color = "black") +
+                       geom_line(linewidth = 1.5, color = "black") +
                        geom_jitter(data = data_plot, aes(x=x, y=ypos, colour=y)) +
                        scale_color_manual(values = c("0" = "blue", "1"= "red")) +
                        scale_y_continuous(labels = scales::percent_format(accuracy = 1), limits = y_lim, breaks = y_break) +
@@ -2918,10 +2918,10 @@ run_plot_feat_imp = F    # plot feature importance
               filter(data_type == d_type) %>%
               filter(cluster_lab == cl_lab) %>%
               filter(algo_type == alg_type) %>%
-              filter(best_calib)
+              filter(best_calib == best_calib_lab) %>%
               left_join(log_tuning %>%
-                          select(model_setting_lab, cluster_lab, data_type, model, algo_type, param_compact_label, matches("_avg|_std")),
-                        by = c("model_setting_lab", "cluster_lab", "data_type", "model", "algo_type", "param_compact_label")) %>%
+                          select(model_setting_lab, cluster_lab, data_type, model, algo_type, param_compact_label, prob_calib, matches("_avg|_std")),
+                        by = c("model_setting_lab", "cluster_lab", "data_type", "model", "algo_type", "param_compact_label", "prob_calib")) %>%
               select(model_setting_lab, model, starts_with(plt_perf)) %>%
               gather('measure', 'val', -c(model_setting_lab, model)) %>%
               mutate(measure = gsub(paste0(plt_perf, "_"), "", measure)) %>%
@@ -3007,9 +3007,11 @@ run_plot_feat_imp = F    # plot feature importance
                 filter(data_type == d_type) %>%
                 filter(cluster_lab == cl_lab) %>%
                 filter(algo_type == alg_type) %>%
-                filter(model_setting_lab == mod_set_lab)
+                filter(model_setting_lab == mod_set_lab) %>%
+                filter(best_calib == best_calib_lab)
               
               tt = readRDS(rds_ref %>% filter(model == "baseline") %>% pull(rds))$fold_prediction %>%
+                filter(prob_calib == rds_ref %>% filter(model == "baseline") %>% pull(prob_calib)) %>%
                 mutate(data_type = d_type,
                        model = "Baseline") %>%
                 group_by(y_true) %>%
@@ -3020,6 +3022,7 @@ run_plot_feat_imp = F    # plot feature importance
                 ungroup() %>%
                 bind_rows(
                   readRDS(rds_ref %>% filter(model == "additional_var") %>% pull(rds))$fold_prediction %>%
+                    filter(prob_calib == rds_ref %>% filter(model == "additional_var") %>% pull(prob_calib)) %>%
                     mutate(data_type = d_type,
                            model = "additional_var") %>%
                     group_by(y_true) %>%
@@ -3123,109 +3126,11 @@ run_plot_feat_imp = F    # plot feature importance
           
           # ROC curve
           {
-            tot_mod_set_lab = log_fitting %>% filter(cluster_lab == cl_lab & data_type == d_type & algo_type == alg_type) %>% pull(model_setting_lab) %>% unique()
-
-            row_list = list()
-            fig_count = 1
-            for (mod_set_lab in tot_mod_set_lab){
-              
-              if (fig_count %% fig_per_row == 1){row_img = c()}
-              
-              rds_ref = log_fitting %>%
-                filter(data_type == d_type) %>%
-                filter(cluster_lab == cl_lab) %>%
-                filter(algo_type == alg_type) %>%
-                filter(model_setting_lab == mod_set_lab)
-              
-              AUC_ref = log_fitting_summary %>%
-                filter(data_type == d_type) %>%
-                filter(cluster_lab == cl_lab) %>%
-                filter(algo_type == alg_type) %>%
-                filter(model_setting_lab == mod_set_lab)
-              
-              tt_bas = readRDS(rds_ref %>% filter(model == "baseline") %>% pull(rds))$list_ROC$fold_1$ROC_train
-              tt_add = readRDS(rds_ref %>% filter(model == "additional_var") %>% pull(rds))$list_ROC$fold_1$ROC_train
-              # reduce number of points
-              if (nrow(tt_bas) > 300){tt_bas = DouglasPeuckerNbPoints(tt_bas$x, tt_bas$y, nbPoints = 300)}
-              if (nrow(tt_add) > 300){tt_add = DouglasPeuckerNbPoints(tt_add$x, tt_add$y, nbPoints = 300)}
-              
-              tt = tt_bas %>%
-                mutate(Model = paste0("Baseline (AUC = ", AUC_ref %>% filter(model == "baseline") %>% pull(AUC), ")"),
-                       color_w = "blue") %>%
-                bind_rows(
-                  tt_add %>%
-                    mutate(Model = paste0("With PD (AUC = ", AUC_ref %>% filter(model == "additional_var") %>% pull(AUC), ")"),
-                           color_w = "red")
-                )
-              
-              p_roc = ggplot(data=tt, aes(x=x, y=y, color = Model)) +
-                geom_segment(aes(x = 0, xend = 1, y = 0 , yend = 1, color = Model), size = 2, linetype = "dashed", color = "black") +
-                geom_line(size = 2, alpha = 0.8) +
-                # scale_color_manual(values = tt %>% select(Model, color_w) %>% unique() %>% deframe()) +
-                scale_color_manual(values = c("blue", "red")) +
-                guides(color = guide_legend(override.aes = list(shape = 15, size = 10))) +
-                labs(title = gsub("control_", "", mod_set_lab) %>% gsub("_", " ", .),
-                     y = "True Positive Rate", x = "False Positive Rate") +
-                scale_x_continuous(limits = c(0 ,1), expand = c(0, 0.02)) +
-                scale_y_continuous(limits = c(0, 1), expand = c(0, 0.02)) +
-                theme(axis.text.y = element_text(size = 16),
-                      axis.text.x = element_text(size = 18),
-                      axis.title = element_text(size = 24),
-                      plot.title = element_text(size=30),
-                      legend.title=element_text(size=20),
-                      legend.text=element_text(size=17),
-                      legend.position = c(.95, .25),  # c(x, y)
-                      legend.justification = c("right", "top"),
-                      legend.box.background = element_rect(color="black", size=2),
-                      panel.background = element_rect(fill = "white", colour = "black"))
-              
-              
-              
-              
-              png(paste0('999_vvv_', fig_count, '.png'), width = 8, height = 8, units = 'in', res=300)
-              par(mar=c(0,0,0,0))
-              par(oma=c(0,0,0,0))
-              suppressWarnings(print(p_roc))
-              dev.off()
-              
-              row_img = c(row_img, paste0('999_vvv_', fig_count, '.png'))
-              
-              if (fig_count %% fig_per_row == 0 | fig_count == length(tot_mod_set_lab)){row_list = c(row_list, list(row_img))}
-              fig_count = fig_count + 1
-            } # mod_set_lab
+            log_fitting = read.csv('./Distance_to_Default/Results/02_Fitted_models_performance.csv', sep=";", stringsAsFactors=FALSE)
+            log_fitting_summary = read.csv('./Distance_to_Default/Results/02b_Fitted_models_summary.csv', sep=";", stringsAsFactors=FALSE)
             
-            # assemble columns for each row
-            list_final = c()
-            for (i in 1:length(row_list)){
-              eval(parse(text=paste0("list_final = c(list_final, image_append(c(", paste0("image_read('", row_list[[i]], "')", collapse = ","), "), stack = F))")))
-            }
-            
-            # assemble rows
-            eval(parse(text=paste0('final_plot = image_append(c(', paste0('list_final[[', 1:length(list_final), ']]', collapse = ','), '), stack = T)')))
-            
-            # add title
-            title_lab = image_graph(res = 100, width = image_info(final_plot)$width, height = 300, clip = F)
-            plot(
-              ggplot(mtcars, aes(x = wt, y = mpg)) + geom_blank() + xlim(0, 1) + ylim(0, 6) +
-                annotate(geom = "text", x = 0, y = 4.5, label = "ROC curve", cex = 35, hjust = 0, vjust = 0.5) +
-                # annotate(geom = "text", x = 0, y = 1.5, label = "Vertical lines represent probability to class thresholds", cex = 25, hjust = 0, vjust = 0.5) +
-                theme_bw() +
-                theme( panel.grid.major = element_blank(), panel.grid.minor = element_blank(), panel.border = element_blank(),
-                       axis.title=element_blank(), axis.text=element_blank(), axis.ticks=element_blank(),
-                       plot.margin=unit(c(0,0.4,0,0.4),"cm"))
-            )
-            dev.off()
-            
-            final_plot = image_append(c(title_lab, final_plot), stack = T)
-            
-            png(paste0('./Distance_to_Default/Results/05_ROC_curve_', cl_lab, '_', d_type, '_', alg_type, '.png'), width = 6*4, height = 6*3, units = 'in', res=300)
-            par(mar=c(0,0,0,0))
-            par(oma=c(0,0,0,0))
-            plot(final_plot)
-            dev.off()
-            
-            oo = file.remove(row_list %>% unlist())
-            rm(list_final, p_roc, rds_ref, AUC_ref, row_list, tt, tt_bas, tt_add)
+            plot_ROC_PRC(log_fitting, log_fitting_summary, cl_lab, d_type, alg_type, best_calib_lab, plot_type = c("ROC", "PRC"),
+                                    curves_list = NULL, fig_per_row = 3, save_path = './Distance_to_Default/Results/05_')
           }
           
         } # alg_type
