@@ -4544,6 +4544,144 @@ evaluate_feature_importance = function(df_work, model_setting_block, method,
   return(feat_imp)
 }
 
+# Plot SHAP dependence plot
+plot_SHAP_dependence_plot = function(list_input, plot_model_set = NULL, top_features = 5, feature_set = c(),
+                                     save_path = '', plot_width = 10, plot_height = 8){
+  
+  # Plot Shapley dependence plot. Returns plots for all trained model splitting results by 'All observations' and 'class ...' subsets if any.
+  # list_input: output of evaluate_SHAP()
+  # plot_model_set: if not NULL plot only provided trained model results.
+  # plot_class_set: if not NULL and if 'All observations', 'class ...' available plot only provided class.
+  # top_features: if feature_set is empty, plot top important features by SHAP_feat_imp importance
+  # feature_set: features to be plotted
+  # save_path: if not '', save all plots. Only modelName_0x_featureName.png will be added. "_" is NOT required at the end.
+  # plot_width, plot_height: width and height of saved plot
+  
+  # remove coalition rds
+  list_input[["coalition_rds_list"]] = NULL
+  
+  # check if class plots are available
+  summary_plot_data = list_input$summary_plot_data
+  if ("All observations" %in% names(list_input)){
+    class_set = setdiff(names(list_input), c("local_SHAP", "summary_plot_data", "type"))
+  } else {
+    class_set = c('No class')
+  }
+  # if (is.null(plot_class_set)){
+  #   plot_class_set = class_set
+  # } else if (!is.null(plot_class_set) & class_set == 'No class'){
+  #   plot_class_set = 'No class'
+  # }
+  plot_class_set = 'All observations'
+  
+  plot_list = list()
+  for (class_i in plot_class_set){
+    
+    # extract data
+    if (class_i == 'No class'){
+      data_plot = summary_plot_data %>%
+        left_join(list_input$SHAP_feat_imp %>% rename(abs.phi = phi), by = c("model_name", "feature"))
+    } else if (class_i == 'All observations'){
+      data_plot = summary_plot_data %>%
+        left_join(list_input[[class_i]]$SHAP_feat_imp %>% rename(abs.phi = phi), by = c("model_name", "feature"))
+    } else {
+      data_plot = summary_plot_data %>%
+        filter(class == class_i %>% gsub("class ", "", .)) %>%
+        left_join(list_input[[class_i]]$SHAP_feat_imp %>% rename(abs.phi = phi), by = c("model_name", "feature"))
+    }
+    
+    
+    if (is.null(plot_model_set)){plot_model_set_work = unique(data_plot$model_name)}
+    # loop models
+    cc_mod = 1
+    for (tr_model in plot_model_set_work){
+
+      # get feature to plot
+      if (length(feature_set) == 0){
+        feature_set = list_input[[class_i]][["SHAP_feat_imp"]] %>%
+          filter(model_name == tr_model) %>%
+          arrange(desc(phi)) %>%
+          filter(row_number() <= top_features) %>%
+          pull(feature)
+      }
+      
+      abs_importance = data_plot %>%
+        filter(model_name == tr_model) %>%
+        select(feature, abs.phi) %>%
+        unique() %>%
+        mutate(abs.phi.perc = abs.phi / sum(abs.phi),
+               lab = paste0(round(abs.phi.perc * 100, 2), '%'))
+      
+      cc = 1
+      for (ft in feature_set){
+        
+        cat(paste0('- Plotting dependence plot for model "', tr_model, '" (', cc_mod, '/', length(plot_model_set_work),'): feature ',
+                   cc, '/', length(feature_set)), '                          ', end = '\r')
+        
+        data_plot_tt = data_plot %>%
+          filter(model_name == tr_model) %>%
+          filter(feature == ft)
+        feat_lab = variable_mapping %>%
+          filter(orig == ft)
+        feat_imp_lab = abs_importance %>%
+          filter(feature == ft) %>%
+          pull(lab)
+        
+        y_range = range(data_plot_tt$phi)
+        x_range = range(data_plot_tt$feature_value)
+        x_breaks = seq(min(data_plot_tt$feature_value), max(data_plot_tt$feature_value), length.out = 10)
+        
+        scatter_plot <- ggplot(data_plot_tt, aes(x = feature_value, y = phi, color = class)) +
+          geom_point(alpha = 0.5) +
+          scale_color_manual(values = c("0" = "blue", "1" = "red")) +
+          scale_x_continuous(breaks = x_breaks, limits = x_range, labels = function(x) sprintf("%.2f", x)) +
+          expand_limits(y = c(y_range[1] - 0.5*abs(y_range[1]), y_range[2])) +
+          labs(title = paste0('SHAP dependence plot for\n"',feat_lab$Description, '"'),
+               subtitle = paste0('SHAP feature importance: ', feat_imp_lab, '\n'),
+               y = paste0("SHAP values for\n", feat_lab$new, '\n'),
+               x = paste0('\n', feat_lab$new), color = "Target\nVariable") +
+          theme_minimal() +
+          guides(color = guide_legend(override.aes = list(size = 5))) +
+          theme(legend.position = "right",
+                plot.title = element_text(size = 26),
+                plot.subtitle = element_text(size = 20),
+                axis.title = element_text(size = 18),
+                axis.text = element_text(size = 15),
+                axis.line = element_line(linewidth = 0.9),
+                legend.title = element_text(size = 18),
+                legend.text=element_text(size = 17))
+        
+        histogram <- ggplot(data_plot_tt, aes(x = feature_value)) +
+          geom_histogram(bins = 30, fill = "grey", color = "darkgrey", alpha = 0.3) +
+          scale_x_continuous(breaks = x_breaks, limits = x_range, labels = function(x) sprintf("%.2f", x)) +
+          theme_minimal() +
+          theme(
+            axis.title = element_blank(),  # Remove x-axis title
+            axis.text = element_blank(),  # Remove x-axis text
+            axis.ticks = element_blank(),  # Remove x-axis ticks
+            panel.grid = element_blank(),  # Remove grid lines
+            panel.background = element_rect(fill = "transparent", color = NA),  # Transparent background
+            plot.background = element_rect(fill = "transparent", color = NA)  # Transparent background
+          )
+        
+        combined_plot = suppressWarnings(ggdraw() +
+                                           draw_plot(scatter_plot) +
+                                           draw_plot(histogram, x =0.1, y = 0.092, width = 0.8, height = 0.17))
+        
+        png(paste0(save_path, '_', tr_model, '_', str_pad(cc, 2, pad = "0"), '_', ft, '.png'), width = plot_width, height = plot_height, units = 'in', res=300)
+        plot(combined_plot)
+        dev.off()
+        
+        cc = cc + 1
+      } # ft
+      cc_mod = cc_mod + 1
+    } # tr_model
+  } # class_i
+  
+}
+
+
+
 suppressMessages(Rcpp::sourceCpp(code='
   // [[Rcpp::depends(RcppArmadillo, RcppEigen)]]
 
@@ -5149,7 +5287,6 @@ plot_ROC_PRC = function(log_fitting, log_fitting_summary, cl_lab, d_type, alg_ty
       # move legend on the top right if performance are low for PRC curve
       leg_pos_y = ifelse(min(perf_ref %>% pull(perf_col) %>% gsub("%", "", .) %>% as.numeric()) < 50 & pl_type == "PRC", .95, .25)
       leg_pos_x = ifelse(min(perf_ref %>% pull(perf_col) %>% gsub("%", "", .) %>% as.numeric()) < 50 & pl_type == "PRC", .95, leg_pos_x)
-      
       
       p_curve = ggplot(data=tt, aes(x=x, y=y, color = Model)) +
         geom_line(linewidth = 2, alpha = 0.8) +

@@ -2543,29 +2543,6 @@ run_plot_feat_imp = F    # plot feature importance
                   write.table(log_tuning, './Distance_to_Default/Checkpoints/ML_model/00_Optimization_list.csv', sep = ';', row.names = F, append = F, na = "")
                   write.table(log_tuning_all_fold, './Distance_to_Default/Checkpoints/ML_model/01_Optimization_list_ALLFOLDS.csv', sep = ';', row.names = F, append = F, na = "")
                   write.table(log_fitting, './Distance_to_Default/Results/02_Fitted_models_performance.csv', sep = ';', row.names = F, append = F, na = "")
-                  
-                  # todo: rimuovi, serve per debugging
-                  # df_work = df_work_baseline
-                  # algo_type = "MARS"# "Random_Forest"# "Elastic-net"
-                  # parameter_set = list(alpha = 0.5)
-                  # non_tunable_param = list(standardize = F, 
-                  #                      intercept = T, 
-                  #                      parallel = T,
-                  #                      type.measure = "auc",
-                  #                      lambda_final = "lambda.1se",
-                  #                      family = "binomial",
-                  #                      n_fold_cvgmlnet = n_fold_cvgmlnet,
-                  #                      fixed_variables = fixed_variables)
-                  # parameter_set = list(num.trees = 100,
-                  #                      mtry = 5,
-                  #                      min.node.size = 20)
-                  # parameter_set = list(degree = 2)
-                  # 
-                  # model_fit = fit_model_with_cv(df_work = df_work_baseline, cv_ind = cv_ind, algo_type = algo_type,
-                  #                        parameter_set = parameter_set, non_tunable_param = non_tunable_param,
-                  #                        no_cv_train_ind = NULL, no_cv_test_ind = NULL,
-                  #                        prob_thresh_cv = prob_thresh_cv, tuning_crit = tuning_crit, tuning_crit_minimize = tuning_crit_minimize)
-                  
                 })
                 
                 rm(setting_block, tuning_perf, fit_fullset, best_param_set)
@@ -2886,11 +2863,17 @@ run_plot_feat_imp = F    # plot feature importance
             rm(feat_imp_SHAP_baseline, feat_imp_SHAP_additional, tt_bas, tt_bas_summ, tt_add, tt_add_summ, p_bas, p_add,
                title_lab, left_panel, right_panel, final_plot)
           }
+          
+          # SHAP dependence plot: only for baseline, all observation
+          {
+            plot_SHAP_dependence_plot(list_input = feat_imp_SHAP_baseline, top_features = 5, plot_width = 10, plot_height = 8,
+                                      save_path = paste0('./Distance_to_Default/Results/07_SHAP_dependence_plot_', cl_lab, '_', d_type))
+          }
         } # run_plot_feat_imp
       }
       
     } # cl_lab
-    write.table(feat_imp_log, './Distance_to_Default/Results/06_06_Feat_Imp_checkpoints_log.csv', sep = ';', row.names = F, append = F, na = "")
+    write.table(feat_imp_log, './Distance_to_Default/Results/06_Feat_Imp_checkpoints_log.csv', sep = ';', row.names = F, append = F, na = "")
   }
   
   
@@ -3141,6 +3124,21 @@ run_plot_feat_imp = F    # plot feature importance
   
   
 }
+
+
+
+
+feat_imp_SHAP_baseline = readRDS(paste0('./Distance_to_Default/Checkpoints/ML_model/05_feat_imp_reload_SHAP_',
+                                        mod_set_lab, "_", cl_lab, "_", "baseline", "_", d_type, '.rds'))
+
+
+
+
+
+
+
+
+
 
 
 
@@ -4506,23 +4504,30 @@ df_main_work = readRDS(paste0('./Distance_to_Default/Checkpoints/df_work_', clus
   }
   
   # model performance
-  metrics = c("F1", "AUC")
+  metrics = c("F1", "PRAUC", "MCC")
   cl_lab = "roa_Median_-_peers_Volatility"
   d_type = "original"
   additional_var = "PD"
   plt_perf = "F1"
   fig_per_row = 3
+  best_calib_lab = "yes"
   {
     log_tuning = read.csv('./Distance_to_Default/Checkpoints/ML_model/00_Optimization_list.csv', sep=";", stringsAsFactors=FALSE)
     log_fitting = read.csv('./Distance_to_Default/Results/02_Fitted_models_performance.csv', sep=";", stringsAsFactors=FALSE)
-    log_fitting_summary = read.csv('./Distance_to_Default/Results/02b_Fitted_models_summary.csv', sep=";", stringsAsFactors=FALSE)
+    
+    
+    <<<<-----   #
+    log_fitting_summary = read.csv('./Distance_to_Default/Results/paper prima della revisione ANOR/02b_Fitted_models_summary.csv', sep=";", stringsAsFactors=FALSE)
 
+    
+    
     # tables
     {
       model_perf = log_fitting_summary %>%
         filter(cluster_lab == cl_lab) %>%
         filter(data_type == d_type) %>%
-        select(model_setting_lab, model, algo_type, matches(metrics), -ends_with("_cv_train")) %>%
+        # filter(best_calib == best_calib_lab) %>%
+        select(model_setting_lab, model, algo_type, prob_calib, matches(metrics), -ends_with("_cv_train")) %>%
         mutate(model_setting_lab = gsub("control_", "", model_setting_lab)) %>%
         left_join(variable_mapping %>% select(-Description), by = c("model_setting_lab" = "orig")) %>%
         select(-model_setting_lab) %>%
