@@ -2587,7 +2587,7 @@ fit_model_cv_parallel = function(fold_i, df_work, parameter_set, cv_ind, train_d
   } else if (algo_type == "MARS"){
     
     degree = parameter_set$degree
-
+    
     fit_train = fit_MARS(data_train = data_train %>% mutate(y = as.factor(y)), data_test = data_test, degree = degree)
     
   } else if (algo_type == "polyMARS"){
@@ -3011,7 +3011,7 @@ fit_model_with_cv = function(df_work, cv_ind, algo_type, parameter_set = NULL, n
         } else {
           F1_test = Precision_test = Recall_test = NA
         }
-
+        
         fold_all_performance = fold_all_performance %>%
           bind_rows(
             data.frame(tuned_param) %>%
@@ -3285,7 +3285,7 @@ ml_tuning = function(df_work, algo_type, cv_ind, prob_thresh_cv, tuning_crit = "
   set.seed(666)
   mlr::configureMlr(show.info = FALSE, show.learner.output = FALSE, on.learner.warning = "quiet")
   try_out = myCatch({
-  results <- suppressWarnings(mbo(objfun, design = design, learner = surr.rf, control = control, show.info = F))
+    results <- suppressWarnings(mbo(objfun, design = design, learner = surr.rf, control = control, show.info = F))
   })
   if (try_out[1] == "ERROR"){
     current_model_path_list = paste0(rds_folder, list.files(path = rds_folder, pattern = paste0('^', save_RDS_additional_lab)))
@@ -3321,7 +3321,7 @@ ml_tuning = function(df_work, algo_type, cv_ind, prob_thresh_cv, tuning_crit = "
     
   }
   tot_diff = seconds_to_period(difftime(Sys.time(),start, units='secs'))
-
+  
   # reload fold performance for all combinations (both single fold and folds' average)
   current_model_path_list = readRDS(paste0(rds_folder, "current_model_path_list_", algo_type, ".rds"))
   oo = suppressWarnings(file.remove(paste0(rds_folder, c("current_model_path_list_", "current_model_iter_count_"), algo_type, ".rds")))
@@ -3377,7 +3377,7 @@ ml_tuning = function(df_work, algo_type, cv_ind, prob_thresh_cv, tuning_crit = "
       }
     }
   } # tn
-
+  
   # save results
   optimization_results = op_res %>%
     mutate(
@@ -3650,7 +3650,7 @@ evaluate_SHAP = function(dataSample, sample_size = 100, trained_model_prediction
     for (tr_model in names(trained_model_prediction_function)){
       
       running_message_t = paste0(running_message, paste0(' - predict: ', cc, ' / ', length(trained_model_prediction_function), ' "', tr_model,
-                                                       '" - last interaction: ', format(Sys.time(), "%H:%M:%S")))
+                                                         '" - last interaction: ', format(Sys.time(), "%H:%M:%S")))
       cat(running_message_t, '                                       ', end = '\r')
       
       # select model from trained_model_prediction_function
@@ -3896,14 +3896,14 @@ evaluate_Perm_Feat_Imp = function(dataSample, trained_model_prediction_function 
       
       # predict for all features and repetitions
       pred_function = function(x){
-
+        
         x %>% dplyr::mutate(!!sym(prediction_name) := trained_model(x %>% as.data.frame() %>% dplyr::select(all_of(feat_names)))) %>%
           dplyr::rename(!!sym(true_val_name) := y) %>%
           dplyr::select(obs_index, feature, rep_num, all_of(c(true_val_name, prediction_name)))
       }
       
       list_predicted_data = future_lapply(list_generated_perm, future.packages = setdiff(loadedNamespaces(), EXCLUDE_PACKAGE), pred_function, future.seed = NULL)
-
+      
       # evaluate performance for all features and repetitions
       perf_function = function(x){
         f_name = x$feature %>% unique()
@@ -3920,7 +3920,7 @@ evaluate_Perm_Feat_Imp = function(dataSample, trained_model_prediction_function 
         return(out)
       }
       df_final_perf = future_lapply(list_predicted_data, perf_function, future.seed = NULL) %>% data.table::rbindlist()
-
+      
       # original performance
       original_pred = pred_function(dataSample %>%
                                       filter(obs_index %in% class_index) %>%
@@ -4500,11 +4500,11 @@ evaluate_feature_importance = function(df_work, model_setting_block, method,
       }
       
     }
-      
+    
     trained_model_prediction_function[[alg_type]] = pred_function
     
   } # alg_type
-
+  
   if (method == "Permutation"){
     cat('\n    - Permutation Feature Importance\n')
     
@@ -4595,7 +4595,7 @@ plot_SHAP_dependence_plot = function(list_input, plot_model_set = NULL, top_feat
     # loop models
     cc_mod = 1
     for (tr_model in plot_model_set_work){
-
+      
       # get feature to plot
       if (length(feature_set) == 0){
         feature_set = list_input[[class_i]][["SHAP_feat_imp"]] %>%
@@ -4888,7 +4888,7 @@ cluster_ANOVA = function(df_anova, group_var, variable_set, anova_pval){
   
   # If variable is categorical, chi-square is performed
   
-  # https://www.datanovia.com/en/lessons/anova-in-r/#three-way-independent-anova
+  # https://www.datanovia.com/en/lessons/anova-in-r/
   # https://statsandr.com/blog/kruskal-wallis-test-nonparametric-version-anova/
   # https://www.sthda.com/english/wiki/chi-square-test-of-independence-in-r
   
@@ -5152,7 +5152,7 @@ calibration_curve <- function(y_true = c(), y_prob_list = list(), pos_label = NU
       legend.key.height = unit(1, "cm"),
       legend.position = c(0.05, 0.95),  # Move legend to top-left corner inside the plot
       legend.justification = c(0, 1),   # Adjust the legend's anchor point to top-left
-      legend.background = element_rect(fill = "white", size = 0.5, color = "black"),  # Optional: add background to the legend
+      legend.background = element_rect(fill = "white", linewidth = 0.5, color = "black"),  # Optional: add background to the legend
       panel.background = element_rect(fill = "white", colour = "black"),
       panel.grid.major.x = element_line(colour = "grey", linetype = 'dashed', linewidth = 0.4),
       panel.grid.minor.x = element_line(colour = "grey", linetype = 'dashed', linewidth = 0.4))
@@ -5209,6 +5209,7 @@ plot_ROC_PRC = function(log_fitting, log_fitting_summary, cl_lab, d_type, alg_ty
   
   # Loop for "model_setting_lab", i.e. "no control", "Dummy_industry", "Regione_Macro", etc in log_fitting / log_fitting_summary
   # Curves are read from rds by log_fitting$rds. Otherwise curves_list can be provided by user and log_fitting can be omitted.
+  # log_fitting_summary is used to extract the AUROC/AUPRC performance
   
   # curves_list: list() if not NULL, user provided as list of
   #                       $model_set_lab_1 = list(baseline = list(ROC_train, PRC_train) , additional_var = list(ROC_train, PRC_train))
@@ -5233,19 +5234,20 @@ plot_ROC_PRC = function(log_fitting, log_fitting_summary, cl_lab, d_type, alg_ty
     } # mod_set_lab
   }
   
+  plot_list = list()
   for (pl_type in plot_type){
     
     if (pl_type == "ROC"){
       perf_col = "AUC"
       perf_lab = "AUROC"
-      title_lab = "ROC curve"
+      main_title_lab = "ROC curve"
       x_lab = "False Positive Rate"
       y_lab = "True Positive Rate"
     }
     if (pl_type == "PRC"){
       perf_col = "PRAUC"
       perf_lab = "AUPRC"
-      title_lab = "Precision-Recall curve"
+      main_title_lab = "Precision-Recall curve"
       x_lab = "Recall"
       y_lab = "Precision"
     }
@@ -5257,14 +5259,14 @@ plot_ROC_PRC = function(log_fitting, log_fitting_summary, cl_lab, d_type, alg_ty
       cat('- Plotting', pl_type, 'curve for model_lab', fig_count, '/', length(curves_list), '                                          \r')
       
       if (fig_count %% fig_per_row == 1){row_img = c()}
-
+      
       perf_ref = log_fitting_summary %>%
         filter(data_type == d_type) %>%
         filter(cluster_lab == cl_lab) %>%
         filter(algo_type == alg_type) %>%
         filter(model_setting_lab == mod_set_lab) %>%
         filter(best_calib == best_calib_lab)
-
+      
       tt_bas = curves_list[[mod_set_lab]][["baseline"]][[paste0(pl_type, "_train")]]
       tt_add = curves_list[[mod_set_lab]][["additional_var"]][[paste0(pl_type, "_train")]]
       
@@ -5283,7 +5285,7 @@ plot_ROC_PRC = function(log_fitting, log_fitting_summary, cl_lab, d_type, alg_ty
         mutate(Model = factor(Model))
       col_map = tt %>% select(Model, color_w) %>% unique()
       
-      leg_pos_x = ifelse(pl_type == "ROC", .95, .5)   # left for PRC, right for ROC
+      leg_pos_x = ifelse(pl_type == "ROC", .95, .55)   # left for PRC, right for ROC
       # move legend on the top right if performance are low for PRC curve
       leg_pos_y = ifelse(min(perf_ref %>% pull(perf_col) %>% gsub("%", "", .) %>% as.numeric()) < 50 & pl_type == "PRC", .95, .25)
       leg_pos_x = ifelse(min(perf_ref %>% pull(perf_col) %>% gsub("%", "", .) %>% as.numeric()) < 50 & pl_type == "PRC", .95, leg_pos_x)
@@ -5316,11 +5318,15 @@ plot_ROC_PRC = function(log_fitting, log_fitting_summary, cl_lab, d_type, alg_ty
           annotate("segment", x = 0, xend = 1, y = 0.5, yend = 0.5, color = "black", linewidth = 2, linetype = "dashed")
       }
       
-      png(paste0('999_vvv_', fig_count, '.png'), width = 8, height = 8, units = 'in', res=300)
-      par(mar=c(0,0,0,0))
-      par(oma=c(0,0,0,0))
-      suppressWarnings(print(p_curve))
-      dev.off()
+      plot_list[[pl_type]][[mod_set_lab]] = p_curve
+      
+      if (save_path != ''){
+        png(paste0('999_vvv_', fig_count, '.png'), width = 8, height = 8, units = 'in', res=300)
+        par(mar=c(0,0,0,0))
+        par(oma=c(0,0,0,0))
+        suppressWarnings(print(p_curve))
+        dev.off()
+      }
       
       row_img = c(row_img, paste0('999_vvv_', fig_count, '.png'))
       
@@ -5330,37 +5336,73 @@ plot_ROC_PRC = function(log_fitting, log_fitting_summary, cl_lab, d_type, alg_ty
     
     cat('- Plotting', pl_type, 'curve for model_lab', fig_count-1, '/', length(curves_list), ' -> Assembling in single figure          \r')
     
-    # assemble columns for each row
-    list_final = c()
-    for (i in 1:length(row_list)){
-      eval(parse(text=paste0("list_final = c(list_final, image_append(c(", paste0("image_read('", row_list[[i]], "')", collapse = ","), "), stack = F))")))
+    if (save_path != ''){
+      
+      # assemble columns for each row
+      list_final = c()
+      for (i in 1:length(row_list)){
+        eval(parse(text=paste0("list_final = c(list_final, image_append(c(", paste0("image_read('", row_list[[i]], "')", collapse = ","), "), stack = F))")))
+      }
+      
+      # assemble rows
+      eval(parse(text=paste0('final_plot = image_append(c(', paste0('list_final[[', 1:length(list_final), ']]', collapse = ','), '), stack = T)')))
+      
+      # add title
+      title_lab = image_graph(res = 100, width = image_info(final_plot)$width, height = 300, clip = F)
+      plot(
+        ggplot(mtcars, aes(x = wt, y = mpg)) + geom_blank() + xlim(0, 1) + ylim(0, 6) +
+          annotate(geom = "text", x = 0, y = 4.5, label = main_title_lab, cex = 35, hjust = 0, vjust = 0.5) +
+          # annotate(geom = "text", x = 0, y = 1.5, label = "Vertical lines represent probability to class thresholds", cex = 25, hjust = 0, vjust = 0.5) +
+          theme_bw() +
+          theme( panel.grid.major = element_blank(), panel.grid.minor = element_blank(), panel.border = element_blank(),
+                 axis.title=element_blank(), axis.text=element_blank(), axis.ticks=element_blank(),
+                 plot.margin=unit(c(0,0.4,0,0.4),"cm"))
+      )
+      dev.off()
+      
+      final_plot = image_append(c(title_lab, final_plot), stack = T)
+      
+      png(paste0(save_path, pl_type, '_curve_', cl_lab, '_', d_type, '_', alg_type, '.png'), width = 6*4, height = 6*3, units = 'in', res=300)
+      par(mar=c(0,0,0,0))
+      par(oma=c(0,0,0,0))
+      plot(final_plot)
+      dev.off()
+      
+      oo = file.remove(row_list %>% unlist())
     }
-    
-    # assemble rows
-    eval(parse(text=paste0('final_plot = image_append(c(', paste0('list_final[[', 1:length(list_final), ']]', collapse = ','), '), stack = T)')))
-    
-    # add title
-    title_lab = image_graph(res = 100, width = image_info(final_plot)$width, height = 300, clip = F)
-    plot(
-      ggplot(mtcars, aes(x = wt, y = mpg)) + geom_blank() + xlim(0, 1) + ylim(0, 6) +
-        annotate(geom = "text", x = 0, y = 4.5, label = title_lab, cex = 35, hjust = 0, vjust = 0.5) +
-        # annotate(geom = "text", x = 0, y = 1.5, label = "Vertical lines represent probability to class thresholds", cex = 25, hjust = 0, vjust = 0.5) +
-        theme_bw() +
-        theme( panel.grid.major = element_blank(), panel.grid.minor = element_blank(), panel.border = element_blank(),
-               axis.title=element_blank(), axis.text=element_blank(), axis.ticks=element_blank(),
-               plot.margin=unit(c(0,0.4,0,0.4),"cm"))
-    )
-    dev.off()
-    
-    final_plot = image_append(c(title_lab, final_plot), stack = T)
-    
-    png(paste0(save_path, pl_type, '_curve_', cl_lab, '_', d_type, '_', alg_type, '.png'), width = 6*4, height = 6*3, units = 'in', res=300)
-    par(mar=c(0,0,0,0))
-    par(oma=c(0,0,0,0))
-    plot(final_plot)
-    dev.off()
-    
-    oo = file.remove(row_list %>% unlist())
     cat('\n')
   } # pl_type
+  
+  return(plot_list)
+}
+
+# data.frame to latex table
+dataframe_to_latex = function(dd){
+  
+  txt = c(paste0("\\begin{tabular}{", paste0(rep("l", ncol(dd)), collapse = ""), "}"), "\\toprule")
+  # headers
+  multi_col_position = data.frame(letter = substr(colnames(dd)[1], 1, 1), position = 1, stringsAsFactors = F)
+  for (j in 2:ncol(dd)){
+    if (!substr(colnames(dd)[j], 1, 1) %in% multi_col_position$letter){
+      multi_col_position = multi_col_position %>%
+        bind_rows(data.frame(letter = substr(colnames(dd)[j], 1, 1), position = j, stringsAsFactors = F))
+    }
+  }
+  multi_col_position = multi_col_position %>%
+    left_join(table(substr(colnames(dd), 1, 1)) %>% data.frame() %>% setNames(c("letter", "tot_cols")), by = "letter")
+  tt = ""
+  for (i in 1:nrow(multi_col_position)){
+    if (multi_col_position$tot_cols[i] == 1){
+      tt = paste0(tt, paste0(ifelse(i == 1, " ", " &"), dd[1, multi_col_position$position[i]]))
+    } else {
+      tt = paste0(tt, " & \\multicolumn{", multi_col_position$tot_cols[i], "}{l}{", dd[1, multi_col_position$position[i]], "}")
+    }
+  }
+  txt = c(txt, paste0(tt, " \\\\"))
+  for (i in 2:nrow(dd)){
+    txt = c(txt, paste0(paste0(dd[i,], collapse = " & "), " \\\\"))
+  }
+  txt = c(txt, "\\bottomrule", "\\end{tabular}")
+  
+  return(txt)
 }

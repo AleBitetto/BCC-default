@@ -2617,6 +2617,9 @@ run_plot_feat_imp = F    # plot feature importance
   reload_coalitions = T       # reload coalitions for SHAP
   checkpoints_folder = './Distance_to_Default/Checkpoints/Feature_Importance/'
   {
+    log_fitting = read.csv('./Distance_to_Default/Results/02_Fitted_models_performance.csv', sep=";", stringsAsFactors=FALSE)
+    log_fitting_summary = read.csv('./Distance_to_Default/Results/02b_Fitted_models_summary.csv', sep=";", stringsAsFactors=FALSE)
+    
     feat_imp_log = c()
     for (cl_lab in log_fitting$cluster_lab %>% unique()){
       
@@ -2866,8 +2869,12 @@ run_plot_feat_imp = F    # plot feature importance
           
           # SHAP dependence plot: only for baseline, all observation
           {
+            feat_imp_SHAP_baseline = readRDS(paste0('./Distance_to_Default/Checkpoints/ML_model/05_feat_imp_reload_SHAP_',
+                                                    mod_set_lab, "_", cl_lab, "_", "baseline", "_", d_type, '.rds'))
+            
             plot_SHAP_dependence_plot(list_input = feat_imp_SHAP_baseline, top_features = 5, plot_width = 10, plot_height = 8,
                                       save_path = paste0('./Distance_to_Default/Results/07_SHAP_dependence_plot_', cl_lab, '_', d_type))
+            rm(feat_imp_SHAP_baseline)
           }
         } # run_plot_feat_imp
       }
@@ -2883,13 +2890,13 @@ run_plot_feat_imp = F    # plot feature importance
   fig_per_row = 3          # used to split control variables for probability distribution and ROC curve plot
   best_calib_lab = "yes"   # keep only results with optimal probabilities calibration method
   {
+    log_fitting = read.csv('./Distance_to_Default/Results/02_Fitted_models_performance.csv', sep=";", stringsAsFactors=FALSE)
+    log_fitting_summary = read.csv('./Distance_to_Default/Results/02b_Fitted_models_summary.csv', sep=";", stringsAsFactors=FALSE)
+    
     for (cl_lab in unique(log_fitting$cluster_lab)){
       for (d_type in log_fitting %>% filter(cluster_lab == cl_lab) %>% pull(data_type) %>% unique()){
         for (alg_type in log_fitting %>% filter(cluster_lab == cl_lab & data_type == d_type) %>% pull(algo_type) %>% unique()){
-          # cl_lab = "roa_Median_-_peers_Volatility"  # todo: rimuovi
-          # d_type = "original"
-          # alg_type = "Random_Forest"
-          
+
           # performance comparison - test set for cross-validated folds
           only_full_set = F  # doesn't show performance on cross-validation test set
           {
@@ -3109,10 +3116,8 @@ run_plot_feat_imp = F    # plot feature importance
           
           # ROC curve
           {
-            log_fitting = read.csv('./Distance_to_Default/Results/02_Fitted_models_performance.csv', sep=";", stringsAsFactors=FALSE)
-            log_fitting_summary = read.csv('./Distance_to_Default/Results/02b_Fitted_models_summary.csv', sep=";", stringsAsFactors=FALSE)
-            
-            plot_ROC_PRC(log_fitting, log_fitting_summary, cl_lab, d_type, alg_type, best_calib_lab, plot_type = c("ROC", "PRC"),
+            cat('\n', alg_type, '\n')
+            rr = plot_ROC_PRC(log_fitting, log_fitting_summary, cl_lab, d_type, alg_type, best_calib_lab, plot_type = c("ROC", "PRC"),
                                     curves_list = NULL, fig_per_row = 3, save_path = './Distance_to_Default/Results/05_')
           }
           
@@ -3127,14 +3132,39 @@ run_plot_feat_imp = F    # plot feature importance
 
 
 
-
-feat_imp_SHAP_baseline = readRDS(paste0('./Distance_to_Default/Checkpoints/ML_model/05_feat_imp_reload_SHAP_',
-                                        mod_set_lab, "_", cl_lab, "_", "baseline", "_", d_type, '.rds'))
-
-
-
-
-
+# mod_set_lab = "no_control"
+# cl_lab = "roa_Median_-_peers_Volatility"
+# d_type = "original"
+# 
+# log_fitting = read.csv('./Distance_to_Default/Results/02_Fitted_models_performance.csv', sep=";", stringsAsFactors=FALSE)
+# 
+# algo_to_plot = c("Elastic-net", "MARS","SVM-RBF", "k-NN", "Random_Forest")
+# 
+# 
+# for (alg_type in algo_to_plot){
+#   
+#   for (md in c("baseline", "additional_var")){
+#   
+#   rds_ref = log_fitting %>%
+#     filter(data_type == d_type) %>%
+#     filter(cluster_lab == cl_lab) %>%
+#     filter(algo_type == alg_type) %>%
+#     filter(model == md) %>%
+#     filter(model_setting_lab == mod_set_lab) %>%
+#     arrange(prob_calib)
+#   
+#   y_prob_list = list()
+#   tt = readRDS(rds_ref$rds[1])
+#   for (cal in rds_ref$prob_calib){
+#     tt_pred = tt$fold_prediction %>% filter(prob_calib == cal) %>% arrange(rows)
+#     y_prob_list[[capitalize(cal)]] = tt_pred$Prob
+#     y_true = tt_pred$y_true
+#   } # cal
+#   
+#   p = calibration_curve(y_true = y_true, y_prob_list = y_prob_list, n_bins = 5, strategy = "uniform", curve_color = c("no" = "red", "platt" = "blue"))
+#   plot(p)
+#   } # md
+# } # alg_type
 
 
 
@@ -3788,8 +3818,9 @@ df_main_work = readRDS(paste0('./Distance_to_Default/Checkpoints/df_work_', clus
     # plot boxplot from ANOVA
     var_to_show = var_res_summary %>% filter(type == "num") %>% pull(variable)
     char_var_to_show = c("Dimensione_Impresa", "Regione_Macro", "Industry", "Dummy_industry")
-    tot_plot_col = 3    # number of pairs of plots 3means 6 plot per row
+    tot_plot_col = 3    # number of pairs of plots 3 means 6 plot per row
     tot_plot_col_char = 2
+    tot_plot_col_box_plot_only = 4
     {
 
       # plot boxplot and confusion matrix for numeric variables
@@ -3801,6 +3832,7 @@ df_main_work = readRDS(paste0('./Distance_to_Default/Checkpoints/df_work_', clus
         
         plot_cc = 1
         plot_list = list()
+        plot_list_left = list()
         layout_mat = rep(NA, tot_plot_row * tot_plot_col)
         for (var in var_to_show){
 
@@ -3833,7 +3865,7 @@ df_main_work = readRDS(paste0('./Distance_to_Default/Checkpoints/df_work_', clus
               legend.box="vertical",
               legend.box.just = "left",
               axis.title=element_text(size = 18),
-              axis.text = element_text(size = 14),
+              axis.text = element_text(size = 18),
               plot.title = element_textbox(
                 size = 20,                  # Font size
                 color = "black",            # Text color
@@ -3848,6 +3880,8 @@ df_main_work = readRDS(paste0('./Distance_to_Default/Checkpoints/df_work_', clus
               plot.margin = margin(0, 0, 0, 0)) 
           p_legend <- cowplot::get_plot_component(p_left, 'guide-box-bottom', return_all = F)
           p_left = p_left + guides(fill="none")
+          
+          plot_list_left[[plot_cc]] = p_left
           
           # confusion matrix
           df = data.frame(conf_mat[[var]]) %>%
@@ -3891,6 +3925,25 @@ df_main_work = readRDS(paste0('./Distance_to_Default/Checkpoints/df_work_', clus
             gtable_col('title', grobs = list(tit), heights = unit.c(grobHeight(tit) + 0*unit(0.2, "line"))),#, grobHeight(subtit) + unit(0.5, "line"))),
             arrangeGrob(grobs = c(plot_list, list(p_legend)),  widths = rep(1, tot_plot_col), heights = c(rep(1, tot_plot_row), 0.4),
                         layout_matrix =layout_mat, padding = unit(0, "lines")),
+            heights = c(0.1, 1))
+        )
+        dev.off()
+        
+        ll = rep(NA, ceiling(length(plot_list_left)/ tot_plot_col_box_plot_only) * tot_plot_col_box_plot_only)
+        ll[1:length(plot_list_left)] = 1:length(plot_list_left)
+        layout_mat_left = matrix(ll, ncol = tot_plot_col_box_plot_only, byrow = T) %>% rbind(rep(plot_cc, tot_plot_col_box_plot_only))
+        
+        tit = textGrob("ANOVA test for differences in clusters", gp = gpar(fontsize = 34), x = 0, hjust = 0)
+        
+        tot_plot_row_box_plot_only = nrow(layout_mat_left)-1
+        
+        png(paste0('./Paper/Latex_Table_Figure/04_Clustering_ANOVA_embedding_', best_meth, '.png'),
+            width = 4.5 * tot_plot_col_box_plot_only, height = 5 * tot_plot_row_box_plot_only, units = 'in', res=300)
+        grid.draw(
+          grid.arrange(
+            gtable_col('title', grobs = list(tit), heights = unit.c(grobHeight(tit) + 0*unit(0.2, "line"))),#, grobHeight(subtit) + unit(0.5, "line"))),
+            arrangeGrob(grobs = c(plot_list_left, list(p_legend)),  widths = rep(1, tot_plot_col_box_plot_only), heights = c(rep(1, tot_plot_row_box_plot_only), 0.4),
+                        layout_matrix =layout_mat_left, padding = unit(0, "lines")),
             heights = c(0.1, 1))
         )
         dev.off()
@@ -4514,13 +4567,8 @@ df_main_work = readRDS(paste0('./Distance_to_Default/Checkpoints/df_work_', clus
   {
     log_tuning = read.csv('./Distance_to_Default/Checkpoints/ML_model/00_Optimization_list.csv', sep=";", stringsAsFactors=FALSE)
     log_fitting = read.csv('./Distance_to_Default/Results/02_Fitted_models_performance.csv', sep=";", stringsAsFactors=FALSE)
-    
-    
-    <<<<-----   #
-    log_fitting_summary = read.csv('./Distance_to_Default/Results/paper prima della revisione ANOR/02b_Fitted_models_summary.csv', sep=";", stringsAsFactors=FALSE)
+    log_fitting_summary = read.csv('./Distance_to_Default/Results/02b_Fitted_models_summary.csv', sep=";", stringsAsFactors=FALSE)
 
-    
-    
     # tables
     {
       model_perf = log_fitting_summary %>%
@@ -4856,8 +4904,6 @@ df_main_work = readRDS(paste0('./Distance_to_Default/Checkpoints/df_work_', clus
         rm(list_final, p_roc, rds_ref, AUC_ref, row_list, tt, tt_bas, tt_add)
       } # alg_type
     }
-    
-    
   }
   
   # feature importance
@@ -5432,7 +5478,7 @@ df_main_work = readRDS(paste0('./Distance_to_Default/Checkpoints/df_work_', clus
     }
     
     # Comparison BILA_debbanche_passivo
-    lab_var = "BILA_debbanche_passivo"
+    lab_var = "Bank Indebtedness"
     {
       ORBIS_long_coding = data.frame(Year_Variable = df_peers %>% select_if(is.numeric) %>% colnames(), stringsAsFactors = F) %>%
         mutate(Single_Variable = gsub('_2011|_2012|_2013|_2014', '', Year_Variable))
@@ -5521,7 +5567,7 @@ df_main_work = readRDS(paste0('./Distance_to_Default/Checkpoints/df_work_', clus
     }
     
     # Change over time for Accordato
-    lab_var = "Accordato (MoM % change)"
+    lab_var = "Granted Credit (MoM % change)"
     {
       abi_ndg_keep = df_final %>% mutate(abi_ndg = paste0(abi, "_", ndg)) %>% pull(abi_ndg) %>% unique()
       data_plot = df_final_raw %>%
@@ -5534,9 +5580,9 @@ df_main_work = readRDS(paste0('./Distance_to_Default/Checkpoints/df_work_', clus
         mutate(relative_delta = c(NA, (value[-n()] - value[-1]) / value[-1])) %>%
         filter(is.finite(relative_delta)) %>%
         filter(relative_delta <= 1 &  relative_delta >= -1) %>%
-        mutate(variable = gsub("RAW_I002", "Accordato Cassa", variable)) %>%
-        mutate(variable = gsub("RAW_CR9587", "Acc. tot. Sistema-Autoliquidante", variable)) %>%
-        mutate(variable = gsub("RAW_CR9589", "Acc. tot. Sistema-Scadenza", variable)) %>%
+        mutate(variable = gsub("RAW_I002", "Cash financing", variable)) %>%
+        mutate(variable = gsub("RAW_CR9587", "Self-liquidating bank loan", variable)) %>%
+        mutate(variable = gsub("RAW_CR9589", "Long term bank loan", variable)) %>%
         mutate(relative_delta = relative_delta / 15)
       
       png(paste0('./Paper/Latex_Table_Figure/99_Distribution_Change_Accordato.png'), width = 14, height = 10, units = 'in', res=300)
@@ -5598,10 +5644,192 @@ df_main_work = readRDS(paste0('./Distance_to_Default/Checkpoints/df_work_', clus
 
 
 
-
-
-
-
+# feat_imp_SHAP_baseline = readRDS(paste0('./Distance_to_Default/Checkpoints/ML_model/05_feat_imp_reload_SHAP_',
+#                                         mod_set_lab, "_", cl_lab, "_", "baseline", "_", d_type, '.rds'))
+# 
+# 
+# 
+# list_input = feat_imp_SHAP_baseline
+# plot_model_set = NULL
+# top_features = 1
+# feature_set = c()
+# save_path = ''
+# plot_width = 10
+# plot_height = 8
+# 
+# # remove coalition rds
+# list_input[["coalition_rds_list"]] = NULL
+# 
+# # check if class plots are available
+# summary_plot_data = list_input$summary_plot_data
+# if ("All observations" %in% names(list_input)){
+#   class_set = setdiff(names(list_input), c("local_SHAP", "summary_plot_data", "type"))
+# } else {
+#   class_set = c('No class')
+# }
+# # if (is.null(plot_class_set)){
+# #   plot_class_set = class_set
+# # } else if (!is.null(plot_class_set) & class_set == 'No class'){
+# #   plot_class_set = 'No class'
+# # }
+# plot_class_set = 'All observations'
+# 
+# plot_list = list()
+# for (class_i in plot_class_set){
+#   
+#   # extract data
+#   if (class_i == 'No class'){
+#     data_plot = summary_plot_data %>%
+#       left_join(list_input$SHAP_feat_imp %>% rename(abs.phi = phi), by = c("model_name", "feature"))
+#   } else if (class_i == 'All observations'){
+#     data_plot = summary_plot_data %>%
+#       left_join(list_input[[class_i]]$SHAP_feat_imp %>% rename(abs.phi = phi), by = c("model_name", "feature"))
+#   } else {
+#     data_plot = summary_plot_data %>%
+#       filter(class == class_i %>% gsub("class ", "", .)) %>%
+#       left_join(list_input[[class_i]]$SHAP_feat_imp %>% rename(abs.phi = phi), by = c("model_name", "feature"))
+#   }
+#   
+#   
+#   if (is.null(plot_model_set)){plot_model_set_work = unique(data_plot$model_name)}
+#   
+#   
+#   plot_model_set_work = c("Elastic-net", "MARS", "SVM-RBF", "k-NN", "Random_Forest")
+#   
+#   
+#   # loop models
+#   cc_mod = 1
+#   row_list = list()
+#   fig_count = 1
+#   fig_per_row = 2
+#   for (tr_model in plot_model_set_work){
+#     
+#     if (fig_count %% fig_per_row == 1){row_img = c()}
+#     
+#     # get feature to plot
+#     if (length(feature_set) == 0){
+#       feature_set = list_input[[class_i]][["SHAP_feat_imp"]] %>%
+#         filter(model_name == tr_model) %>%
+#         arrange(desc(phi)) %>%
+#         filter(row_number() <= top_features) %>%
+#         pull(feature)
+#     }
+#     
+#     abs_importance = data_plot %>%
+#       filter(model_name == tr_model) %>%
+#       select(feature, abs.phi) %>%
+#       unique() %>%
+#       mutate(abs.phi.perc = abs.phi / sum(abs.phi),
+#              lab = paste0(round(abs.phi.perc * 100, 2), '%'))
+#     
+#     cc = 1
+#     for (ft in feature_set){
+#       
+#       cat(paste0('- Plotting dependence plot for model "', tr_model, '" (', cc_mod, '/', length(plot_model_set_work),'): feature ',
+#                  cc, '/', length(feature_set)), '                          ', end = '\r')
+#       
+#       data_plot_tt = data_plot %>%
+#         filter(model_name == tr_model) %>%
+#         filter(feature == ft)
+#       feat_lab = variable_mapping %>%
+#         filter(orig == ft)
+#       feat_imp_lab = abs_importance %>%
+#         filter(feature == ft) %>%
+#         pull(lab)
+#       
+#       y_range = range(data_plot_tt$phi)
+#       x_range = range(data_plot_tt$feature_value)
+#       x_breaks = seq(min(data_plot_tt$feature_value), max(data_plot_tt$feature_value), length.out = 10)
+#       
+#       scatter_plot <- ggplot(data_plot_tt, aes(x = feature_value, y = phi, color = class)) +
+#         geom_point(alpha = 0.5) +
+#         scale_color_manual(values = c("0" = "blue", "1" = "red")) +
+#         scale_x_continuous(breaks = x_breaks, limits = x_range, labels = function(x) sprintf("%.2f", x)) +
+#         expand_limits(y = c(y_range[1] - 0.5*abs(y_range[1]), y_range[2])) +
+#         labs(title = paste0(gsub("_", " ", tr_model), '\n"',feat_lab$Description, '"'),
+#              subtitle = paste0('SHAP feature importance: ', feat_imp_lab, '\n'),
+#              y = paste0("SHAP values for\n", feat_lab$new, '\n'),
+#              x = paste0('\n', feat_lab$new), color = "Target\nVariable") +
+#         theme_minimal() +
+#         guides(color = guide_legend(override.aes = list(size = 5))) +
+#         theme(legend.position = "right",
+#               plot.title = element_text(size = 26),
+#               plot.subtitle = element_text(size = 20),
+#               axis.title = element_text(size = 18),
+#               axis.text = element_text(size = 15),
+#               axis.line = element_line(linewidth = 0.9),
+#               legend.title = element_text(size = 18),
+#               legend.text=element_text(size = 17))
+#       
+#       histogram <- ggplot(data_plot_tt, aes(x = feature_value)) +
+#         geom_histogram(bins = 30, fill = "grey", color = "darkgrey", alpha = 0.3) +
+#         scale_x_continuous(breaks = x_breaks, limits = x_range, labels = function(x) sprintf("%.2f", x)) +
+#         theme_minimal() +
+#         theme(
+#           axis.title = element_blank(),  # Remove x-axis title
+#           axis.text = element_blank(),  # Remove x-axis text
+#           axis.ticks = element_blank(),  # Remove x-axis ticks
+#           panel.grid = element_blank(),  # Remove grid lines
+#           panel.background = element_rect(fill = "transparent", color = NA),  # Transparent background
+#           plot.background = element_rect(fill = "transparent", color = NA)  # Transparent background
+#         )
+#       
+#       combined_plot = suppressWarnings(ggdraw() +
+#                                          draw_plot(scatter_plot) +
+#                                          draw_plot(histogram, x =0.1, y = 0.092, width = 0.8, height = 0.17))
+#       
+#       
+#       
+# 
+#       
+#       png(paste0('999_vvv_', fig_count, '.png'), width = plot_width, height = plot_height, units = 'in', res=300)
+#       par(mar=c(0,0,0,0))
+#       par(oma=c(0,0,0,0))
+#       plot(combined_plot)
+#       dev.off()
+#       
+#       cc = cc + 1
+#     } # ft
+#     
+#     row_img = c(row_img, paste0('999_vvv_', fig_count, '.png'))
+#     
+#     if (fig_count %% fig_per_row == 0 | fig_count == length(plot_model_set_work)){row_list = c(row_list, list(row_img))}
+#     fig_count = fig_count + 1
+#     cc_mod = cc_mod + 1
+#   } # tr_model
+# } # class_i
+# 
+# # assemble columns for each row
+# list_final = c()
+# for (i in 1:length(row_list)){
+#   eval(parse(text=paste0("list_final = c(list_final, image_append(c(", paste0("image_read('", row_list[[i]], "')", collapse = ","), "), stack = F))")))
+# }
+# 
+# # assemble rows
+# eval(parse(text=paste0('final_plot = image_append(c(', paste0('list_final[[', 1:length(list_final), ']]', collapse = ','), '), stack = T)')))
+# 
+# # add title
+# title_lab = image_graph(res = 100, width = image_info(final_plot)$width, height = 300, clip = F)
+# plot(
+#   ggplot(mtcars, aes(x = wt, y = mpg)) + geom_blank() + xlim(0, 1) + ylim(0, 6) +
+#     annotate(geom = "text", x = 0, y = 4.5, label = "SHAP scatter plot", cex = 40, hjust = 0, vjust = 0.5) +
+#     # annotate(geom = "text", x = 0, y = 1.5, label = "Vertical lines represent probability to class thresholds", cex = 25, hjust = 0, vjust = 0.5) +
+#     theme_bw() +
+#     theme( panel.grid.major = element_blank(), panel.grid.minor = element_blank(), panel.border = element_blank(),
+#            axis.title=element_blank(), axis.text=element_blank(), axis.ticks=element_blank(),
+#            plot.margin=unit(c(0,0.4,0,0.4),"cm"))
+# )
+# dev.off()
+# 
+# final_plot = image_append(c(title_lab, final_plot), stack = T)
+# 
+# png('./Paper/Latex_Table_Figure/07new_SHAP_Scatter_ALL.png', width = 6*4, height = 6*3, units = 'in', res=300)
+# par(mar=c(0,0,0,0))
+# par(oma=c(0,0,0,0))
+# plot(final_plot)
+# dev.off()
+# 
+# oo = file.remove(row_list %>% unlist())
 
 
 
